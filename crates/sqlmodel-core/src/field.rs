@@ -29,10 +29,10 @@ pub struct FieldInfo {
 
 impl FieldInfo {
     /// Create a new field info with minimal required data.
-    pub const fn new(name: &'static str, sql_type: SqlType) -> Self {
+    pub const fn new(name: &'static str, column_name: &'static str, sql_type: SqlType) -> Self {
         Self {
             name,
-            column_name: name,
+            column_name,
             sql_type,
             nullable: false,
             primary_key: false,
@@ -50,27 +50,27 @@ impl FieldInfo {
         self
     }
 
-    /// Mark as nullable.
-    pub const fn nullable(mut self) -> Self {
-        self.nullable = true;
+    /// Set nullable flag.
+    pub const fn nullable(mut self, value: bool) -> Self {
+        self.nullable = value;
         self
     }
 
-    /// Mark as primary key.
-    pub const fn primary_key(mut self) -> Self {
-        self.primary_key = true;
+    /// Set primary key flag.
+    pub const fn primary_key(mut self, value: bool) -> Self {
+        self.primary_key = value;
         self
     }
 
-    /// Mark as auto-increment.
-    pub const fn auto_increment(mut self) -> Self {
-        self.auto_increment = true;
+    /// Set auto-increment flag.
+    pub const fn auto_increment(mut self, value: bool) -> Self {
+        self.auto_increment = value;
         self
     }
 
-    /// Mark as unique.
-    pub const fn unique(mut self) -> Self {
-        self.unique = true;
+    /// Set unique flag.
+    pub const fn unique(mut self, value: bool) -> Self {
+        self.unique = value;
         self
     }
 
@@ -80,15 +80,33 @@ impl FieldInfo {
         self
     }
 
+    /// Set default value from optional.
+    pub const fn default_opt(mut self, expr: Option<&'static str>) -> Self {
+        self.default = expr;
+        self
+    }
+
     /// Set foreign key reference.
     pub const fn foreign_key(mut self, reference: &'static str) -> Self {
         self.foreign_key = Some(reference);
         self
     }
 
+    /// Set foreign key reference from optional.
+    pub const fn foreign_key_opt(mut self, reference: Option<&'static str>) -> Self {
+        self.foreign_key = reference;
+        self
+    }
+
     /// Set index name.
     pub const fn index(mut self, name: &'static str) -> Self {
         self.index = Some(name);
+        self
+    }
+
+    /// Set index name from optional.
+    pub const fn index_opt(mut self, name: Option<&'static str>) -> Self {
+        self.index = name;
         self
     }
 }

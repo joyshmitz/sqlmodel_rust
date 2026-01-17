@@ -7,6 +7,11 @@
 
 use proc_macro::TokenStream;
 
+mod infer;
+mod parse;
+
+use parse::{parse_model, ModelDef};
+
 /// Derive macro for the `Model` trait.
 ///
 /// This macro generates implementations for:
@@ -53,39 +58,283 @@ use proc_macro::TokenStream;
 /// ```
 #[proc_macro_derive(Model, attributes(sqlmodel))]
 pub fn derive_model(input: TokenStream) -> TokenStream {
-    // TODO: Implement Model derive macro
-    // For now, return empty implementation
     let input = syn::parse_macro_input!(input as syn::DeriveInput);
-    let name = &input.ident;
 
-    let expanded = quote::quote! {
-        impl sqlmodel_core::Model for #name {
-            const TABLE_NAME: &'static str = stringify!(#name);
-            const PRIMARY_KEY: &'static [&'static str] = &["id"];
+    // Parse the struct and its attributes
+    let model = match parse_model(&input) {
+        Ok(m) => m,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
+    // Generate the Model implementation
+    generate_model_impl(&model).into()
+}
+
+/// Generate the Model trait implementation from parsed model definition.
+fn generate_model_impl(model: &ModelDef) -> proc_macro2::TokenStream {
+    let name = &model.name;
+    let table_name = &model.table_name;
+    let (impl_generics, ty_generics, where_clause) = model.generics.split_for_impl();
+
+    // Collect primary key field names
+    let pk_fields: Vec<&str> = model
+        .primary_key_fields()
+        .iter()
+        .map(|f| f.column_name.as_str())
+        .collect();
+    let pk_field_names: Vec<_> = pk_fields.clone();
+
+    // If no explicit primary key, default to "id" if present
+    let pk_slice = if pk_field_names.is_empty() {
+        quote::quote! { &["id"] }
+    } else {
+        quote::quote! { &[#(#pk_field_names),*] }
+    };
+
+    // Generate static FieldInfo array for fields()
+    let field_infos = generate_field_infos(model);
+
+    // Generate to_row implementation
+    let to_row_body = generate_to_row(model);
+
+    // Generate from_row implementation
+    let from_row_body = generate_from_row(model);
+
+    // Generate primary_key_value implementation
+    let pk_value_body = generate_primary_key_value(model);
+
+    // Generate is_new implementation
+    let is_new_body = generate_is_new(model);
+
+    quote::quote! {
+        impl #impl_generics sqlmodel_core::Model for #name #ty_generics #where_clause {
+            const TABLE_NAME: &'static str = #table_name;
+            const PRIMARY_KEY: &'static [&'static str] = #pk_slice;
 
             fn fields() -> &'static [sqlmodel_core::FieldInfo] {
-                &[] // TODO: Generate from struct fields
+                static FIELDS: &[sqlmodel_core::FieldInfo] = &[
+                    #field_infos
+                ];
+                FIELDS
             }
 
             fn to_row(&self) -> Vec<(&'static str, sqlmodel_core::Value)> {
-                vec![] // TODO: Generate from struct fields
+                #to_row_body
             }
 
-            fn from_row(_row: &sqlmodel_core::Row) -> sqlmodel_core::Result<Self> {
-                todo!("Model::from_row not yet implemented")
+            fn from_row(row: &sqlmodel_core::Row) -> sqlmodel_core::Result<Self> {
+                #from_row_body
             }
 
             fn primary_key_value(&self) -> Vec<sqlmodel_core::Value> {
-                vec![] // TODO: Generate from primary key fields
+                #pk_value_body
             }
 
             fn is_new(&self) -> bool {
-                true // TODO: Check if primary key is None/default
+                #is_new_body
             }
         }
-    };
+    }
+}
 
-    TokenStream::from(expanded)
+/// Generate the static FieldInfo array contents.
+fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
+    let mut field_tokens = Vec::new();
+
+    for field in model.select_fields() {
+        let field_name = field.name.to_string();
+        let column_name = &field.column_name;
+        let nullable = field.nullable;
+        let primary_key = field.primary_key;
+        let auto_increment = field.auto_increment;
+        let unique = field.unique;
+
+        // Determine SQL type: use explicit attribute or infer from Rust type
+        let sql_type_token = if let Some(ref sql_type_str) = field.sql_type {
+            // Parse the explicit SQL type attribute string
+            infer::parse_sql_type_attr(sql_type_str)
+        } else {
+            // Infer from Rust type (handles primitives, Option<T>, common library types)
+            infer::infer_sql_type(&field.ty)
+        };
+
+        // Default value
+        let default_token = if let Some(d) = &field.default {
+            quote::quote! { Some(#d) }
+        } else {
+            quote::quote! { None }
+        };
+
+        // Foreign key
+        let fk_token = if let Some(fk) = &field.foreign_key {
+            quote::quote! { Some(#fk) }
+        } else {
+            quote::quote! { None }
+        };
+
+        // Index
+        let index_token = if let Some(idx) = &field.index {
+            quote::quote! { Some(#idx) }
+        } else {
+            quote::quote! { None }
+        };
+
+        field_tokens.push(quote::quote! {
+            sqlmodel_core::FieldInfo::new(#field_name, #column_name, #sql_type_token)
+                .nullable(#nullable)
+                .primary_key(#primary_key)
+                .auto_increment(#auto_increment)
+                .unique(#unique)
+                .default_opt(#default_token)
+                .foreign_key_opt(#fk_token)
+                .index_opt(#index_token)
+        });
+    }
+
+    quote::quote! { #(#field_tokens),* }
+}
+
+/// Generate the to_row method body.
+fn generate_to_row(model: &ModelDef) -> proc_macro2::TokenStream {
+    let mut conversions = Vec::new();
+
+    for field in model.select_fields() {
+        let field_name = &field.name;
+        let column_name = &field.column_name;
+
+        // Convert field to Value
+        if parse::is_option_type(&field.ty) {
+            conversions.push(quote::quote! {
+                (#column_name, match &self.#field_name {
+                    Some(v) => sqlmodel_core::Value::from(v.clone()),
+                    None => sqlmodel_core::Value::Null,
+                })
+            });
+        } else {
+            conversions.push(quote::quote! {
+                (#column_name, sqlmodel_core::Value::from(self.#field_name.clone()))
+            });
+        }
+    }
+
+    quote::quote! {
+        vec![#(#conversions),*]
+    }
+}
+
+/// Generate the from_row method body.
+fn generate_from_row(model: &ModelDef) -> proc_macro2::TokenStream {
+    let name = &model.name;
+    let mut field_extractions = Vec::new();
+
+    for field in model.select_fields() {
+        let field_name = &field.name;
+        let column_name = &field.column_name;
+
+        if parse::is_option_type(&field.ty) {
+            // For Option<T> fields, handle NULL gracefully
+            field_extractions.push(quote::quote! {
+                #field_name: row.get_named(#column_name).ok()
+            });
+        } else {
+            // For required fields, propagate errors
+            field_extractions.push(quote::quote! {
+                #field_name: row.get_named(#column_name)?
+            });
+        }
+    }
+
+    // Handle skipped fields with Default
+    let skipped_fields: Vec<_> = model
+        .fields
+        .iter()
+        .filter(|f| f.skip)
+        .map(|f| {
+            let field_name = &f.name;
+            quote::quote! { #field_name: Default::default() }
+        })
+        .collect();
+
+    quote::quote! {
+        Ok(#name {
+            #(#field_extractions,)*
+            #(#skipped_fields,)*
+        })
+    }
+}
+
+/// Generate the primary_key_value method body.
+fn generate_primary_key_value(model: &ModelDef) -> proc_macro2::TokenStream {
+    let pk_fields = model.primary_key_fields();
+
+    if pk_fields.is_empty() {
+        // Try to use "id" field if it exists
+        let id_field = model.fields.iter().find(|f| f.name == "id");
+        if let Some(field) = id_field {
+            let field_name = &field.name;
+            if parse::is_option_type(&field.ty) {
+                return quote::quote! {
+                    match &self.#field_name {
+                        Some(v) => vec![sqlmodel_core::Value::from(v.clone())],
+                        None => vec![sqlmodel_core::Value::Null],
+                    }
+                };
+            }
+            return quote::quote! {
+                vec![sqlmodel_core::Value::from(self.#field_name.clone())]
+            };
+        }
+        return quote::quote! { vec![] };
+    }
+
+    let mut value_exprs = Vec::new();
+    for field in pk_fields {
+        let field_name = &field.name;
+        if parse::is_option_type(&field.ty) {
+            value_exprs.push(quote::quote! {
+                match &self.#field_name {
+                    Some(v) => sqlmodel_core::Value::from(v.clone()),
+                    None => sqlmodel_core::Value::Null,
+                }
+            });
+        } else {
+            value_exprs.push(quote::quote! {
+                sqlmodel_core::Value::from(self.#field_name.clone())
+            });
+        }
+    }
+
+    quote::quote! {
+        vec![#(#value_exprs),*]
+    }
+}
+
+/// Generate the is_new method body.
+fn generate_is_new(model: &ModelDef) -> proc_macro2::TokenStream {
+    let pk_fields = model.primary_key_fields();
+
+    // If there's an auto_increment primary key field that is Option<T>,
+    // check if it's None
+    for field in &pk_fields {
+        if field.auto_increment && parse::is_option_type(&field.ty) {
+            let field_name = &field.name;
+            return quote::quote! {
+                self.#field_name.is_none()
+            };
+        }
+    }
+
+    // Otherwise, try "id" field if it exists and is Option<T>
+    if let Some(id_field) = model.fields.iter().find(|f| f.name == "id") {
+        if parse::is_option_type(&id_field.ty) {
+            return quote::quote! {
+                self.id.is_none()
+            };
+        }
+    }
+
+    // Default: cannot determine, always return true
+    quote::quote! { true }
 }
 
 /// Derive macro for field validation.
