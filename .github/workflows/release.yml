@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: sqlmodel_rust-linux-x64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: sqlmodel_rust-linux-arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact_name: sqlmodel_rust-macos-x64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_name: sqlmodel_rust-macos-arm64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: sqlmodel_rust-windows-x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Clone asupersync dependency (sibling directory)
+      - name: Clone asupersync dependency (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          cd ..
+          git clone https://github.com/Dicklesworthstone/asupersync.git asupersync || true
+
+      - name: Clone asupersync dependency (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cd ..
+          git clone https://github.com/Dicklesworthstone/asupersync.git asupersync 2>$null
+          if (-not $?) { Write-Host "asupersync already exists or clone failed" }
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release
+        run: cargo build --workspace --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+
+      - name: Prepare artifact (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          # Create tarball of all library artifacts
+          tar -czvf "dist/${{ matrix.artifact_name }}.tar.gz" -C "target/${{ matrix.target }}/release" \
+            --exclude='*.d' \
+            --exclude='build' \
+            --exclude='deps' \
+            --exclude='examples' \
+            --exclude='incremental' \
+            --exclude='.fingerprint' \
+            --exclude='.cargo-lock' \
+            . 2>/dev/null || true
+
+      - name: Prepare artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist
+          # Create zip of release artifacts
+          $releaseDir = "target/${{ matrix.target }}/release"
+          $files = Get-ChildItem -Path $releaseDir -File | Where-Object { $_.Extension -notmatch '\.d$' }
+          if ($files) {
+            Compress-Archive -Path $files.FullName -DestinationPath "dist/${{ matrix.artifact_name }}.zip" -Force
+          }
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/*
+          if-no-files-found: warn
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release assets
+        run: |
+          mkdir -p release
+          # Move all artifacts to release directory
+          find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} release/ \;
+          ls -la release/
+
+      - name: Generate checksums
+        run: |
+          cd release
+          if ls * 1> /dev/null 2>&1; then
+            sha256sum * > SHA256SUMS.txt
+            cat SHA256SUMS.txt
+          else
+            echo "No release files found"
+          fi
+
+      - name: Extract version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Release ${{ steps.version.outputs.VERSION }}
+          draft: false
+          prerelease: ${{ contains(github.ref, '-') }}
+          generate_release_notes: true
+          files: |
+            release/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
