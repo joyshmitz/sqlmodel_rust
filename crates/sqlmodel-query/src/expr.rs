@@ -1201,16 +1201,16 @@ mod tests {
         assert_eq!(bit_and, "\"flags\" & $1");
 
         params.clear();
-        let bit_or = Expr::col("flags")
+        let or_sql = Expr::col("flags")
             .bit_or(Expr::lit(0x01))
             .build(&mut params, 0);
-        assert_eq!(bit_or, "\"flags\" | $1");
+        assert_eq!(or_sql, "\"flags\" | $1");
 
         params.clear();
-        let bit_xor = Expr::col("flags")
+        let xor_sql = Expr::col("flags")
             .bit_xor(Expr::lit(0x0F))
             .build(&mut params, 0);
-        assert_eq!(bit_xor, "\"flags\" ^ $1");
+        assert_eq!(xor_sql, "\"flags\" ^ $1");
 
         let bit_not = Expr::col("flags").bit_not().build(&mut params, 0);
         assert_eq!(bit_not, "~\"flags\"");

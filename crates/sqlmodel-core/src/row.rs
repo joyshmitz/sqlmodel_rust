@@ -125,28 +125,32 @@ impl Row {
     }
 
     /// Get a typed value by column index.
+    #[allow(clippy::result_large_err)]
     pub fn get_as<T: FromValue>(&self, index: usize) -> Result<T> {
         let value = self.get(index).ok_or_else(|| {
             Error::Type(TypeError {
-                expected: std::any::type_name::<T>().to_string(),
-                found: format!(
+                expected: std::any::type_name::<T>(),
+                actual: format!(
                     "index {} out of bounds (row has {} columns)",
                     index,
                     self.len()
                 ),
                 column: None,
+                rust_type: None,
             })
         })?;
         T::from_value(value)
     }
 
     /// Get a typed value by column name.
+    #[allow(clippy::result_large_err)]
     pub fn get_named<T: FromValue>(&self, name: &str) -> Result<T> {
         let value = self.get_by_name(name).ok_or_else(|| {
             Error::Type(TypeError {
-                expected: std::any::type_name::<T>().to_string(),
-                found: format!("column '{}' not found", name),
+                expected: std::any::type_name::<T>(),
+                actual: format!("column '{}' not found", name),
                 column: Some(name.to_string()),
+                rust_type: None,
             })
         })?;
         T::from_value(value).map_err(|e| match e {
@@ -181,6 +185,7 @@ impl Row {
 /// Trait for converting from a `Value` to a typed value.
 pub trait FromValue: Sized {
     /// Convert from a Value, returning an error if the conversion fails.
+    #[allow(clippy::result_large_err)]
     fn from_value(value: &Value) -> Result<Self>;
 }
 
@@ -188,9 +193,10 @@ impl FromValue for bool {
     fn from_value(value: &Value) -> Result<Self> {
         value.as_bool().ok_or_else(|| {
             Error::Type(TypeError {
-                expected: "bool".to_string(),
-                found: value.type_name().to_string(),
+                expected: "bool",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })
         })
     }
@@ -202,9 +208,10 @@ impl FromValue for i8 {
             Value::TinyInt(v) => Ok(*v),
             Value::Bool(v) => Ok(if *v { 1 } else { 0 }),
             _ => Err(Error::Type(TypeError {
-                expected: "i8".to_string(),
-                found: value.type_name().to_string(),
+                expected: "i8",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -217,9 +224,10 @@ impl FromValue for i16 {
             Value::SmallInt(v) => Ok(*v),
             Value::Bool(v) => Ok(if *v { 1 } else { 0 }),
             _ => Err(Error::Type(TypeError {
-                expected: "i16".to_string(),
-                found: value.type_name().to_string(),
+                expected: "i16",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -233,9 +241,10 @@ impl FromValue for i32 {
             Value::Int(v) => Ok(*v),
             Value::Bool(v) => Ok(if *v { 1 } else { 0 }),
             _ => Err(Error::Type(TypeError {
-                expected: "i32".to_string(),
-                found: value.type_name().to_string(),
+                expected: "i32",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -245,9 +254,10 @@ impl FromValue for i64 {
     fn from_value(value: &Value) -> Result<Self> {
         value.as_i64().ok_or_else(|| {
             Error::Type(TypeError {
-                expected: "i64".to_string(),
-                found: value.type_name().to_string(),
+                expected: "i64",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })
         })
     }
@@ -264,9 +274,10 @@ impl FromValue for f32 {
             Value::Int(v) => Ok(*v as f32),
             Value::BigInt(v) => Ok(*v as f32),
             _ => Err(Error::Type(TypeError {
-                expected: "f32".to_string(),
-                found: value.type_name().to_string(),
+                expected: "f32",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -276,9 +287,10 @@ impl FromValue for f64 {
     fn from_value(value: &Value) -> Result<Self> {
         value.as_f64().ok_or_else(|| {
             Error::Type(TypeError {
-                expected: "f64".to_string(),
-                found: value.type_name().to_string(),
+                expected: "f64",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })
         })
     }
@@ -290,9 +302,10 @@ impl FromValue for String {
             Value::Text(s) => Ok(s.clone()),
             Value::Decimal(s) => Ok(s.clone()),
             _ => Err(Error::Type(TypeError {
-                expected: "String".to_string(),
-                found: value.type_name().to_string(),
+                expected: "String",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -304,9 +317,10 @@ impl FromValue for Vec<u8> {
             Value::Bytes(b) => Ok(b.clone()),
             Value::Text(s) => Ok(s.as_bytes().to_vec()),
             _ => Err(Error::Type(TypeError {
-                expected: "Vec<u8>".to_string(),
-                found: value.type_name().to_string(),
+                expected: "Vec<u8>",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -334,15 +348,17 @@ impl FromValue for serde_json::Value {
             Value::Json(v) => Ok(v.clone()),
             Value::Text(s) => serde_json::from_str(s).map_err(|e| {
                 Error::Type(TypeError {
-                    expected: "valid JSON".to_string(),
-                    found: format!("invalid JSON: {}", e),
+                    expected: "valid JSON",
+                    actual: format!("invalid JSON: {}", e),
                     column: None,
+                    rust_type: None,
                 })
             }),
             _ => Err(Error::Type(TypeError {
-                expected: "JSON".to_string(),
-                found: value.type_name().to_string(),
+                expected: "JSON",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -358,9 +374,10 @@ impl FromValue for [u8; 16] {
                 Ok(arr)
             }
             _ => Err(Error::Type(TypeError {
-                expected: "UUID (16 bytes)".to_string(),
-                found: value.type_name().to_string(),
+                expected: "UUID (16 bytes)",
+                actual: value.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -518,9 +535,9 @@ mod tests {
     #[test]
     fn test_from_value_all_types() {
         // bool
-        assert_eq!(bool::from_value(&Value::Bool(true)).unwrap(), true);
-        assert_eq!(bool::from_value(&Value::Int(1)).unwrap(), true);
-        assert_eq!(bool::from_value(&Value::Int(0)).unwrap(), false);
+        assert!(bool::from_value(&Value::Bool(true)).unwrap());
+        assert!(bool::from_value(&Value::Int(1)).unwrap());
+        assert!(!bool::from_value(&Value::Int(0)).unwrap());
 
         // i8
         assert_eq!(i8::from_value(&Value::TinyInt(42)).unwrap(), 42);
@@ -536,10 +553,14 @@ mod tests {
         assert_eq!(i64::from_value(&Value::BigInt(10000)).unwrap(), 10000);
 
         // f32
-        assert!((f32::from_value(&Value::Float(3.14)).unwrap() - 3.14).abs() < 0.001);
+        let pi_f32 = std::f32::consts::PI;
+        let from_float = f32::from_value(&Value::Float(pi_f32)).unwrap();
+        assert!((from_float - pi_f32).abs() < 1e-6);
 
         // f64
-        assert!((f64::from_value(&Value::Double(3.14159)).unwrap() - 3.14159).abs() < 0.00001);
+        let pi_f64 = std::f64::consts::PI;
+        let from_double = f64::from_value(&Value::Double(pi_f64)).unwrap();
+        assert!((from_double - pi_f64).abs() < 1e-12);
 
         // String
         assert_eq!(
@@ -568,7 +589,7 @@ mod tests {
         // Test with many columns
         let n = 100;
         let names: Vec<_> = (0..n).map(|i| format!("col_{}", i)).collect();
-        let values: Vec<_> = (0..n).map(|i| Value::Int(i)).collect();
+        let values: Vec<_> = (0..n).map(Value::Int).collect();
         let row = Row::new(names, values);
 
         assert_eq!(row.len(), n as usize);

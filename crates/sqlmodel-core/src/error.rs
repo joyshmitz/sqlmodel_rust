@@ -13,14 +13,22 @@ pub enum Error {
     Type(TypeError),
     /// Transaction errors
     Transaction(TransactionError),
+    /// Protocol errors (wire-level)
+    Protocol(ProtocolError),
     /// Pool errors
     Pool(PoolError),
     /// Schema/migration errors
     Schema(SchemaError),
-    /// Serialization/deserialization errors
-    Serde(String),
+    /// Configuration errors
+    Config(ConfigError),
+    /// I/O errors
+    Io(std::io::Error),
+    /// Operation timed out
+    Timeout,
     /// Operation was cancelled via asupersync
     Cancelled,
+    /// Serialization/deserialization errors
+    Serde(String),
     /// Custom error with message
     Custom(String),
 }
@@ -29,30 +37,40 @@ pub enum Error {
 pub struct ConnectionError {
     pub kind: ConnectionErrorKind,
     pub message: String,
+    pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum ConnectionErrorKind {
     /// Failed to establish connection
     Connect,
-    /// Connection was closed unexpectedly
-    Closed,
-    /// Connection timeout
-    Timeout,
     /// Authentication failed
-    Auth,
-    /// SSL/TLS error
-    Tls,
+    Authentication,
+    /// Connection lost during operation
+    Disconnected,
+    /// SSL/TLS negotiation failed
+    Ssl,
+    /// DNS resolution failed
+    DnsResolution,
+    /// Connection refused
+    Refused,
+    /// Connection pool exhausted
+    PoolExhausted,
 }
 
 #[derive(Debug)]
 pub struct QueryError {
     pub kind: QueryErrorKind,
-    pub message: String,
     pub sql: Option<String>,
+    pub sqlstate: Option<String>,
+    pub message: String,
+    pub detail: Option<String>,
+    pub hint: Option<String>,
+    pub position: Option<usize>,
+    pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum QueryErrorKind {
     /// Syntax error in SQL
     Syntax,
@@ -62,17 +80,26 @@ pub enum QueryErrorKind {
     NotFound,
     /// Permission denied
     Permission,
-    /// Query timeout
+    /// Data too large for column
+    DataTruncation,
+    /// Deadlock detected
+    Deadlock,
+    /// Serialization failure (retry may succeed)
+    Serialization,
+    /// Statement timeout
     Timeout,
-    /// Other execution error
-    Execution,
+    /// Cancelled
+    Cancelled,
+    /// Other database error
+    Database,
 }
 
 #[derive(Debug)]
 pub struct TypeError {
-    pub expected: String,
-    pub found: String,
+    pub expected: &'static str,
+    pub actual: String,
     pub column: Option<String>,
+    pub rust_type: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -81,29 +108,33 @@ pub struct TransactionError {
     pub message: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum TransactionErrorKind {
-    /// Transaction already started
-    AlreadyStarted,
-    /// No active transaction
-    NoTransaction,
-    /// Commit failed
-    CommitFailed,
-    /// Rollback failed
-    RollbackFailed,
-    /// Deadlock detected
-    Deadlock,
-    /// Serialization failure
-    Serialization,
+    /// Already committed
+    AlreadyCommitted,
+    /// Already rolled back
+    AlreadyRolledBack,
+    /// Savepoint not found
+    SavepointNotFound,
+    /// Nested transaction not supported
+    NestedNotSupported,
+}
+
+#[derive(Debug)]
+pub struct ProtocolError {
+    pub message: String,
+    pub raw_data: Option<Vec<u8>>,
+    pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
 #[derive(Debug)]
 pub struct PoolError {
     pub kind: PoolErrorKind,
     pub message: String,
+    pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum PoolErrorKind {
     /// Pool exhausted (no available connections)
     Exhausted,
@@ -119,9 +150,10 @@ pub enum PoolErrorKind {
 pub struct SchemaError {
     pub kind: SchemaErrorKind,
     pub message: String,
+    pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub enum SchemaErrorKind {
     /// Table already exists
     TableExists,
@@ -137,13 +169,80 @@ pub enum SchemaErrorKind {
     Migration,
 }
 
+#[derive(Debug)]
+pub struct ConfigError {
+    pub message: String,
+    pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
+}
+
+impl Error {
+    /// Is this a retryable error (deadlock, serialization, pool exhausted, timeouts)?
+    pub fn is_retryable(&self) -> bool {
+        match self {
+            Error::Query(q) => matches!(
+                q.kind,
+                QueryErrorKind::Deadlock | QueryErrorKind::Serialization | QueryErrorKind::Timeout
+            ),
+            Error::Pool(p) => matches!(p.kind, PoolErrorKind::Exhausted | PoolErrorKind::Timeout),
+            Error::Connection(c) => matches!(c.kind, ConnectionErrorKind::PoolExhausted),
+            Error::Timeout => true,
+            _ => false,
+        }
+    }
+
+    /// Is this a connection error that likely requires reconnection?
+    pub fn is_connection_error(&self) -> bool {
+        match self {
+            Error::Connection(c) => matches!(
+                c.kind,
+                ConnectionErrorKind::Connect
+                    | ConnectionErrorKind::Authentication
+                    | ConnectionErrorKind::Disconnected
+                    | ConnectionErrorKind::Ssl
+                    | ConnectionErrorKind::DnsResolution
+                    | ConnectionErrorKind::Refused
+            ),
+            Error::Protocol(_) | Error::Io(_) => true,
+            _ => false,
+        }
+    }
+
+    /// Get SQLSTATE if available (e.g., "23505" for unique violation)
+    pub fn sqlstate(&self) -> Option<&str> {
+        match self {
+            Error::Query(q) => q.sqlstate.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Get the SQL that caused this error, if available
+    pub fn sql(&self) -> Option<&str> {
+        match self {
+            Error::Query(q) => q.sql.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+impl QueryError {
+    /// Is this a unique constraint violation?
+    pub fn is_unique_violation(&self) -> bool {
+        self.sqlstate.as_deref() == Some("23505")
+    }
+
+    /// Is this a foreign key violation?
+    pub fn is_foreign_key_violation(&self) -> bool {
+        self.sqlstate.as_deref() == Some("23503")
+    }
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Error::Connection(e) => write!(f, "Connection error: {}", e.message),
             Error::Query(e) => {
-                if let Some(sql) = &e.sql {
-                    write!(f, "Query error: {} (SQL: {})", e.message, sql)
+                if let Some(sqlstate) = &e.sqlstate {
+                    write!(f, "Query error (SQLSTATE {}): {}", sqlstate, e.message)
                 } else {
                     write!(f, "Query error: {}", e.message)
                 }
@@ -153,23 +252,235 @@ impl fmt::Display for Error {
                     write!(
                         f,
                         "Type error in column '{}': expected {}, found {}",
-                        col, e.expected, e.found
+                        col, e.expected, e.actual
                     )
                 } else {
-                    write!(f, "Type error: expected {}, found {}", e.expected, e.found)
+                    write!(f, "Type error: expected {}, found {}", e.expected, e.actual)
                 }
             }
             Error::Transaction(e) => write!(f, "Transaction error: {}", e.message),
+            Error::Protocol(e) => write!(f, "Protocol error: {}", e.message),
             Error::Pool(e) => write!(f, "Pool error: {}", e.message),
             Error::Schema(e) => write!(f, "Schema error: {}", e.message),
-            Error::Serde(msg) => write!(f, "Serialization error: {}", msg),
+            Error::Config(e) => write!(f, "Configuration error: {}", e.message),
+            Error::Io(e) => write!(f, "I/O error: {}", e),
+            Error::Timeout => write!(f, "Operation timed out"),
             Error::Cancelled => write!(f, "Operation cancelled"),
+            Error::Serde(msg) => write!(f, "Serialization error: {}", msg),
             Error::Custom(msg) => write!(f, "{}", msg),
         }
     }
 }
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Error::Connection(e) => e
+                .source
+                .as_deref()
+                .map(|err| err as &(dyn std::error::Error + 'static)),
+            Error::Query(e) => e
+                .source
+                .as_deref()
+                .map(|err| err as &(dyn std::error::Error + 'static)),
+            Error::Protocol(e) => e
+                .source
+                .as_deref()
+                .map(|err| err as &(dyn std::error::Error + 'static)),
+            Error::Pool(e) => e
+                .source
+                .as_deref()
+                .map(|err| err as &(dyn std::error::Error + 'static)),
+            Error::Schema(e) => e
+                .source
+                .as_deref()
+                .map(|err| err as &(dyn std::error::Error + 'static)),
+            Error::Config(e) => e
+                .source
+                .as_deref()
+                .map(|err| err as &(dyn std::error::Error + 'static)),
+            Error::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for ConnectionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl fmt::Display for QueryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(sqlstate) = &self.sqlstate {
+            write!(f, "{} (SQLSTATE {})", self.message, sqlstate)
+        } else {
+            write!(f, "{}", self.message)
+        }
+    }
+}
+
+impl fmt::Display for TypeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(col) = &self.column {
+            write!(
+                f,
+                "expected {} for column '{}', found {}",
+                self.expected, col, self.actual
+            )
+        } else {
+            write!(f, "expected {}, found {}", self.expected, self.actual)
+        }
+    }
+}
+
+impl fmt::Display for TransactionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl fmt::Display for ProtocolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl fmt::Display for PoolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl fmt::Display for SchemaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.message)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error::Io(err)
+    }
+}
+
+impl From<ConnectionError> for Error {
+    fn from(err: ConnectionError) -> Self {
+        Error::Connection(err)
+    }
+}
+
+impl From<QueryError> for Error {
+    fn from(err: QueryError) -> Self {
+        Error::Query(err)
+    }
+}
+
+impl From<TypeError> for Error {
+    fn from(err: TypeError) -> Self {
+        Error::Type(err)
+    }
+}
+
+impl From<TransactionError> for Error {
+    fn from(err: TransactionError) -> Self {
+        Error::Transaction(err)
+    }
+}
+
+impl From<ProtocolError> for Error {
+    fn from(err: ProtocolError) -> Self {
+        Error::Protocol(err)
+    }
+}
+
+impl From<PoolError> for Error {
+    fn from(err: PoolError) -> Self {
+        Error::Pool(err)
+    }
+}
+
+impl From<SchemaError> for Error {
+    fn from(err: SchemaError) -> Self {
+        Error::Schema(err)
+    }
+}
+
+impl From<ConfigError> for Error {
+    fn from(err: ConfigError) -> Self {
+        Error::Config(err)
+    }
+}
 
 /// Result type alias for SQLModel operations.
 pub type Result<T> = std::result::Result<T, Error>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlstate_helpers() {
+        let query = QueryError {
+            kind: QueryErrorKind::Constraint,
+            sql: Some("SELECT 1".to_string()),
+            sqlstate: Some("23505".to_string()),
+            message: "unique violation".to_string(),
+            detail: None,
+            hint: None,
+            position: None,
+            source: None,
+        };
+
+        assert!(query.is_unique_violation());
+        assert!(!query.is_foreign_key_violation());
+
+        let err = Error::Query(query);
+        assert_eq!(err.sqlstate(), Some("23505"));
+        assert_eq!(err.sql(), Some("SELECT 1"));
+    }
+
+    #[test]
+    fn retryable_and_connection_flags() {
+        let retryable_query = Error::Query(QueryError {
+            kind: QueryErrorKind::Deadlock,
+            sql: None,
+            sqlstate: None,
+            message: "deadlock detected".to_string(),
+            detail: None,
+            hint: None,
+            position: None,
+            source: None,
+        });
+
+        let pool_exhausted = Error::Pool(PoolError {
+            kind: PoolErrorKind::Exhausted,
+            message: "pool exhausted".to_string(),
+            source: None,
+        });
+
+        let conn_exhausted = Error::Connection(ConnectionError {
+            kind: ConnectionErrorKind::PoolExhausted,
+            message: "pool exhausted".to_string(),
+            source: None,
+        });
+
+        assert!(retryable_query.is_retryable());
+        assert!(pool_exhausted.is_retryable());
+        assert!(conn_exhausted.is_retryable());
+
+        let conn_error = Error::Connection(ConnectionError {
+            kind: ConnectionErrorKind::Disconnected,
+            message: "lost connection".to_string(),
+            source: None,
+        });
+        assert!(conn_error.is_connection_error());
+    }
+}

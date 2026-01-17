@@ -277,9 +277,10 @@ impl TryFrom<Value> for bool {
             Value::Int(v) => Ok(v != 0),
             Value::BigInt(v) => Ok(v != 0),
             other => Err(Error::Type(TypeError {
-                expected: "bool".to_string(),
-                found: other.type_name().to_string(),
+                expected: "bool",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -293,9 +294,10 @@ impl TryFrom<Value> for i8 {
             Value::TinyInt(v) => Ok(v),
             Value::Bool(v) => Ok(if v { 1 } else { 0 }),
             other => Err(Error::Type(TypeError {
-                expected: "i8".to_string(),
-                found: other.type_name().to_string(),
+                expected: "i8",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -310,9 +312,10 @@ impl TryFrom<Value> for i16 {
             Value::SmallInt(v) => Ok(v),
             Value::Bool(v) => Ok(if v { 1 } else { 0 }),
             other => Err(Error::Type(TypeError {
-                expected: "i16".to_string(),
-                found: other.type_name().to_string(),
+                expected: "i16",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -328,9 +331,10 @@ impl TryFrom<Value> for i32 {
             Value::Int(v) => Ok(v),
             Value::Bool(v) => Ok(if v { 1 } else { 0 }),
             other => Err(Error::Type(TypeError {
-                expected: "i32".to_string(),
-                found: other.type_name().to_string(),
+                expected: "i32",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -347,9 +351,10 @@ impl TryFrom<Value> for i64 {
             Value::BigInt(v) => Ok(v),
             Value::Bool(v) => Ok(if v { 1 } else { 0 }),
             other => Err(Error::Type(TypeError {
-                expected: "i64".to_string(),
-                found: other.type_name().to_string(),
+                expected: "i64",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -369,9 +374,10 @@ impl TryFrom<Value> for f32 {
             Value::Int(v) => Ok(v as f32),
             Value::BigInt(v) => Ok(v as f32),
             other => Err(Error::Type(TypeError {
-                expected: "f32".to_string(),
-                found: other.type_name().to_string(),
+                expected: "f32",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -389,9 +395,10 @@ impl TryFrom<Value> for f64 {
             Value::Int(v) => Ok(f64::from(v)),
             Value::BigInt(v) => Ok(v as f64),
             other => Err(Error::Type(TypeError {
-                expected: "f64".to_string(),
-                found: other.type_name().to_string(),
+                expected: "f64",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -405,9 +412,10 @@ impl TryFrom<Value> for String {
             Value::Text(v) => Ok(v),
             Value::Decimal(v) => Ok(v),
             other => Err(Error::Type(TypeError {
-                expected: "String".to_string(),
-                found: other.type_name().to_string(),
+                expected: "String",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -421,9 +429,10 @@ impl TryFrom<Value> for Vec<u8> {
             Value::Bytes(v) => Ok(v),
             Value::Text(v) => Ok(v.into_bytes()),
             other => Err(Error::Type(TypeError {
-                expected: "Vec<u8>".to_string(),
-                found: other.type_name().to_string(),
+                expected: "Vec<u8>",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -437,15 +446,17 @@ impl TryFrom<Value> for serde_json::Value {
             Value::Json(v) => Ok(v),
             Value::Text(s) => serde_json::from_str(&s).map_err(|e| {
                 Error::Type(TypeError {
-                    expected: "valid JSON".to_string(),
-                    found: format!("invalid JSON: {}", e),
+                    expected: "valid JSON",
+                    actual: format!("invalid JSON: {}", e),
                     column: None,
+                    rust_type: None,
                 })
             }),
             other => Err(Error::Type(TypeError {
-                expected: "JSON".to_string(),
-                found: other.type_name().to_string(),
+                expected: "JSON",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -463,9 +474,10 @@ impl TryFrom<Value> for [u8; 16] {
                 Ok(arr)
             }
             other => Err(Error::Type(TypeError {
-                expected: "UUID".to_string(),
-                found: other.type_name().to_string(),
+                expected: "UUID",
+                actual: other.type_name().to_string(),
                 column: None,
+                rust_type: None,
             })),
         }
     }
@@ -514,8 +526,10 @@ mod tests {
 
     #[test]
     fn test_from_floats() {
-        assert_eq!(Value::from(3.14f32), Value::Float(3.14));
-        assert_eq!(Value::from(3.14f64), Value::Double(3.14));
+        let pi_f32 = std::f32::consts::PI;
+        let pi_f64 = std::f64::consts::PI;
+        assert_eq!(Value::from(pi_f32), Value::Float(pi_f32));
+        assert_eq!(Value::from(pi_f64), Value::Double(pi_f64));
     }
 
     #[test]
@@ -545,9 +559,9 @@ mod tests {
 
     #[test]
     fn test_try_from_bool() {
-        assert_eq!(bool::try_from(Value::Bool(true)).unwrap(), true);
-        assert_eq!(bool::try_from(Value::Int(1)).unwrap(), true);
-        assert_eq!(bool::try_from(Value::Int(0)).unwrap(), false);
+        assert!(bool::try_from(Value::Bool(true)).unwrap());
+        assert!(bool::try_from(Value::Int(1)).unwrap());
+        assert!(!bool::try_from(Value::Int(0)).unwrap());
         assert!(bool::try_from(Value::Text("true".to_string())).is_err());
     }
 
@@ -562,9 +576,16 @@ mod tests {
 
     #[test]
     fn test_try_from_f64() {
-        assert_eq!(f64::try_from(Value::Double(3.14)).unwrap(), 3.14);
-        assert!((f64::try_from(Value::Float(3.14f32)).unwrap() - 3.14).abs() < 0.001);
-        assert_eq!(f64::try_from(Value::Int(42)).unwrap(), 42.0);
+        let pi = std::f64::consts::PI;
+        let pi_f32 = std::f32::consts::PI;
+        let double = f64::try_from(Value::Double(pi)).unwrap();
+        assert!((double - pi).abs() < 1e-12);
+
+        let from_float = f64::try_from(Value::Float(pi_f32)).unwrap();
+        assert!((from_float - f64::from(pi_f32)).abs() < 1e-6);
+
+        let from_int = f64::try_from(Value::Int(42)).unwrap();
+        assert!((from_int - 42.0).abs() < 1e-12);
         assert!(f64::try_from(Value::Text("3.14".to_string())).is_err());
     }
 
@@ -669,7 +690,7 @@ mod tests {
         assert_eq!(Value::Null.type_name(), "NULL");
         assert_eq!(Value::Bool(true).type_name(), "BOOLEAN");
         assert_eq!(Value::Int(42).type_name(), "INTEGER");
-        assert_eq!(Value::Text("".to_string()).type_name(), "TEXT");
+        assert_eq!(Value::Text(String::new()).type_name(), "TEXT");
     }
 
     #[test]

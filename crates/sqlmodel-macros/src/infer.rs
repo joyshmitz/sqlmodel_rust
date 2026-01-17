@@ -285,6 +285,6 @@ mod tests {
         let result = parse_sql_type_attr("NUMERIC(10, 2)").to_string();
         assert!(result.contains("Numeric"));
         assert!(result.contains("10"));
-        assert!(result.contains("2"));
+        assert!(result.contains('2'));
     }
 }

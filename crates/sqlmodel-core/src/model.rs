@@ -43,6 +43,7 @@ pub trait Model: Sized + Send + Sync {
     fn to_row(&self) -> Vec<(&'static str, Value)>;
 
     /// Construct a model instance from a database row.
+    #[allow(clippy::result_large_err)]
     fn from_row(row: &Row) -> Result<Self>;
 
     /// Get the value of the primary key field(s).

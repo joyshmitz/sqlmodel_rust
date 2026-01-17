@@ -153,12 +153,12 @@ impl<M: Model> Select<M> {
 
         // JOINs
         for join in &self.joins {
-            sql.push_str(&join.to_sql());
+            sql.push_str(&join.build(&mut params, 0));
         }
 
         // WHERE
         if let Some(where_clause) = &self.where_clause {
-            let (where_sql, where_params) = where_clause.build();
+            let (where_sql, where_params) = where_clause.build_with_offset(params.len());
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
             params.extend(where_params);
@@ -172,7 +172,7 @@ impl<M: Model> Select<M> {
 
         // HAVING
         if let Some(having) = &self.having {
-            let (having_sql, having_params) = having.build();
+            let (having_sql, having_params) = having.build_with_offset(params.len());
             sql.push_str(" HAVING ");
             sql.push_str(&having_sql);
             params.extend(having_params);
@@ -294,5 +294,62 @@ impl<M: Model> Select<M> {
 impl<M: Model> Default for Select<M> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlmodel_core::{Error, FieldInfo, Result, Row, Value};
+
+    #[derive(Debug)]
+    struct Hero;
+
+    impl Model for Hero {
+        const TABLE_NAME: &'static str = "heroes";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            &[]
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            Vec::new()
+        }
+
+        fn from_row(_row: &Row) -> Result<Self> {
+            Err(Error::Custom("not used in tests".to_string()))
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            Vec::new()
+        }
+
+        fn is_new(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn build_collects_params_across_joins_where_having() {
+        let query = Select::<Hero>::new()
+            .join(Join::inner(
+                "teams",
+                Expr::qualified("teams", "active").eq(true),
+            ))
+            .filter(Expr::col("age").gt(18))
+            .group_by(&["team_id"])
+            .having(Expr::col("count").gt(1));
+
+        let (sql, params) = query.build();
+
+        assert_eq!(
+            sql,
+            "SELECT * FROM heroes INNER JOIN teams ON \"teams\".\"active\" = $1 WHERE \"age\" > $2 GROUP BY team_id HAVING \"count\" > $3"
+        );
+        assert_eq!(
+            params,
+            vec![Value::Bool(true), Value::Int(18), Value::Int(1)]
+        );
     }
 }
