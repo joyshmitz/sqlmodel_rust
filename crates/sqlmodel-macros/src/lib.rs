@@ -9,8 +9,9 @@ use proc_macro::TokenStream;
 
 mod infer;
 mod parse;
+mod validate;
 
-use parse::{parse_model, ModelDef};
+use parse::{ModelDef, parse_model};
 
 /// Derive macro for the `Model` trait.
 ///
@@ -65,6 +66,11 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
         Ok(m) => m,
         Err(e) => return e.to_compile_error().into(),
     };
+
+    // Validate the parsed model
+    if let Err(e) = validate::validate_model(&model) {
+        return e.to_compile_error().into();
+    }
 
     // Generate the Model implementation
     generate_model_impl(&model).into()

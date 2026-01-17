@@ -218,3 +218,479 @@ impl<T: Into<Value>> From<Option<T>> for Value {
         }
     }
 }
+
+impl From<&[u8]> for Value {
+    fn from(v: &[u8]) -> Self {
+        Value::Bytes(v.to_vec())
+    }
+}
+
+impl From<u8> for Value {
+    fn from(v: u8) -> Self {
+        Value::SmallInt(i16::from(v))
+    }
+}
+
+impl From<u16> for Value {
+    fn from(v: u16) -> Self {
+        Value::Int(i32::from(v))
+    }
+}
+
+impl From<u32> for Value {
+    fn from(v: u32) -> Self {
+        Value::BigInt(i64::from(v))
+    }
+}
+
+impl From<u64> for Value {
+    fn from(v: u64) -> Self {
+        // May overflow for very large values, but best effort
+        Value::BigInt(v as i64)
+    }
+}
+
+impl From<serde_json::Value> for Value {
+    fn from(v: serde_json::Value) -> Self {
+        Value::Json(v)
+    }
+}
+
+impl From<[u8; 16]> for Value {
+    fn from(v: [u8; 16]) -> Self {
+        Value::Uuid(v)
+    }
+}
+
+// TryFrom implementations for extracting values
+
+use crate::error::{Error, TypeError};
+
+impl TryFrom<Value> for bool {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Bool(v) => Ok(v),
+            Value::TinyInt(v) => Ok(v != 0),
+            Value::SmallInt(v) => Ok(v != 0),
+            Value::Int(v) => Ok(v != 0),
+            Value::BigInt(v) => Ok(v != 0),
+            other => Err(Error::Type(TypeError {
+                expected: "bool".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+impl TryFrom<Value> for i8 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::TinyInt(v) => Ok(v),
+            Value::Bool(v) => Ok(if v { 1 } else { 0 }),
+            other => Err(Error::Type(TypeError {
+                expected: "i8".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+impl TryFrom<Value> for i16 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::TinyInt(v) => Ok(i16::from(v)),
+            Value::SmallInt(v) => Ok(v),
+            Value::Bool(v) => Ok(if v { 1 } else { 0 }),
+            other => Err(Error::Type(TypeError {
+                expected: "i16".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+impl TryFrom<Value> for i32 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::TinyInt(v) => Ok(i32::from(v)),
+            Value::SmallInt(v) => Ok(i32::from(v)),
+            Value::Int(v) => Ok(v),
+            Value::Bool(v) => Ok(if v { 1 } else { 0 }),
+            other => Err(Error::Type(TypeError {
+                expected: "i32".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+impl TryFrom<Value> for i64 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::TinyInt(v) => Ok(i64::from(v)),
+            Value::SmallInt(v) => Ok(i64::from(v)),
+            Value::Int(v) => Ok(i64::from(v)),
+            Value::BigInt(v) => Ok(v),
+            Value::Bool(v) => Ok(if v { 1 } else { 0 }),
+            other => Err(Error::Type(TypeError {
+                expected: "i64".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+impl TryFrom<Value> for f32 {
+    type Error = Error;
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Float(v) => Ok(v),
+            // Intentional truncation: user explicitly requested f32 from f64
+            Value::Double(v) => Ok(v as f32),
+            Value::TinyInt(v) => Ok(f32::from(v)),
+            Value::SmallInt(v) => Ok(f32::from(v)),
+            Value::Int(v) => Ok(v as f32),
+            Value::BigInt(v) => Ok(v as f32),
+            other => Err(Error::Type(TypeError {
+                expected: "f32".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+impl TryFrom<Value> for f64 {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Float(v) => Ok(f64::from(v)),
+            Value::Double(v) => Ok(v),
+            Value::TinyInt(v) => Ok(f64::from(v)),
+            Value::SmallInt(v) => Ok(f64::from(v)),
+            Value::Int(v) => Ok(f64::from(v)),
+            Value::BigInt(v) => Ok(v as f64),
+            other => Err(Error::Type(TypeError {
+                expected: "f64".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+impl TryFrom<Value> for String {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Text(v) => Ok(v),
+            Value::Decimal(v) => Ok(v),
+            other => Err(Error::Type(TypeError {
+                expected: "String".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+impl TryFrom<Value> for Vec<u8> {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Bytes(v) => Ok(v),
+            Value::Text(v) => Ok(v.into_bytes()),
+            other => Err(Error::Type(TypeError {
+                expected: "Vec<u8>".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+impl TryFrom<Value> for serde_json::Value {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Json(v) => Ok(v),
+            Value::Text(s) => serde_json::from_str(&s).map_err(|e| {
+                Error::Type(TypeError {
+                    expected: "valid JSON".to_string(),
+                    found: format!("invalid JSON: {}", e),
+                    column: None,
+                })
+            }),
+            other => Err(Error::Type(TypeError {
+                expected: "JSON".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+impl TryFrom<Value> for [u8; 16] {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Uuid(v) => Ok(v),
+            Value::Bytes(v) if v.len() == 16 => {
+                let mut arr = [0u8; 16];
+                arr.copy_from_slice(&v);
+                Ok(arr)
+            }
+            other => Err(Error::Type(TypeError {
+                expected: "UUID".to_string(),
+                found: other.type_name().to_string(),
+                column: None,
+            })),
+        }
+    }
+}
+
+/// TryFrom for Option<T> - returns None for Null, tries to convert otherwise
+impl<T> TryFrom<Value> for Option<T>
+where
+    T: TryFrom<Value, Error = Error>,
+{
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Null => Ok(None),
+            v => T::try_from(v).map(Some),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_bool() {
+        let v: Value = true.into();
+        assert_eq!(v, Value::Bool(true));
+    }
+
+    #[test]
+    fn test_from_integers() {
+        assert_eq!(Value::from(42i8), Value::TinyInt(42));
+        assert_eq!(Value::from(42i16), Value::SmallInt(42));
+        assert_eq!(Value::from(42i32), Value::Int(42));
+        assert_eq!(Value::from(42i64), Value::BigInt(42));
+    }
+
+    #[test]
+    fn test_from_unsigned_integers() {
+        assert_eq!(Value::from(42u8), Value::SmallInt(42));
+        assert_eq!(Value::from(42u16), Value::Int(42));
+        assert_eq!(Value::from(42u32), Value::BigInt(42));
+        assert_eq!(Value::from(42u64), Value::BigInt(42));
+    }
+
+    #[test]
+    fn test_from_floats() {
+        assert_eq!(Value::from(3.14f32), Value::Float(3.14));
+        assert_eq!(Value::from(3.14f64), Value::Double(3.14));
+    }
+
+    #[test]
+    fn test_from_strings() {
+        assert_eq!(Value::from("hello"), Value::Text("hello".to_string()));
+        assert_eq!(
+            Value::from("hello".to_string()),
+            Value::Text("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn test_from_bytes() {
+        let bytes = vec![1u8, 2, 3];
+        assert_eq!(Value::from(bytes.clone()), Value::Bytes(bytes.clone()));
+        assert_eq!(Value::from(bytes.as_slice()), Value::Bytes(bytes));
+    }
+
+    #[test]
+    fn test_from_option() {
+        let some: Value = Some(42i32).into();
+        assert_eq!(some, Value::Int(42));
+
+        let none: Value = Option::<i32>::None.into();
+        assert_eq!(none, Value::Null);
+    }
+
+    #[test]
+    fn test_try_from_bool() {
+        assert_eq!(bool::try_from(Value::Bool(true)).unwrap(), true);
+        assert_eq!(bool::try_from(Value::Int(1)).unwrap(), true);
+        assert_eq!(bool::try_from(Value::Int(0)).unwrap(), false);
+        assert!(bool::try_from(Value::Text("true".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_try_from_i64() {
+        assert_eq!(i64::try_from(Value::BigInt(42)).unwrap(), 42);
+        assert_eq!(i64::try_from(Value::Int(42)).unwrap(), 42);
+        assert_eq!(i64::try_from(Value::SmallInt(42)).unwrap(), 42);
+        assert_eq!(i64::try_from(Value::TinyInt(42)).unwrap(), 42);
+        assert!(i64::try_from(Value::Text("42".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_try_from_f64() {
+        assert_eq!(f64::try_from(Value::Double(3.14)).unwrap(), 3.14);
+        assert!((f64::try_from(Value::Float(3.14f32)).unwrap() - 3.14).abs() < 0.001);
+        assert_eq!(f64::try_from(Value::Int(42)).unwrap(), 42.0);
+        assert!(f64::try_from(Value::Text("3.14".to_string())).is_err());
+    }
+
+    #[test]
+    fn test_try_from_string() {
+        assert_eq!(
+            String::try_from(Value::Text("hello".to_string())).unwrap(),
+            "hello"
+        );
+        assert!(String::try_from(Value::Int(42)).is_err());
+    }
+
+    #[test]
+    fn test_try_from_bytes() {
+        let bytes = vec![1u8, 2, 3];
+        assert_eq!(
+            Vec::<u8>::try_from(Value::Bytes(bytes.clone())).unwrap(),
+            bytes
+        );
+        assert_eq!(
+            Vec::<u8>::try_from(Value::Text("abc".to_string())).unwrap(),
+            b"abc".to_vec()
+        );
+    }
+
+    #[test]
+    fn test_try_from_option() {
+        let result: Option<i32> = Option::try_from(Value::Int(42)).unwrap();
+        assert_eq!(result, Some(42));
+
+        let result: Option<i32> = Option::try_from(Value::Null).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_round_trip_bool() {
+        let original = true;
+        let value: Value = original.into();
+        let recovered: bool = value.try_into().unwrap();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_round_trip_i64() {
+        let original: i64 = i64::MAX;
+        let value: Value = original.into();
+        let recovered: i64 = value.try_into().unwrap();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_round_trip_f64() {
+        let original: f64 = std::f64::consts::PI;
+        let value: Value = original.into();
+        let recovered: f64 = value.try_into().unwrap();
+        assert!((original - recovered).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_round_trip_string() {
+        let original = "hello world".to_string();
+        let value: Value = original.clone().into();
+        let recovered: String = value.try_into().unwrap();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_round_trip_bytes() {
+        let original = vec![0u8, 127, 255];
+        let value: Value = original.clone().into();
+        let recovered: Vec<u8> = value.try_into().unwrap();
+        assert_eq!(original, recovered);
+    }
+
+    #[test]
+    fn test_is_null() {
+        assert!(Value::Null.is_null());
+        assert!(!Value::Int(0).is_null());
+        assert!(!Value::Bool(false).is_null());
+    }
+
+    #[test]
+    fn test_as_i64() {
+        assert_eq!(Value::BigInt(42).as_i64(), Some(42));
+        assert_eq!(Value::Int(42).as_i64(), Some(42));
+        assert_eq!(Value::Null.as_i64(), None);
+        assert_eq!(Value::Text("42".to_string()).as_i64(), None);
+    }
+
+    #[test]
+    fn test_as_str() {
+        assert_eq!(Value::Text("hello".to_string()).as_str(), Some("hello"));
+        assert_eq!(
+            Value::Decimal("123.45".to_string()).as_str(),
+            Some("123.45")
+        );
+        assert_eq!(Value::Int(42).as_str(), None);
+    }
+
+    #[test]
+    fn test_type_name() {
+        assert_eq!(Value::Null.type_name(), "NULL");
+        assert_eq!(Value::Bool(true).type_name(), "BOOLEAN");
+        assert_eq!(Value::Int(42).type_name(), "INTEGER");
+        assert_eq!(Value::Text("".to_string()).type_name(), "TEXT");
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        // Empty string
+        let value: Value = "".into();
+        let recovered: String = value.try_into().unwrap();
+        assert_eq!(recovered, "");
+
+        // Empty bytes
+        let value: Value = Vec::<u8>::new().into();
+        let recovered: Vec<u8> = value.try_into().unwrap();
+        assert!(recovered.is_empty());
+
+        // Max values
+        let value: Value = i64::MAX.into();
+        let recovered: i64 = value.try_into().unwrap();
+        assert_eq!(recovered, i64::MAX);
+
+        let value: Value = i64::MIN.into();
+        let recovered: i64 = value.try_into().unwrap();
+        assert_eq!(recovered, i64::MIN);
+    }
+}

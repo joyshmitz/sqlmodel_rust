@@ -6,10 +6,7 @@
 
 use proc_macro2::Span;
 use quote::ToTokens;
-use syn::{
-    Attribute, Data, DeriveInput, Error, Field, Fields, GenericArgument, Generics, Ident, Lit,
-    PathArguments, Result, Type,
-};
+use syn::{Attribute, Data, DeriveInput, Error, Field, Fields, Generics, Ident, Lit, Result, Type};
 
 /// Parsed model definition from a struct with `#[derive(Model)]`.
 #[derive(Debug)]
@@ -229,19 +226,22 @@ fn derive_table_name(struct_name: &str) -> String {
 /// - `HTTPServer` -> `http_server`
 fn to_snake_case(s: &str) -> String {
     let mut result = String::with_capacity(s.len() + 4);
-    let mut chars = s.chars().peekable();
+    let chars: Vec<char> = s.chars().collect();
 
-    while let Some(c) = chars.next() {
+    for (i, &c) in chars.iter().enumerate() {
         if c.is_uppercase() {
-            // Don't add underscore at the start or after another uppercase
-            // (for sequences like "HTTP")
-            if !result.is_empty() {
-                // Check if this is the start of a new word
-                // (uppercase followed by lowercase OR end of acronym)
-                let next_is_lower = chars.peek().is_some_and(|n| n.is_lowercase());
-                let prev_is_lower = result.chars().last().is_some_and(|p| p.is_lowercase());
+            if i > 0 {
+                let prev = chars[i - 1];
+                let next = chars.get(i + 1).copied();
 
-                if prev_is_lower || next_is_lower {
+                // Add underscore if:
+                // 1. Previous char was lowercase (transitioning from word to new word)
+                // 2. OR this is the start of a word after an acronym
+                //    (current is uppercase, next is lowercase, and previous was uppercase)
+                let should_underscore = prev.is_lowercase()
+                    || (prev.is_uppercase() && next.is_some_and(|n| n.is_lowercase()));
+
+                if should_underscore {
                     result.push('_');
                 }
             }
@@ -287,13 +287,22 @@ fn pluralize(word: &str) -> String {
         return word.to_string();
     }
 
-    // Words ending in 's', 'x', 'z', 'ch', 'sh' -> add 'es'
-    if word.ends_with('s')
-        || word.ends_with('x')
-        || word.ends_with('z')
-        || word.ends_with("ch")
-        || word.ends_with("sh")
-    {
+    // Words ending in 's', 'x', 'ch', 'sh' -> add 'es'
+    if word.ends_with('s') || word.ends_with('x') || word.ends_with("ch") || word.ends_with("sh") {
+        return format!("{word}es");
+    }
+
+    // Words ending in 'z': double the 'z' if preceded by a vowel, then add 'es'
+    // e.g., quiz -> quizzes, fez -> fezzes
+    if word.ends_with('z') {
+        let chars: Vec<char> = word.chars().collect();
+        if chars.len() >= 2 {
+            let second_last = chars[chars.len() - 2];
+            if "aeiou".contains(second_last) {
+                // Short vowel before 'z', double the 'z'
+                return format!("{word}zes");
+            }
+        }
         return format!("{word}es");
     }
 
@@ -543,7 +552,6 @@ pub fn is_option_type(ty: &Type) -> bool {
     }
     false
 }
-
 
 #[cfg(test)]
 mod tests {
