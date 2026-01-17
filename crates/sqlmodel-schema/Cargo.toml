@@ -1,0 +1,16 @@
+[package]
+name = "sqlmodel-schema"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Schema definition and migration support for SQLModel Rust"
+
+[lints]
+workspace = true
+
+[dependencies]
+sqlmodel-core.workspace = true
+sqlmodel-macros.workspace = true
+asupersync.workspace = true
+serde.workspace = true

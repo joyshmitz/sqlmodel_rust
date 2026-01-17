@@ -1,0 +1,20 @@
+[package]
+name = "sqlmodel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "SQL databases in Rust, designed to be intuitive and type-safe"
+
+[lints]
+workspace = true
+
+[dependencies]
+sqlmodel-core.workspace = true
+sqlmodel-macros.workspace = true
+sqlmodel-query.workspace = true
+sqlmodel-schema.workspace = true
+sqlmodel-pool.workspace = true
+asupersync.workspace = true
+serde.workspace = true
+serde_json.workspace = true
