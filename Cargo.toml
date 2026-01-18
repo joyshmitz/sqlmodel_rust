@@ -8,6 +8,7 @@ members = [
     "crates/sqlmodel-schema",
     "crates/sqlmodel-pool",
     "crates/sqlmodel-postgres",
+    "crates/sqlmodel-sqlite",
 ]
 
 [workspace.package]
@@ -62,3 +63,17 @@ sqlmodel-macros = { path = "crates/sqlmodel-macros" }
 sqlmodel-query = { path = "crates/sqlmodel-query" }
 sqlmodel-schema = { path = "crates/sqlmodel-schema" }
 sqlmodel-pool = { path = "crates/sqlmodel-pool" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.dev.package."*"]
+opt-level = 3
