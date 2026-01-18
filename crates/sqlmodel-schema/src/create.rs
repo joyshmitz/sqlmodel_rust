@@ -109,6 +109,234 @@ impl<M: Model> Default for CreateTable<M> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlmodel_core::{FieldInfo, Row, Value, SqlType};
+
+    // Test model for CREATE TABLE generation
+    struct TestHero;
+
+    impl Model for TestHero {
+        const TABLE_NAME: &'static str = "heroes";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            static FIELDS: &[FieldInfo] = &[
+                FieldInfo {
+                    name: "id",
+                    column_name: "id",
+                    sql_type: SqlType::BigInt,
+                    nullable: true,
+                    primary_key: true,
+                    auto_increment: true,
+                    unique: false,
+                    default: None,
+                    foreign_key: None,
+                    index: None,
+                },
+                FieldInfo {
+                    name: "name",
+                    column_name: "name",
+                    sql_type: SqlType::Text,
+                    nullable: false,
+                    primary_key: false,
+                    auto_increment: false,
+                    unique: true,
+                    default: None,
+                    foreign_key: None,
+                    index: None,
+                },
+                FieldInfo {
+                    name: "age",
+                    column_name: "age",
+                    sql_type: SqlType::Integer,
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    unique: false,
+                    default: None,
+                    foreign_key: None,
+                    index: None,
+                },
+                FieldInfo {
+                    name: "team_id",
+                    column_name: "team_id",
+                    sql_type: SqlType::BigInt,
+                    nullable: true,
+                    primary_key: false,
+                    auto_increment: false,
+                    unique: false,
+                    default: None,
+                    foreign_key: Some("teams.id"),
+                    index: None,
+                },
+            ];
+            FIELDS
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![]
+        }
+
+        fn from_row(_row: &Row) -> sqlmodel_core::Result<Self> {
+            Ok(TestHero)
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            vec![]
+        }
+
+        fn is_new(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_create_table_basic() {
+        let sql = CreateTable::<TestHero>::new().build();
+        assert!(sql.starts_with("CREATE TABLE heroes"));
+        assert!(sql.contains("id BIGINT"));
+        assert!(sql.contains("name TEXT NOT NULL"));
+        assert!(sql.contains("age INTEGER"));
+        assert!(sql.contains("team_id BIGINT"));
+    }
+
+    #[test]
+    fn test_create_table_if_not_exists() {
+        let sql = CreateTable::<TestHero>::new().if_not_exists().build();
+        assert!(sql.starts_with("CREATE TABLE IF NOT EXISTS heroes"));
+    }
+
+    #[test]
+    fn test_create_table_primary_key() {
+        let sql = CreateTable::<TestHero>::new().build();
+        assert!(sql.contains("PRIMARY KEY (id)"));
+    }
+
+    #[test]
+    fn test_create_table_unique_constraint() {
+        let sql = CreateTable::<TestHero>::new().build();
+        assert!(sql.contains("CONSTRAINT uk_name UNIQUE (name)"));
+    }
+
+    #[test]
+    fn test_create_table_foreign_key() {
+        let sql = CreateTable::<TestHero>::new().build();
+        assert!(sql.contains("FOREIGN KEY (team_id) REFERENCES teams(id)"));
+    }
+
+    #[test]
+    fn test_create_table_auto_increment() {
+        let sql = CreateTable::<TestHero>::new().build();
+        assert!(sql.contains("AUTOINCREMENT"));
+    }
+
+    #[test]
+    fn test_schema_builder_single_table() {
+        let statements = SchemaBuilder::new()
+            .create_table::<TestHero>()
+            .build();
+        assert_eq!(statements.len(), 1);
+        assert!(statements[0].contains("CREATE TABLE IF NOT EXISTS heroes"));
+    }
+
+    #[test]
+    fn test_schema_builder_with_index() {
+        let statements = SchemaBuilder::new()
+            .create_table::<TestHero>()
+            .create_index("idx_hero_name", "heroes", &["name"], false)
+            .build();
+        assert_eq!(statements.len(), 2);
+        assert!(statements[1].contains("CREATE INDEX IF NOT EXISTS idx_hero_name ON heroes (name)"));
+    }
+
+    #[test]
+    fn test_schema_builder_unique_index() {
+        let statements = SchemaBuilder::new()
+            .create_index("idx_hero_email", "heroes", &["email"], true)
+            .build();
+        assert!(statements[0].contains("CREATE UNIQUE INDEX"));
+    }
+
+    #[test]
+    fn test_schema_builder_raw_sql() {
+        let statements = SchemaBuilder::new()
+            .raw("ALTER TABLE heroes ADD COLUMN power TEXT")
+            .build();
+        assert_eq!(statements.len(), 1);
+        assert_eq!(statements[0], "ALTER TABLE heroes ADD COLUMN power TEXT");
+    }
+
+    #[test]
+    fn test_schema_builder_multi_column_index() {
+        let statements = SchemaBuilder::new()
+            .create_index("idx_hero_name_age", "heroes", &["name", "age"], false)
+            .build();
+        assert!(statements[0].contains("ON heroes (name, age)"));
+    }
+
+    // Test model with default values
+    struct TestWithDefault;
+
+    impl Model for TestWithDefault {
+        const TABLE_NAME: &'static str = "settings";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            static FIELDS: &[FieldInfo] = &[
+                FieldInfo {
+                    name: "id",
+                    column_name: "id",
+                    sql_type: SqlType::Integer,
+                    nullable: false,
+                    primary_key: true,
+                    auto_increment: false,
+                    unique: false,
+                    default: None,
+                    foreign_key: None,
+                    index: None,
+                },
+                FieldInfo {
+                    name: "is_active",
+                    column_name: "is_active",
+                    sql_type: SqlType::Boolean,
+                    nullable: false,
+                    primary_key: false,
+                    auto_increment: false,
+                    unique: false,
+                    default: Some("true"),
+                    foreign_key: None,
+                    index: None,
+                },
+            ];
+            FIELDS
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![]
+        }
+
+        fn from_row(_row: &Row) -> sqlmodel_core::Result<Self> {
+            Ok(TestWithDefault)
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            vec![]
+        }
+
+        fn is_new(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_create_table_default_value() {
+        let sql = CreateTable::<TestWithDefault>::new().build();
+        assert!(sql.contains("is_active BOOLEAN NOT NULL DEFAULT true"));
+    }
+}
+
 /// Builder for multiple schema operations.
 #[derive(Debug, Default)]
 pub struct SchemaBuilder {
