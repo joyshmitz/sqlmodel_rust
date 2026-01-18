@@ -1,6 +1,6 @@
 //! SQL clause types (WHERE, ORDER BY, LIMIT, etc.)
 
-use crate::expr::Expr;
+use crate::expr::{Dialect, Expr};
 use sqlmodel_core::Value;
 
 /// WHERE clause.
@@ -29,15 +29,20 @@ impl Where {
         }
     }
 
-    /// Build the WHERE clause SQL and parameters.
+    /// Build the WHERE clause SQL and parameters with default dialect (Postgres).
     pub fn build(&self) -> (String, Vec<Value>) {
-        self.build_with_offset(0)
+        self.build_with_dialect(Dialect::default(), 0)
     }
 
-    /// Build the WHERE clause with a parameter offset.
+    /// Build the WHERE clause with a parameter offset and default dialect.
     pub fn build_with_offset(&self, offset: usize) -> (String, Vec<Value>) {
+        self.build_with_dialect(Dialect::default(), offset)
+    }
+
+    /// Build the WHERE clause with a specific dialect and offset.
+    pub fn build_with_dialect(&self, dialect: Dialect, offset: usize) -> (String, Vec<Value>) {
         let mut params = Vec::new();
-        let sql = self.expr.build(&mut params, offset);
+        let sql = self.expr.build_with_dialect(dialect, &mut params, offset);
         (sql, params)
     }
 }

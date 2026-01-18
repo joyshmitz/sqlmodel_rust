@@ -1,7 +1,7 @@
 //! Query builders for INSERT, UPDATE, DELETE operations.
 
 use crate::clause::Where;
-use crate::expr::Expr;
+use crate::expr::{Dialect, Expr};
 use asupersync::{Cx, Outcome};
 use sqlmodel_core::{Connection, Model, Value};
 use std::marker::PhantomData;
@@ -18,8 +18,13 @@ impl<'a, M: Model> InsertBuilder<'a, M> {
         Self { model }
     }
 
-    /// Build the INSERT SQL and parameters.
+    /// Build the INSERT SQL and parameters with default dialect (Postgres).
     pub fn build(&self) -> (String, Vec<Value>) {
+        self.build_with_dialect(Dialect::default())
+    }
+
+    /// Build the INSERT SQL and parameters with specific dialect.
+    pub fn build_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
         let row = self.model.to_row();
         let fields = M::fields();
 
@@ -43,7 +48,10 @@ impl<'a, M: Model> InsertBuilder<'a, M> {
             .iter()
             .map(|(_, value)| value.clone())
             .collect();
-        let placeholders: Vec<_> = (1..=values.len()).map(|i| format!("${}", i)).collect();
+        
+        let placeholders: Vec<_> = (1..=values.len())
+            .map(|i| dialect.placeholder(i))
+            .collect();
 
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
@@ -61,6 +69,7 @@ impl<'a, M: Model> InsertBuilder<'a, M> {
         cx: &Cx,
         conn: &C,
     ) -> Outcome<i64, sqlmodel_core::Error> {
+        // TODO: Get dialect from connection? For now default to Postgres.
         let (sql, params) = self.build();
         conn.insert(cx, &sql, &params).await
     }
@@ -99,8 +108,13 @@ impl<'a, M: Model> UpdateBuilder<'a, M> {
         self
     }
 
-    /// Build the UPDATE SQL and parameters.
+    /// Build the UPDATE SQL and parameters with default dialect (Postgres).
     pub fn build(&self) -> (String, Vec<Value>) {
+        self.build_with_dialect(Dialect::default())
+    }
+
+    /// Build the UPDATE SQL and parameters with specific dialect.
+    pub fn build_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
         let row = self.model.to_row();
         let pk = M::PRIMARY_KEY;
 
@@ -124,7 +138,7 @@ impl<'a, M: Model> UpdateBuilder<'a, M> {
         let mut set_clauses = Vec::new();
 
         for (i, (name, value)) in update_fields.iter().enumerate() {
-            set_clauses.push(format!("{} = ${}", name, i + 1));
+            set_clauses.push(format!("{} = {}", name, dialect.placeholder(i + 1)));
             params.push((*value).clone());
         }
 
@@ -132,7 +146,7 @@ impl<'a, M: Model> UpdateBuilder<'a, M> {
 
         // Add WHERE clause
         if let Some(where_clause) = &self.where_clause {
-            let (where_sql, where_params) = where_clause.build_with_offset(params.len());
+            let (where_sql, where_params) = where_clause.build_with_dialect(dialect, params.len());
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
             params.extend(where_params);
@@ -143,7 +157,7 @@ impl<'a, M: Model> UpdateBuilder<'a, M> {
                 .iter()
                 .zip(pk_values.iter())
                 .enumerate()
-                .map(|(i, (col, _))| format!("{} = ${}", col, params.len() + i + 1))
+                .map(|(i, (col, _))| format!("{} = {}", col, dialect.placeholder(params.len() + i + 1)))
                 .collect();
 
             if !pk_conditions.is_empty() {
@@ -192,13 +206,18 @@ impl<M: Model> DeleteBuilder<M> {
         self
     }
 
-    /// Build the DELETE SQL and parameters.
+    /// Build the DELETE SQL and parameters with default dialect (Postgres).
     pub fn build(&self) -> (String, Vec<Value>) {
+        self.build_with_dialect(Dialect::default())
+    }
+
+    /// Build the DELETE SQL and parameters with specific dialect.
+    pub fn build_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
         let mut sql = format!("DELETE FROM {}", M::TABLE_NAME);
         let mut params = Vec::new();
 
         if let Some(where_clause) = &self.where_clause {
-            let (where_sql, where_params) = where_clause.build();
+            let (where_sql, where_params) = where_clause.build_with_dialect(dialect, 0);
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
             params = where_params;
