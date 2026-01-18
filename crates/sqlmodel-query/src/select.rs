@@ -1,7 +1,7 @@
 //! SELECT query builder.
 
 use crate::clause::{Limit, Offset, OrderBy, Where};
-use crate::expr::Expr;
+use crate::expr::{Dialect, Expr};
 use crate::join::Join;
 use asupersync::{Cx, Outcome};
 use sqlmodel_core::{Connection, Model, Value};
@@ -181,7 +181,11 @@ impl<M: Model> Select<M> {
         // ORDER BY
         if !self.order_by.is_empty() {
             sql.push_str(" ORDER BY ");
-            let order_strs: Vec<_> = self.order_by.iter().map(|o| o.to_sql()).collect();
+            let order_strs: Vec<_> = self
+                .order_by
+                .iter()
+                .map(|o| o.build(Dialect::default(), &mut params, 0))
+                .collect();
             sql.push_str(&order_strs.join(", "));
         }
 
@@ -302,7 +306,7 @@ mod tests {
     use super::*;
     use sqlmodel_core::{Error, FieldInfo, Result, Row, Value};
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct Hero;
 
     impl Model for Hero {
@@ -351,5 +355,273 @@ mod tests {
             params,
             vec![Value::Bool(true), Value::Int(18), Value::Int(1)]
         );
+    }
+
+    #[test]
+    fn test_select_all_columns() {
+        let query = Select::<Hero>::new();
+        let (sql, params) = query.build();
+
+        assert_eq!(sql, "SELECT * FROM heroes");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_specific_columns() {
+        let query = Select::<Hero>::new().columns(&["id", "name", "power"]);
+        let (sql, params) = query.build();
+
+        assert_eq!(sql, "SELECT id, name, power FROM heroes");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_distinct() {
+        let query = Select::<Hero>::new().columns(&["team_id"]).distinct();
+        let (sql, params) = query.build();
+
+        assert_eq!(sql, "SELECT DISTINCT team_id FROM heroes");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_simple_filter() {
+        let query = Select::<Hero>::new().filter(Expr::col("active").eq(true));
+        let (sql, params) = query.build();
+
+        assert_eq!(sql, "SELECT * FROM heroes WHERE \"active\" = $1");
+        assert_eq!(params, vec![Value::Bool(true)]);
+    }
+
+    #[test]
+    fn test_select_with_multiple_and_filters() {
+        let query = Select::<Hero>::new()
+            .filter(Expr::col("active").eq(true))
+            .filter(Expr::col("age").gt(18));
+        let (sql, params) = query.build();
+
+        assert_eq!(
+            sql,
+            "SELECT * FROM heroes WHERE \"active\" = $1 AND \"age\" > $2"
+        );
+        assert_eq!(params, vec![Value::Bool(true), Value::Int(18)]);
+    }
+
+    #[test]
+    fn test_select_with_or_filter() {
+        let query = Select::<Hero>::new()
+            .filter(Expr::col("role").eq("warrior"))
+            .or_filter(Expr::col("role").eq("mage"));
+        let (sql, params) = query.build();
+
+        assert_eq!(
+            sql,
+            "SELECT * FROM heroes WHERE \"role\" = $1 OR \"role\" = $2"
+        );
+        assert_eq!(
+            params,
+            vec![Value::Text("warrior".to_string()), Value::Text("mage".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_select_with_order_by_asc() {
+        let query = Select::<Hero>::new().order_by(OrderBy::asc(Expr::col("name")));
+        let (sql, params) = query.build();
+
+        assert_eq!(sql, "SELECT * FROM heroes ORDER BY \"name\" ASC");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_order_by_desc() {
+        let query = Select::<Hero>::new().order_by(OrderBy::desc(Expr::col("created_at")));
+        let (sql, params) = query.build();
+
+        assert_eq!(sql, "SELECT * FROM heroes ORDER BY \"created_at\" DESC");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_multiple_order_by() {
+        let query = Select::<Hero>::new()
+            .order_by(OrderBy::asc(Expr::col("team_id")))
+            .order_by(OrderBy::asc(Expr::col("name")));
+        let (sql, params) = query.build();
+
+        assert_eq!(
+            sql,
+            "SELECT * FROM heroes ORDER BY \"team_id\" ASC, \"name\" ASC"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_limit() {
+        let query = Select::<Hero>::new().limit(10);
+        let (sql, params) = query.build();
+
+        assert_eq!(sql, "SELECT * FROM heroes LIMIT 10");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_offset() {
+        let query = Select::<Hero>::new().offset(20);
+        let (sql, params) = query.build();
+
+        assert_eq!(sql, "SELECT * FROM heroes OFFSET 20");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_limit_and_offset() {
+        let query = Select::<Hero>::new().limit(10).offset(20);
+        let (sql, params) = query.build();
+
+        assert_eq!(sql, "SELECT * FROM heroes LIMIT 10 OFFSET 20");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_group_by() {
+        let query = Select::<Hero>::new()
+            .columns(&["team_id", "COUNT(*) as count"])
+            .group_by(&["team_id"]);
+        let (sql, params) = query.build();
+
+        assert_eq!(
+            sql,
+            "SELECT team_id, COUNT(*) as count FROM heroes GROUP BY team_id"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_multiple_group_by() {
+        let query = Select::<Hero>::new()
+            .columns(&["team_id", "role", "COUNT(*) as count"])
+            .group_by(&["team_id", "role"]);
+        let (sql, params) = query.build();
+
+        assert_eq!(
+            sql,
+            "SELECT team_id, role, COUNT(*) as count FROM heroes GROUP BY team_id, role"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_select_with_for_update() {
+        let query = Select::<Hero>::new()
+            .filter(Expr::col("id").eq(1))
+            .for_update();
+        let (sql, params) = query.build();
+
+        assert_eq!(sql, "SELECT * FROM heroes WHERE \"id\" = $1 FOR UPDATE");
+        assert_eq!(params, vec![Value::Int(1)]);
+    }
+
+    #[test]
+    fn test_select_inner_join() {
+        let query = Select::<Hero>::new().join(Join::inner(
+            "teams",
+            Expr::qualified("heroes", "team_id").eq(Expr::qualified("teams", "id")),
+        ));
+        let (sql, _) = query.build();
+
+        assert!(sql.contains("INNER JOIN teams ON"));
+    }
+
+    #[test]
+    fn test_select_left_join() {
+        let query = Select::<Hero>::new().join(Join::left(
+            "teams",
+            Expr::qualified("heroes", "team_id").eq(Expr::qualified("teams", "id")),
+        ));
+        let (sql, _) = query.build();
+
+        assert!(sql.contains("LEFT JOIN teams ON"));
+    }
+
+    #[test]
+    fn test_select_right_join() {
+        let query = Select::<Hero>::new().join(Join::right(
+            "teams",
+            Expr::qualified("heroes", "team_id").eq(Expr::qualified("teams", "id")),
+        ));
+        let (sql, _) = query.build();
+
+        assert!(sql.contains("RIGHT JOIN teams ON"));
+    }
+
+    #[test]
+    fn test_select_multiple_joins() {
+        let query = Select::<Hero>::new()
+            .join(Join::inner(
+                "teams",
+                Expr::qualified("heroes", "team_id").eq(Expr::qualified("teams", "id")),
+            ))
+            .join(Join::left(
+                "powers",
+                Expr::qualified("heroes", "id").eq(Expr::qualified("powers", "hero_id")),
+            ));
+        let (sql, _) = query.build();
+
+        assert!(sql.contains("INNER JOIN teams ON"));
+        assert!(sql.contains("LEFT JOIN powers ON"));
+    }
+
+    #[test]
+    fn test_select_complex_query() {
+        let query = Select::<Hero>::new()
+            .columns(&["heroes.id", "heroes.name", "teams.name as team_name"])
+            .distinct()
+            .join(Join::inner(
+                "teams",
+                Expr::qualified("heroes", "team_id").eq(Expr::qualified("teams", "id")),
+            ))
+            .filter(Expr::col("active").eq(true))
+            .filter(Expr::col("level").gt(10))
+            .group_by(&["heroes.id", "heroes.name", "teams.name"])
+            .having(Expr::col("score").gt(100))
+            .order_by(OrderBy::desc(Expr::col("level")))
+            .limit(50)
+            .offset(0);
+        let (sql, params) = query.build();
+
+        assert!(sql.starts_with("SELECT DISTINCT heroes.id, heroes.name, teams.name as team_name FROM heroes"));
+        assert!(sql.contains("INNER JOIN teams ON"));
+        assert!(sql.contains("WHERE"));
+        assert!(sql.contains("GROUP BY"));
+        assert!(sql.contains("HAVING"));
+        assert!(sql.contains("ORDER BY"));
+        assert!(sql.contains("LIMIT 50"));
+        assert!(sql.contains("OFFSET 0"));
+
+        // Params: true (active), 10 (level), 100 (score)
+        // Note: join condition uses column comparison, not value param
+        assert_eq!(params.len(), 3);
+    }
+
+    #[test]
+    fn test_select_default() {
+        let query = Select::<Hero>::default();
+        let (sql, _) = query.build();
+        assert_eq!(sql, "SELECT * FROM heroes");
+    }
+
+    #[test]
+    fn test_select_clone() {
+        let query = Select::<Hero>::new()
+            .filter(Expr::col("id").eq(1))
+            .limit(10);
+        let cloned = query.clone();
+
+        let (sql1, params1) = query.build();
+        let (sql2, params2) = cloned.build();
+
+        assert_eq!(sql1, sql2);
+        assert_eq!(params1, params2);
     }
 }
