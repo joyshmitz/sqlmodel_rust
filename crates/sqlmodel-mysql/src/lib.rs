@@ -1,0 +1,41 @@
+//! MySQL driver for SQLModel Rust.
+//!
+//! This crate implements the MySQL wire protocol from scratch using
+//! asupersync's TCP primitives. It provides:
+//!
+//! - Packet framing with sequence numbers
+//! - Authentication (mysql_native_password, caching_sha2_password)
+//! - Text and binary query protocols
+//! - Prepared statement support
+//! - Connection management with state machine
+//! - Type conversion between Rust and MySQL types
+//!
+//! # MySQL Protocol Overview
+//!
+//! MySQL uses a packet-based protocol with:
+//! - 3-byte payload length + 1-byte sequence number header
+//! - Packets over 16MB are split
+//! - Request/response pairing via sequence numbers
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use sqlmodel_mysql::{MySqlConfig, MySqlConnection};
+//!
+//! let config = MySqlConfig::new()
+//!     .host("localhost")
+//!     .port(3306)
+//!     .user("root")
+//!     .database("mydb");
+//!
+//! let conn = MySqlConnection::connect(config)?;
+//! ```
+
+pub mod auth;
+pub mod config;
+pub mod connection;
+pub mod protocol;
+pub mod types;
+
+pub use config::{MySqlConfig, SslMode};
+pub use connection::{ConnectionState, MySqlConnection};
