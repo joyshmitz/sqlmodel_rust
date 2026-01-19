@@ -322,11 +322,22 @@ impl TextEncode for [u8; 16] {
     fn encode_text(&self) -> String {
         format!(
             "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            self[0], self[1], self[2], self[3],
-            self[4], self[5],
-            self[6], self[7],
-            self[8], self[9],
-            self[10], self[11], self[12], self[13], self[14], self[15]
+            self[0],
+            self[1],
+            self[2],
+            self[3],
+            self[4],
+            self[5],
+            self[6],
+            self[7],
+            self[8],
+            self[9],
+            self[10],
+            self[11],
+            self[12],
+            self[13],
+            self[14],
+            self[15]
         )
     }
 }
@@ -637,8 +648,8 @@ mod tests {
     #[test]
     fn test_uuid_encoding() {
         let uuid: [u8; 16] = [
-            0x55, 0x06, 0x9c, 0x47, 0x86, 0x8b, 0x4a, 0x08,
-            0xa4, 0x7f, 0x36, 0x53, 0x26, 0x2b, 0xce, 0x35,
+            0x55, 0x06, 0x9c, 0x47, 0x86, 0x8b, 0x4a, 0x08, 0xa4, 0x7f, 0x36, 0x53, 0x26, 0x2b,
+            0xce, 0x35,
         ];
         assert_eq!(uuid.encode_text(), "55069c47-868b-4a08-a47f-3653262bce35");
     }

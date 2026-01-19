@@ -21,5 +21,6 @@ hmac = "0.12"
 pbkdf2 = "0.12"
 base64 = "0.22"
 rand = "0.8"
+md5 = "0.7"
 
 [dev-dependencies]

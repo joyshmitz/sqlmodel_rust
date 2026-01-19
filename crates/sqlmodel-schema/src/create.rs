@@ -112,7 +112,7 @@ impl<M: Model> Default for CreateTable<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sqlmodel_core::{FieldInfo, Row, Value, SqlType};
+    use sqlmodel_core::{FieldInfo, Row, SqlType, Value};
 
     // Test model for CREATE TABLE generation
     struct TestHero;
@@ -234,9 +234,7 @@ mod tests {
 
     #[test]
     fn test_schema_builder_single_table() {
-        let statements = SchemaBuilder::new()
-            .create_table::<TestHero>()
-            .build();
+        let statements = SchemaBuilder::new().create_table::<TestHero>().build();
         assert_eq!(statements.len(), 1);
         assert!(statements[0].contains("CREATE TABLE IF NOT EXISTS heroes"));
     }
@@ -248,7 +246,9 @@ mod tests {
             .create_index("idx_hero_name", "heroes", &["name"], false)
             .build();
         assert_eq!(statements.len(), 2);
-        assert!(statements[1].contains("CREATE INDEX IF NOT EXISTS idx_hero_name ON heroes (name)"));
+        assert!(
+            statements[1].contains("CREATE INDEX IF NOT EXISTS idx_hero_name ON heroes (name)")
+        );
     }
 
     #[test]

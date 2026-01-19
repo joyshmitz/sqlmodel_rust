@@ -40,7 +40,7 @@ pub struct ConnectionError {
     pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionErrorKind {
     /// Failed to establish connection
     Connect,
@@ -70,7 +70,7 @@ pub struct QueryError {
     pub source: Option<Box<dyn std::error::Error + Send + Sync>>,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QueryErrorKind {
     /// Syntax error in SQL
     Syntax,

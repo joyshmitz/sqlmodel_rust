@@ -21,8 +21,8 @@ pub mod oid;
 
 use std::collections::HashMap;
 
-pub use decode::{decode_value, BinaryDecode, Decode, TextDecode};
-pub use encode::{encode_value, BinaryEncode, Encode, Format, TextEncode};
+pub use decode::{BinaryDecode, Decode, TextDecode, decode_value};
+pub use encode::{BinaryEncode, Encode, Format, TextEncode, encode_value};
 
 /// Category of a PostgreSQL type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,8 +152,7 @@ impl TypeRegistry {
     /// Get the type category for an OID.
     #[must_use]
     pub fn category(&self, oid: u32) -> TypeCategory {
-        self.get(oid)
-            .map_or(TypeCategory::Unknown, |t| t.category)
+        self.get(oid).map_or(TypeCategory::Unknown, |t| t.category)
     }
 
     /// Check if a type supports binary format.

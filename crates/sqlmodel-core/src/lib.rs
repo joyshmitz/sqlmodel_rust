@@ -19,7 +19,9 @@ pub mod row;
 pub mod types;
 pub mod value;
 
-pub use connection::{Connection, Transaction};
+pub use connection::{
+    Connection, IsolationLevel, PreparedStatement, Transaction, TransactionInternal, TransactionOps,
+};
 pub use error::{Error, Result};
 pub use field::{Column, Field, FieldInfo};
 pub use model::Model;

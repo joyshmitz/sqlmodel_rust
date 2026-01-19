@@ -4,17 +4,56 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g., v0.1.0)'
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false  # Never cancel releases
 
 env:
   CARGO_TERM_COLOR: always
 
 permissions:
   contents: write
+  id-token: write  # For SLSA provenance
 
 jobs:
+  validate:
+    name: Validate Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone asupersync dependency
+        run: |
+          cd ..
+          git clone https://github.com/Dicklesworthstone/asupersync.git asupersync || true
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run full validation
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace
+
   build:
     name: Build (${{ matrix.target }})
+    needs: validate
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -25,11 +64,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             artifact_name: sqlmodel_rust-linux-arm64
+            cross: true
           - target: x86_64-apple-darwin
-            os: macos-latest
+            os: macos-13
             artifact_name: sqlmodel_rust-macos-x64
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: macos-14
             artifact_name: sqlmodel_rust-macos-arm64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
@@ -38,7 +78,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Clone asupersync dependency (sibling directory)
       - name: Clone asupersync dependency (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -59,7 +98,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install cross-compilation tools (Linux ARM64)
-        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        if: matrix.cross
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu
@@ -67,18 +106,17 @@ jobs:
       - name: Cache cargo registry and build
         uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.target }}
+          key: release-${{ matrix.target }}
 
       - name: Build release
         run: cargo build --workspace --release --target ${{ matrix.target }}
         env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross && 'aarch64-linux-gnu-gcc' || '' }}
 
       - name: Prepare artifact (Unix)
         if: runner.os != 'Windows'
         run: |
           mkdir -p dist
-          # Create tarball of all library artifacts
           tar -czvf "dist/${{ matrix.artifact_name }}.tar.gz" -C "target/${{ matrix.target }}/release" \
             --exclude='*.d' \
             --exclude='build' \
@@ -94,9 +132,8 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist
-          # Create zip of release artifacts
           $releaseDir = "target/${{ matrix.target }}/release"
-          $files = Get-ChildItem -Path $releaseDir -File | Where-Object { $_.Extension -notmatch '\.d$' }
+          $files = Get-ChildItem -Path $releaseDir -File | Where-Object { $_.Extension -notmatch '\.d$' -and $_.Extension -ne '' }
           if ($files) {
             Compress-Archive -Path $files.FullName -DestinationPath "dist/${{ matrix.artifact_name }}.zip" -Force
           }
@@ -112,6 +149,7 @@ jobs:
     name: Create Release
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -123,7 +161,6 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release
-          # Move all artifacts to release directory
           find artifacts -type f \( -name "*.tar.gz" -o -name "*.zip" \) -exec mv {} release/ \;
           ls -la release/
 
@@ -139,15 +176,53 @@ jobs:
 
       - name: Extract version from tag
         id: version
-        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "VERSION=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          cat << 'EOF' > release/RELEASE_NOTES.md
+          ## SQLModel Rust ${{ steps.version.outputs.VERSION }}
+
+          ### Installation
+
+          **Linux (x64)**:
+          ```bash
+          curl -LO https://github.com/sqlmodel/sqlmodel-rust/releases/download/${{ steps.version.outputs.VERSION }}/sqlmodel_rust-linux-x64.tar.gz
+          tar xzf sqlmodel_rust-linux-x64.tar.gz
+          ```
+
+          **macOS (Apple Silicon)**:
+          ```bash
+          curl -LO https://github.com/sqlmodel/sqlmodel-rust/releases/download/${{ steps.version.outputs.VERSION }}/sqlmodel_rust-macos-arm64.tar.gz
+          tar xzf sqlmodel_rust-macos-arm64.tar.gz
+          ```
+
+          **Windows**:
+          Download and extract `sqlmodel_rust-windows-x64.zip`
+
+          ### Verification
+
+          Verify checksums:
+          ```bash
+          sha256sum -c SHA256SUMS.txt
+          ```
+          EOF
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: Release ${{ steps.version.outputs.VERSION }}
+          tag_name: ${{ steps.version.outputs.VERSION }}
           draft: false
-          prerelease: ${{ contains(github.ref, '-') }}
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
           generate_release_notes: true
+          body_path: release/RELEASE_NOTES.md
           files: |
             release/*
         env:

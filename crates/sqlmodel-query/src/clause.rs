@@ -50,13 +50,13 @@ impl Where {
 /// ORDER BY clause.
 #[derive(Debug, Clone)]
 pub struct OrderBy {
-    column: String,
-    direction: OrderDirection,
-    nulls: Option<NullsOrder>,
+    pub expr: Expr,
+    pub direction: OrderDirection,
+    pub nulls: Option<NullsOrder>,
 }
 
 /// Sort direction.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum OrderDirection {
     #[default]
     Asc,
@@ -64,7 +64,7 @@ pub enum OrderDirection {
 }
 
 /// NULLS FIRST/LAST ordering.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NullsOrder {
     First,
     Last,
@@ -72,18 +72,18 @@ pub enum NullsOrder {
 
 impl OrderBy {
     /// Create an ascending order by clause.
-    pub fn asc(column: impl Into<String>) -> Self {
+    pub fn asc(expr: impl Into<Expr>) -> Self {
         Self {
-            column: column.into(),
+            expr: expr.into(),
             direction: OrderDirection::Asc,
             nulls: None,
         }
     }
 
     /// Create a descending order by clause.
-    pub fn desc(column: impl Into<String>) -> Self {
+    pub fn desc(expr: impl Into<Expr>) -> Self {
         Self {
-            column: column.into(),
+            expr: expr.into(),
             direction: OrderDirection::Desc,
             nulls: None,
         }
@@ -101,9 +101,9 @@ impl OrderBy {
         self
     }
 
-    /// Generate SQL for this ORDER BY clause.
-    pub fn to_sql(&self) -> String {
-        let mut sql = self.column.clone();
+    /// Build SQL for this ORDER BY clause.
+    pub fn build(&self, dialect: Dialect, params: &mut Vec<Value>, offset: usize) -> String {
+        let mut sql = self.expr.build_with_dialect(dialect, params, offset);
 
         sql.push_str(match self.direction {
             OrderDirection::Asc => " ASC",

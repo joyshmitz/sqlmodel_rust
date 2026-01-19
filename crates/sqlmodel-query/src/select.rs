@@ -420,7 +420,10 @@ mod tests {
         );
         assert_eq!(
             params,
-            vec![Value::Text("warrior".to_string()), Value::Text("mage".to_string())]
+            vec![
+                Value::Text("warrior".to_string()),
+                Value::Text("mage".to_string())
+            ]
         );
     }
 
@@ -590,7 +593,9 @@ mod tests {
             .offset(0);
         let (sql, params) = query.build();
 
-        assert!(sql.starts_with("SELECT DISTINCT heroes.id, heroes.name, teams.name as team_name FROM heroes"));
+        assert!(sql.starts_with(
+            "SELECT DISTINCT heroes.id, heroes.name, teams.name as team_name FROM heroes"
+        ));
         assert!(sql.contains("INNER JOIN teams ON"));
         assert!(sql.contains("WHERE"));
         assert!(sql.contains("GROUP BY"));

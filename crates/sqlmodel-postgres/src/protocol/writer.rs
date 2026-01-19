@@ -5,8 +5,7 @@
 #![allow(clippy::cast_possible_truncation)]
 
 use super::messages::{
-    CANCEL_REQUEST_CODE, DescribeKind, FrontendMessage, SSL_REQUEST_CODE,
-    frontend_type,
+    CANCEL_REQUEST_CODE, DescribeKind, FrontendMessage, SSL_REQUEST_CODE, frontend_type,
 };
 
 /// Buffer for writing PostgreSQL protocol messages.
