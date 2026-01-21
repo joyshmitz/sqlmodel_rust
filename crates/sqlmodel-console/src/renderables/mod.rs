@@ -7,6 +7,7 @@
 //! - Error messages as panels
 //! - Connection pool status dashboards
 //! - Operation progress bars
+//! - Indeterminate spinners
 //!
 //! # Implementation Status
 //!
@@ -14,12 +15,14 @@
 //! - Phase 3: Error panels ✓
 //! - Phase 4: Query result tables
 //! - Phase 5: Schema trees
-//! - Phase 6: Operation progress ✓
+//! - Phase 6: Operation progress ✓, Indeterminate spinner ✓
 
 pub mod error;
 pub mod operation_progress;
 pub mod pool_status;
+pub mod spinner;
 
 pub use error::{ErrorPanel, ErrorSeverity};
 pub use operation_progress::{OperationProgress, ProgressState};
 pub use pool_status::{PoolHealth, PoolStatsProvider, PoolStatusDisplay};
+pub use spinner::{IndeterminateSpinner, SpinnerStyle};

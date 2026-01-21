@@ -190,13 +190,7 @@ impl SqlModelConsole {
     pub fn print(&self, message: &str) {
         match self.mode {
             OutputMode::Rich => {
-                #[cfg(feature = "rich")]
-                {
-                    // TODO: Use rich_rust console when available
-                    println!("{}", strip_markup(message));
-                    return;
-                }
-                #[cfg(not(feature = "rich"))]
+                // TODO: Use rich_rust console when available
                 println!("{}", strip_markup(message));
             }
             OutputMode::Plain => {
@@ -225,13 +219,7 @@ impl SqlModelConsole {
     pub fn status(&self, message: &str) {
         match self.mode {
             OutputMode::Rich => {
-                #[cfg(feature = "rich")]
-                {
-                    // TODO: Use dim styling when rich_rust available
-                    eprintln!("{}", strip_markup(message));
-                    return;
-                }
-                #[cfg(not(feature = "rich"))]
+                // TODO: Use dim styling when rich_rust available
                 eprintln!("{}", strip_markup(message));
             }
             OutputMode::Plain | OutputMode::Json => {
@@ -263,13 +251,7 @@ impl SqlModelConsole {
     fn print_styled_status(&self, message: &str, _style: &str, icon: &str) {
         match self.mode {
             OutputMode::Rich => {
-                #[cfg(feature = "rich")]
-                {
-                    // TODO: Use rich_rust styling when available
-                    eprintln!("{icon} {message}");
-                    return;
-                }
-                #[cfg(not(feature = "rich"))]
+                // TODO: Use rich_rust styling when available
                 eprintln!("{icon} {message}");
             }
             OutputMode::Plain => {
@@ -293,13 +275,7 @@ impl SqlModelConsole {
     pub fn rule(&self, title: Option<&str>) {
         match self.mode {
             OutputMode::Rich => {
-                #[cfg(feature = "rich")]
-                {
-                    // TODO: Use rich_rust rule when available
-                    self.plain_rule(title);
-                    return;
-                }
-                #[cfg(not(feature = "rich"))]
+                // TODO: Use rich_rust rule when available
                 self.plain_rule(title);
             }
             OutputMode::Plain | OutputMode::Json => {
