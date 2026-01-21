@@ -101,6 +101,14 @@ pub use sqlmodel_schema::{
 
 pub use sqlmodel_pool::{Pool, PoolConfig, PoolStats, PooledConnection};
 
+// Session management
+pub mod session;
+pub use session::{Session, SessionBuilder};
+
+// Console-enabled session extension trait
+#[cfg(feature = "console")]
+pub use session::ConnectionBuilderExt;
+
 // Console integration (feature-gated)
 #[cfg(feature = "console")]
 pub use sqlmodel_console::{
@@ -142,6 +150,9 @@ pub mod prelude {
         Result,
         Row,
         Select,
+        // Session
+        Session,
+        SessionBuilder,
         TaskId,
         Value,
         // Schema
@@ -158,7 +169,7 @@ pub mod prelude {
     // Console types when feature enabled
     #[cfg(feature = "console")]
     pub use crate::{
-        ConsoleAware, ErrorPanel, ErrorSeverity, OutputMode, PoolHealth, PoolStatsProvider,
-        PoolStatusDisplay, SqlModelConsole, Theme,
+        ConnectionBuilderExt, ConsoleAware, ErrorPanel, ErrorSeverity, OutputMode, PoolHealth,
+        PoolStatsProvider, PoolStatusDisplay, SqlModelConsole, Theme,
     };
 }
