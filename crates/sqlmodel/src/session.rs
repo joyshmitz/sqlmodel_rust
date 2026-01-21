@@ -36,6 +36,9 @@ use std::sync::Arc;
 #[cfg(feature = "console")]
 use sqlmodel_console::{ConsoleAware, SqlModelConsole};
 
+#[cfg(feature = "console")]
+use crate::global_console::global_console;
+
 use sqlmodel_core::Connection;
 
 /// A database session that combines connection management with optional console output.
@@ -164,13 +167,19 @@ impl<C: Connection> SessionBuilder<C> {
     }
 
     /// Build the session with the provided connection.
+    ///
+    /// Console selection follows these priorities (highest first):
+    /// 1. Explicit console set via `with_console()` or similar
+    /// 2. Global console (if set via `set_global_console()` or `init_auto_console()`)
+    /// 3. No console (silent operation)
     #[allow(unused_mut)] // mut only used with console feature
     pub fn build_with(self, connection: C) -> Session<C> {
         let mut session = Session::new(connection);
 
         #[cfg(feature = "console")]
         {
-            session.console = self.console;
+            // Use explicit console if set, otherwise fall back to global console
+            session.console = self.console.or_else(global_console);
         }
 
         session

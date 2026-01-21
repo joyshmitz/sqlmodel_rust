@@ -109,6 +109,15 @@ pub use session::{Session, SessionBuilder};
 #[cfg(feature = "console")]
 pub use session::ConnectionBuilderExt;
 
+// Global console support (feature-gated)
+#[cfg(feature = "console")]
+mod global_console;
+#[cfg(feature = "console")]
+pub use global_console::{
+    global_console, has_global_console, init_auto_console, set_global_console,
+    set_global_shared_console,
+};
+
 // Console integration (feature-gated)
 #[cfg(feature = "console")]
 pub use sqlmodel_console::{
@@ -169,7 +178,22 @@ pub mod prelude {
     // Console types when feature enabled
     #[cfg(feature = "console")]
     pub use crate::{
-        ConnectionBuilderExt, ConsoleAware, ErrorPanel, ErrorSeverity, OutputMode, PoolHealth,
-        PoolStatsProvider, PoolStatusDisplay, SqlModelConsole, Theme,
+        // Types and traits
+        ConnectionBuilderExt,
+        ConsoleAware,
+        ErrorPanel,
+        ErrorSeverity,
+        OutputMode,
+        PoolHealth,
+        PoolStatsProvider,
+        PoolStatusDisplay,
+        SqlModelConsole,
+        Theme,
+        // Global console functions
+        global_console,
+        has_global_console,
+        init_auto_console,
+        set_global_console,
+        set_global_shared_console,
     };
 }
