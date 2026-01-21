@@ -12,12 +12,17 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
+#[cfg(feature = "console")]
+use std::sync::Arc;
 
 use sqlmodel_core::Error;
 use sqlmodel_core::error::{
     ConnectionError, ConnectionErrorKind, ProtocolError, QueryError, QueryErrorKind,
 };
 use sqlmodel_core::{Row, Value};
+
+#[cfg(feature = "console")]
+use sqlmodel_console::{ConsoleAware, SqlModelConsole};
 
 use crate::auth;
 use crate::config::MySqlConfig;
@@ -94,6 +99,9 @@ pub struct MySqlConnection {
     config: MySqlConfig,
     /// Current sequence ID for packet framing
     sequence_id: u8,
+    /// Optional console for rich output
+    #[cfg(feature = "console")]
+    console: Option<Arc<SqlModelConsole>>,
 }
 
 impl std::fmt::Debug for MySqlConnection {
@@ -158,6 +166,8 @@ impl MySqlConnection {
             warnings: 0,
             config,
             sequence_id: 0,
+            #[cfg(feature = "console")]
+            console: None,
         };
 
         // 2. Receive server handshake
@@ -522,6 +532,9 @@ impl MySqlConnection {
     /// Parameters are interpolated into the SQL string with proper escaping.
     #[allow(clippy::result_large_err)]
     pub fn query_sync(&mut self, sql: &str, params: &[Value]) -> Result<Vec<Row>, Error> {
+        #[cfg(feature = "console")]
+        let start = std::time::Instant::now();
+
         let sql = interpolate_params(sql, params);
         if !self.is_ready() && self.state != ConnectionState::InTransaction {
             return Err(connection_error("Connection not ready for queries"));
@@ -562,6 +575,14 @@ impl MySqlConnection {
                 } else {
                     ConnectionState::Ready
                 };
+
+                #[cfg(feature = "console")]
+                {
+                    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    self.emit_execute_timing(&sql, elapsed_ms, self.affected_rows);
+                    self.emit_warnings(self.warnings);
+                }
+
                 Ok(vec![])
             }
             PacketType::Error => {
@@ -578,7 +599,11 @@ impl MySqlConnection {
             }
             _ => {
                 // Result set - first byte is column count
-                self.read_result_set(&payload)
+                #[cfg(feature = "console")]
+                let result = self.read_result_set_with_timing(&sql, &payload, start);
+                #[cfg(not(feature = "console"))]
+                let result = self.read_result_set(&payload);
+                result
             }
         }
     }
@@ -659,6 +684,100 @@ impl MySqlConnection {
             } else {
                 ConnectionState::Ready
             };
+
+        Ok(rows)
+    }
+
+    /// Read a result set with timing and console output (console feature only).
+    #[cfg(feature = "console")]
+    #[allow(clippy::result_large_err)]
+    fn read_result_set_with_timing(
+        &mut self,
+        sql: &str,
+        first_packet: &[u8],
+        start: std::time::Instant,
+    ) -> Result<Vec<Row>, Error> {
+        let mut reader = PacketReader::new(first_packet);
+        let column_count = reader
+            .read_lenenc_int()
+            .ok_or_else(|| protocol_error("Invalid column count"))?
+            as usize;
+
+        // Read column definitions
+        let mut columns = Vec::with_capacity(column_count);
+        let mut col_names = Vec::with_capacity(column_count);
+        for _ in 0..column_count {
+            let (payload, _) = self.read_packet()?;
+            let col = self.parse_column_def(&payload)?;
+            col_names.push(col.name.clone());
+            columns.push(col);
+        }
+
+        // Check for EOF packet (if not CLIENT_DEPRECATE_EOF)
+        let server_caps = self.server_caps.as_ref().map_or(0, |c| c.capabilities);
+        if server_caps & capabilities::CLIENT_DEPRECATE_EOF == 0 {
+            let (payload, _) = self.read_packet()?;
+            if payload.first() == Some(&0xFE) {
+                // EOF packet - continue to rows
+            }
+        }
+
+        // Read rows until EOF or OK
+        let mut rows = Vec::new();
+        loop {
+            let (payload, _) = self.read_packet()?;
+
+            if payload.is_empty() {
+                break;
+            }
+
+            match PacketType::from_first_byte(payload[0], payload.len() as u32) {
+                PacketType::Eof | PacketType::Ok => {
+                    let mut reader = PacketReader::new(&payload);
+                    if payload[0] == 0x00 {
+                        if let Some(ok) = reader.parse_ok_packet() {
+                            self.status_flags = ok.status_flags;
+                            self.warnings = ok.warnings;
+                        }
+                    } else if payload[0] == 0xFE {
+                        if let Some(eof) = reader.parse_eof_packet() {
+                            self.status_flags = eof.status_flags;
+                            self.warnings = eof.warnings;
+                        }
+                    }
+                    break;
+                }
+                PacketType::Error => {
+                    let mut reader = PacketReader::new(&payload);
+                    let err = reader
+                        .parse_err_packet()
+                        .ok_or_else(|| protocol_error("Invalid error packet"))?;
+                    self.state = ConnectionState::Ready;
+                    return Err(query_error(&err));
+                }
+                _ => {
+                    let row = self.parse_text_row(&payload, &columns);
+                    rows.push(row);
+                }
+            }
+        }
+
+        self.state =
+            if self.status_flags & crate::protocol::server_status::SERVER_STATUS_IN_TRANS != 0 {
+                ConnectionState::InTransaction
+            } else {
+                ConnectionState::Ready
+            };
+
+        // Emit console output
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let sql_upper = sql.trim().to_uppercase();
+        if sql_upper.starts_with("SHOW") {
+            self.emit_show_results(sql, &col_names, &rows, elapsed_ms);
+        } else {
+            self.emit_query_timing(sql, elapsed_ms, rows.len());
+        }
+        self.emit_warnings(self.warnings);
 
         Ok(rows)
     }
@@ -897,6 +1016,227 @@ impl MySqlConnection {
         })?;
 
         Ok(())
+    }
+}
+
+// Console integration (feature-gated)
+#[cfg(feature = "console")]
+impl ConsoleAware for MySqlConnection {
+    fn set_console(&mut self, console: Option<Arc<SqlModelConsole>>) {
+        self.console = console;
+    }
+
+    fn console(&self) -> Option<&Arc<SqlModelConsole>> {
+        self.console.as_ref()
+    }
+}
+
+#[cfg(feature = "console")]
+impl MySqlConnection {
+    /// Emit connection progress to console.
+    fn emit_connection_progress(&self, stage: &str, status: &str, is_final: bool) {
+        if let Some(console) = &self.console {
+            let mode = console.mode();
+            match mode {
+                sqlmodel_console::OutputMode::Plain => {
+                    if is_final {
+                        console.status(&format!("[MySQL] {}: {}", stage, status));
+                    }
+                }
+                sqlmodel_console::OutputMode::Rich => {
+                    let status_icon = if status.starts_with("OK") || status.starts_with("Connected") {
+                        "✓"
+                    } else if status.starts_with("Error") || status.starts_with("Failed") {
+                        "✗"
+                    } else {
+                        "…"
+                    };
+                    console.status(&format!("  {} {}: {}", status_icon, stage, status));
+                }
+                sqlmodel_console::OutputMode::Json => {
+                    // JSON mode - no progress output
+                }
+            }
+        }
+    }
+
+    /// Emit query timing to console.
+    fn emit_query_timing(&self, sql: &str, elapsed_ms: f64, row_count: usize) {
+        if let Some(console) = &self.console {
+            let mode = console.mode();
+            let sql_preview: String = sql.chars().take(60).collect();
+            let sql_display = if sql.len() > 60 {
+                format!("{}...", sql_preview)
+            } else {
+                sql_preview
+            };
+
+            match mode {
+                sqlmodel_console::OutputMode::Plain => {
+                    console.status(&format!(
+                        "[MySQL] Query: {:.2}ms, {} rows | {}",
+                        elapsed_ms, row_count, sql_display
+                    ));
+                }
+                sqlmodel_console::OutputMode::Rich => {
+                    let time_color = if elapsed_ms < 10.0 {
+                        "\x1b[32m" // green
+                    } else if elapsed_ms < 100.0 {
+                        "\x1b[33m" // yellow
+                    } else {
+                        "\x1b[31m" // red
+                    };
+                    console.status(&format!(
+                        "  ⏱ {}{:.2}ms\x1b[0m ({} rows) {}",
+                        time_color, elapsed_ms, row_count, sql_display
+                    ));
+                }
+                sqlmodel_console::OutputMode::Json => {
+                    // JSON mode - no timing output
+                }
+            }
+        }
+    }
+
+    /// Emit execute timing to console (for non-SELECT queries).
+    fn emit_execute_timing(&self, sql: &str, elapsed_ms: f64, affected_rows: u64) {
+        if let Some(console) = &self.console {
+            let mode = console.mode();
+            let sql_preview: String = sql.chars().take(60).collect();
+            let sql_display = if sql.len() > 60 {
+                format!("{}...", sql_preview)
+            } else {
+                sql_preview
+            };
+
+            match mode {
+                sqlmodel_console::OutputMode::Plain => {
+                    console.status(&format!(
+                        "[MySQL] Execute: {:.2}ms, {} affected | {}",
+                        elapsed_ms, affected_rows, sql_display
+                    ));
+                }
+                sqlmodel_console::OutputMode::Rich => {
+                    let time_color = if elapsed_ms < 10.0 {
+                        "\x1b[32m"
+                    } else if elapsed_ms < 100.0 {
+                        "\x1b[33m"
+                    } else {
+                        "\x1b[31m"
+                    };
+                    console.status(&format!(
+                        "  ⏱ {}{:.2}ms\x1b[0m ({} affected) {}",
+                        time_color, elapsed_ms, affected_rows, sql_display
+                    ));
+                }
+                sqlmodel_console::OutputMode::Json => {}
+            }
+        }
+    }
+
+    /// Emit query warnings to console.
+    fn emit_warnings(&self, warning_count: u16) {
+        if warning_count == 0 {
+            return;
+        }
+        if let Some(console) = &self.console {
+            let mode = console.mode();
+            match mode {
+                sqlmodel_console::OutputMode::Plain => {
+                    console.warning(&format!("[MySQL] {} warning(s)", warning_count));
+                }
+                sqlmodel_console::OutputMode::Rich => {
+                    console.warning(&format!("{} warning(s)", warning_count));
+                }
+                sqlmodel_console::OutputMode::Json => {}
+            }
+        }
+    }
+
+    /// Format SHOW command results as a table.
+    fn emit_show_results(&self, sql: &str, col_names: &[String], rows: &[Row], elapsed_ms: f64) {
+        if let Some(console) = &self.console {
+            let mode = console.mode();
+            let sql_upper = sql.trim().to_uppercase();
+
+            // Only format SHOW commands specially
+            if !sql_upper.starts_with("SHOW") {
+                self.emit_query_timing(sql, elapsed_ms, rows.len());
+                return;
+            }
+
+            match mode {
+                sqlmodel_console::OutputMode::Plain | sqlmodel_console::OutputMode::Rich => {
+                    // Calculate column widths
+                    let mut widths: Vec<usize> = col_names.iter().map(|n| n.len()).collect();
+                    for row in rows {
+                        for (i, val) in row.values().enumerate() {
+                            if i < widths.len() {
+                                let val_str = format_value(val);
+                                widths[i] = widths[i].max(val_str.len());
+                            }
+                        }
+                    }
+
+                    // Build header
+                    let header: String = col_names
+                        .iter()
+                        .zip(&widths)
+                        .map(|(name, width)| format!("{:width$}", name, width = width))
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+
+                    let separator: String = widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>().join("-+-");
+
+                    console.status(&header);
+                    console.status(&separator);
+
+                    for row in rows {
+                        let row_str: String = row
+                            .values()
+                            .zip(&widths)
+                            .map(|(val, width)| format!("{:width$}", format_value(val), width = width))
+                            .collect::<Vec<_>>()
+                            .join(" | ");
+                        console.status(&row_str);
+                    }
+
+                    console.status(&format!("({} rows, {:.2}ms)\n", rows.len(), elapsed_ms));
+                }
+                sqlmodel_console::OutputMode::Json => {}
+            }
+        }
+    }
+}
+
+/// Format a Value for display.
+#[cfg(feature = "console")]
+fn format_value(value: &Value) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        Value::TinyInt(i) => i.to_string(),
+        Value::SmallInt(i) => i.to_string(),
+        Value::Int(i) => i.to_string(),
+        Value::BigInt(i) => i.to_string(),
+        Value::Float(f) => format!("{:.6}", f),
+        Value::Double(f) => format!("{:.6}", f),
+        Value::Decimal(d) => d.clone(),
+        Value::Text(s) => s.clone(),
+        Value::Bytes(b) => format!("<{} bytes>", b.len()),
+        Value::Date(d) => format!("date:{}", d),
+        Value::Time(t) => format!("time:{}", t),
+        Value::Timestamp(ts) => format!("ts:{}", ts),
+        Value::TimestampTz(ts) => format!("tstz:{}", ts),
+        Value::Uuid(u) => {
+            format!(
+                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+                u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]
+            )
+        }
+        Value::Json(j) => j.to_string(),
+        Value::Array(arr) => format!("[{} items]", arr.len()),
     }
 }
 

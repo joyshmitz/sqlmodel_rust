@@ -39,3 +39,7 @@ pub mod types;
 
 pub use config::{MySqlConfig, SslMode};
 pub use connection::{ConnectionState, MySqlConnection};
+
+// Console integration (feature-gated)
+#[cfg(feature = "console")]
+pub use sqlmodel_console::ConsoleAware;
