@@ -10,6 +10,7 @@ members = [
     "crates/sqlmodel-postgres",
     "crates/sqlmodel-sqlite",
     "crates/sqlmodel-mysql",
+    "crates/sqlmodel-console",
 ]
 
 [workspace.package]
