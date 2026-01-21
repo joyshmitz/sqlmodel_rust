@@ -609,6 +609,7 @@ impl MySqlConnection {
     }
 
     /// Read a result set (column definitions and rows).
+    #[allow(dead_code)] // Used when console feature is disabled
     #[allow(clippy::result_large_err)]
     fn read_result_set(&mut self, first_packet: &[u8]) -> Result<Vec<Row>, Error> {
         let mut reader = PacketReader::new(first_packet);
@@ -1034,6 +1035,9 @@ impl ConsoleAware for MySqlConnection {
 #[cfg(feature = "console")]
 impl MySqlConnection {
     /// Emit connection progress to console.
+    /// Note: Currently unused because console is attached after connection.
+    /// Retained for future use when connection progress needs to be emitted.
+    #[allow(dead_code)]
     fn emit_connection_progress(&self, stage: &str, status: &str, is_final: bool) {
         if let Some(console) = &self.console {
             let mode = console.mode();
@@ -1332,6 +1336,113 @@ mod tests {
             assert_eq!(q.kind, QueryErrorKind::Constraint);
         } else {
             panic!("Expected query error");
+        }
+    }
+
+    /// Console integration tests (only run when console feature is enabled).
+    #[cfg(feature = "console")]
+    mod console_tests {
+        use super::*;
+        use sqlmodel_console::{ConsoleAware, OutputMode, SqlModelConsole};
+
+        #[test]
+        fn test_console_aware_trait_impl() {
+            // Create a mock connection config (won't actually connect)
+            // Just verify the trait implementation compiles and works
+            let config = MySqlConfig::new()
+                .host("localhost")
+                .port(13306)
+                .user("test")
+                .password("test");
+
+            // We can't easily create a MySqlConnection without a server,
+            // but we can verify the trait is implemented correctly by
+            // checking that the implementation compiles.
+            fn assert_console_aware<T: ConsoleAware>() {}
+            assert_console_aware::<MySqlConnection>();
+
+            // Verify config can be built
+            assert_eq!(config.host, "localhost");
+            assert_eq!(config.port, 13306);
+        }
+
+        #[test]
+        fn test_format_value_all_types() {
+            // Test each Value variant is handled correctly
+            assert_eq!(format_value(&Value::Null), "NULL");
+            assert_eq!(format_value(&Value::Bool(true)), "true");
+            assert_eq!(format_value(&Value::Bool(false)), "false");
+            assert_eq!(format_value(&Value::TinyInt(42)), "42");
+            assert_eq!(format_value(&Value::SmallInt(1000)), "1000");
+            assert_eq!(format_value(&Value::Int(123456)), "123456");
+            assert_eq!(format_value(&Value::BigInt(9_999_999_999)), "9999999999");
+            assert!(format_value(&Value::Float(3.14)).starts_with("3.14"));
+            assert!(format_value(&Value::Double(2.718281828)).starts_with("2.71828"));
+            assert_eq!(format_value(&Value::Decimal("123.45".to_string())), "123.45");
+            assert_eq!(format_value(&Value::Text("hello".to_string())), "hello");
+            assert_eq!(format_value(&Value::Bytes(vec![1, 2, 3])), "<3 bytes>");
+            assert!(format_value(&Value::Date(19000)).contains("date:"));
+            assert!(format_value(&Value::Time(43200_000_000)).contains("time:"));
+            assert!(format_value(&Value::Timestamp(1700000000_000_000)).contains("ts:"));
+            assert!(format_value(&Value::TimestampTz(1700000000_000_000)).contains("tstz:"));
+
+            let uuid = [0u8; 16];
+            let uuid_str = format_value(&Value::Uuid(uuid));
+            assert_eq!(uuid_str, "00000000-0000-0000-0000-000000000000");
+
+            let json = serde_json::json!({"key": "value"});
+            let json_str = format_value(&Value::Json(json));
+            assert!(json_str.contains("key"));
+
+            let arr = vec![Value::Int(1), Value::Int(2)];
+            assert_eq!(format_value(&Value::Array(arr)), "[2 items]");
+        }
+
+        #[test]
+        fn test_plain_mode_output_format() {
+            // Verify the console can be created in different modes
+            let plain_console = SqlModelConsole::with_mode(OutputMode::Plain);
+            assert!(plain_console.is_plain());
+
+            let rich_console = SqlModelConsole::with_mode(OutputMode::Rich);
+            assert!(rich_console.is_rich());
+
+            let json_console = SqlModelConsole::with_mode(OutputMode::Json);
+            assert!(json_console.is_json());
+        }
+
+        #[test]
+        fn test_console_mode_detection() {
+            // Verify mode checking methods work
+            let console = SqlModelConsole::with_mode(OutputMode::Plain);
+            assert!(console.is_plain());
+            assert!(!console.is_rich());
+            assert!(!console.is_json());
+
+            assert_eq!(console.mode(), OutputMode::Plain);
+        }
+
+        #[test]
+        fn test_format_value_uuid() {
+            let uuid: [u8; 16] = [
+                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+            ];
+            let result = format_value(&Value::Uuid(uuid));
+            assert_eq!(result, "12345678-9abc-def0-1234-56789abcdef0");
+        }
+
+        #[test]
+        fn test_format_value_nested_json() {
+            let json = serde_json::json!({
+                "users": [
+                    {"name": "Alice", "age": 30},
+                    {"name": "Bob", "age": 25}
+                ]
+            });
+            let result = format_value(&Value::Json(json));
+            assert!(result.contains("users"));
+            assert!(result.contains("Alice"));
         }
     }
 }
