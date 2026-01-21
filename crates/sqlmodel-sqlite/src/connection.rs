@@ -901,7 +901,14 @@ fn format_value(value: &Value) -> String {
         Value::Timestamp(ts) => ts.to_string(),
         Value::TimestampTz(ts) => ts.to_string(),
         Value::Json(j) => j.to_string(),
-        Value::Uuid(u) => u.to_string(),
+        Value::Uuid(u) => {
+            // Format UUID as hex string: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+            format!(
+                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+                u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]
+            )
+        }
         Value::Decimal(d) => d.to_string(),
         Value::Array(arr) => format!("[{} items]", arr.len()),
     }
@@ -1154,7 +1161,7 @@ impl SqliteConnection {
                 ));
             } else {
                 // ASCII progress bar for rich mode
-                let bar_width = 20;
+                let bar_width: usize = 20;
                 let filled = ((pct / 100.0) * bar_width as f64).round() as usize;
                 let empty = bar_width.saturating_sub(filled);
                 let bar = format!("[{}{}]", "=".repeat(filled), " ".repeat(empty));
@@ -1403,5 +1410,185 @@ mod tests {
 
         drop(conn);
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // ==================== Console Integration Tests ====================
+
+    #[cfg(feature = "console")]
+    mod console_tests {
+        use super::*;
+
+        /// Test that ConsoleAware trait is properly implemented.
+        #[test]
+        fn test_console_aware_trait_impl() {
+            let mut conn = SqliteConnection::open_memory().unwrap();
+
+            // Initially no console
+            assert!(!conn.has_console());
+            assert!(conn.console().is_none());
+
+            // Attach console
+            let console = Arc::new(SqlModelConsole::with_mode(
+                sqlmodel_console::OutputMode::Plain,
+            ));
+            conn.set_console(Some(console.clone()));
+
+            // Verify console is attached
+            assert!(conn.has_console());
+            assert!(conn.console().is_some());
+
+            // Detach console
+            conn.set_console(None);
+            assert!(!conn.has_console());
+        }
+
+        /// Test database open feedback is emitted when console is attached.
+        #[test]
+        fn test_database_open_feedback() {
+            let mut conn = SqliteConnection::open_memory().unwrap();
+
+            // Attaching console should emit open status
+            // (output goes to stderr, we just verify no panic)
+            let console = Arc::new(SqlModelConsole::with_mode(
+                sqlmodel_console::OutputMode::Plain,
+            ));
+            conn.set_console(Some(console));
+
+            // No panic means success
+        }
+
+        /// Test PRAGMA query formatting.
+        #[test]
+        fn test_pragma_formatting() {
+            let mut conn = SqliteConnection::open_memory().unwrap();
+
+            // Create a table to have something in pragma_table_info
+            conn.execute_raw("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+                .unwrap();
+
+            // Attach console for formatted output
+            let console = Arc::new(SqlModelConsole::with_mode(
+                sqlmodel_console::OutputMode::Plain,
+            ));
+            conn.set_console(Some(console));
+
+            // Execute PRAGMA query - should format as table
+            let rows = conn
+                .query_sync("PRAGMA table_info(test)", &[])
+                .unwrap();
+
+            // Verify we got the expected columns
+            assert!(!rows.is_empty());
+        }
+
+        /// Test transaction state display.
+        #[test]
+        fn test_transaction_state() {
+            let mut conn = SqliteConnection::open_memory().unwrap();
+            conn.execute_raw("CREATE TABLE test (id INTEGER PRIMARY KEY)")
+                .unwrap();
+
+            // Attach console
+            let console = Arc::new(SqlModelConsole::with_mode(
+                sqlmodel_console::OutputMode::Plain,
+            ));
+            conn.set_console(Some(console));
+
+            // Transaction operations should emit state
+            conn.begin_sync(IsolationLevel::default()).unwrap();
+            conn.execute_sync("INSERT INTO test (id) VALUES (?)", &[Value::Int(1)])
+                .unwrap();
+            conn.commit_sync().unwrap();
+
+            // Verify the transaction worked
+            let rows = conn.query_sync("SELECT * FROM test", &[]).unwrap();
+            assert_eq!(rows.len(), 1);
+        }
+
+        /// Test WAL checkpoint progress output.
+        #[test]
+        fn test_wal_checkpoint_progress() {
+            let conn = SqliteConnection::open_memory().unwrap();
+
+            // emit_checkpoint_progress should not panic
+            conn.emit_checkpoint_progress(50, 100);
+            conn.emit_checkpoint_progress(100, 100);
+            conn.emit_checkpoint_progress(0, 0);
+        }
+
+        /// Test busy timeout feedback output.
+        #[test]
+        fn test_busy_timeout_feedback() {
+            let conn = SqliteConnection::open_memory().unwrap();
+
+            // emit_busy_waiting should not panic
+            conn.emit_busy_waiting(0.5);
+            conn.emit_busy_waiting(2.1);
+        }
+
+        /// Test that console disabled produces no output (no panic).
+        #[test]
+        fn test_console_disabled_no_output() {
+            let conn = SqliteConnection::open_memory().unwrap();
+
+            // Without console, all emit methods should be no-ops
+            conn.emit_busy_waiting(1.0);
+            conn.emit_checkpoint_progress(10, 100);
+
+            // Query should work without console
+            conn.execute_raw("CREATE TABLE test (id INTEGER PRIMARY KEY)")
+                .unwrap();
+            let rows = conn.query_sync("SELECT * FROM test", &[]).unwrap();
+            assert_eq!(rows.len(), 0);
+        }
+
+        /// Test plain mode output format (parseable by agents).
+        #[test]
+        fn test_plain_mode_output() {
+            let mut conn = SqliteConnection::open_memory().unwrap();
+
+            // Attach plain mode console
+            let console = Arc::new(SqlModelConsole::with_mode(
+                sqlmodel_console::OutputMode::Plain,
+            ));
+            conn.set_console(Some(console.clone()));
+
+            // Verify plain mode is active
+            assert!(conn.console().unwrap().is_plain());
+
+            // Execute operations (output should be plain text)
+            conn.execute_raw("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT)")
+                .unwrap();
+            conn.execute_sync(
+                "INSERT INTO test (name) VALUES (?)",
+                &[Value::Text("Alice".to_string())],
+            )
+            .unwrap();
+
+            let rows = conn
+                .query_sync("PRAGMA table_info(test)", &[])
+                .unwrap();
+            assert!(!rows.is_empty());
+        }
+
+        /// Test rich mode output format.
+        #[test]
+        fn test_rich_mode_output() {
+            let mut conn = SqliteConnection::open_memory().unwrap();
+
+            // Attach rich mode console
+            let console = Arc::new(SqlModelConsole::with_mode(
+                sqlmodel_console::OutputMode::Rich,
+            ));
+            conn.set_console(Some(console.clone()));
+
+            // Verify rich mode is active
+            assert!(conn.console().unwrap().is_rich());
+
+            // Execute operations (output should have formatting)
+            conn.execute_raw("CREATE TABLE test (id INTEGER PRIMARY KEY)")
+                .unwrap();
+            conn.emit_checkpoint_progress(50, 100);
+        }
     }
 }
