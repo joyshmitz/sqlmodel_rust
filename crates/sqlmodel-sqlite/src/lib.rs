@@ -1,5 +1,8 @@
 //! SQLite driver for SQLModel Rust.
 //!
+// FFI bindings require unsafe code - this is expected for database drivers
+#![allow(unsafe_code)]
+//!
 //! This crate provides a SQLite database driver using FFI bindings to libsqlite3.
 //! It implements the `Connection` trait from sqlmodel-core for seamless integration
 //! with the rest of the SQLModel ecosystem.
@@ -59,6 +62,10 @@ pub mod ffi;
 pub mod types;
 
 pub use connection::{OpenFlags, SqliteConfig, SqliteConnection, SqliteTransaction};
+
+// Console integration (feature-gated)
+#[cfg(feature = "console")]
+pub use sqlmodel_console::ConsoleAware;
 
 /// Re-export the SQLite library version.
 pub fn sqlite_version() -> &'static str {

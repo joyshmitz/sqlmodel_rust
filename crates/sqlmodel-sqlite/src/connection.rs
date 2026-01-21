@@ -2,6 +2,21 @@
 //!
 //! This module provides safe wrappers around SQLite's C API and implements
 //! the Connection trait from sqlmodel-core.
+//!
+//! # Console Integration
+//!
+//! When the `console` feature is enabled, the connection can report status
+//! during operations. Use the `ConsoleAware` trait to attach a console.
+//!
+//! ```rust,ignore
+//! use sqlmodel_sqlite::SqliteConnection;
+//! use sqlmodel_console::{SqlModelConsole, ConsoleAware};
+//! use std::sync::Arc;
+//!
+//! let console = Arc::new(SqlModelConsole::new());
+//! let mut conn = SqliteConnection::open_memory().unwrap();
+//! conn.set_console(Some(console));
+//! ```
 
 use crate::ffi;
 use crate::types;
@@ -14,6 +29,9 @@ use std::ffi::{CStr, CString, c_int};
 use std::future::Future;
 use std::ptr;
 use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "console")]
+use sqlmodel_console::{ConsoleAware, SqlModelConsole};
 
 /// Configuration for opening SQLite connections.
 #[derive(Debug, Clone)]
@@ -165,6 +183,9 @@ unsafe impl Send for SqliteInner {}
 pub struct SqliteConnection {
     inner: Mutex<SqliteInner>,
     path: String,
+    /// Optional console for rich output
+    #[cfg(feature = "console")]
+    console: Option<Arc<SqlModelConsole>>,
 }
 
 // SqliteConnection is Send + Sync because all access goes through the Mutex
@@ -222,6 +243,8 @@ impl SqliteConnection {
                 in_transaction: false,
             }),
             path: config.path.clone(),
+            #[cfg(feature = "console")]
+            console: None,
         })
     }
 
@@ -426,6 +449,7 @@ impl SqliteConnection {
 
         let mut inner = self.inner.lock().unwrap();
         inner.in_transaction = true;
+        self.emit_transaction_state("BEGIN");
         Ok(())
     }
 
@@ -450,6 +474,7 @@ impl SqliteConnection {
 
         let mut inner = self.inner.lock().unwrap();
         inner.in_transaction = false;
+        self.emit_transaction_state("COMMIT");
         Ok(())
     }
 
@@ -474,6 +499,7 @@ impl SqliteConnection {
 
         let mut inner = self.inner.lock().unwrap();
         inner.in_transaction = false;
+        self.emit_transaction_state("ROLLBACK");
         Ok(())
     }
 }
@@ -834,6 +860,108 @@ fn error_code_to_kind(code: c_int) -> QueryErrorKind {
         ffi::SQLITE_INTERRUPT => QueryErrorKind::Cancelled,
         _ => QueryErrorKind::Database,
     }
+}
+
+// ==================== Console Support ====================
+
+#[cfg(feature = "console")]
+impl ConsoleAware for SqliteConnection {
+    fn set_console(&mut self, console: Option<Arc<SqlModelConsole>>) {
+        self.console = console;
+        // Emit database status when console is attached
+        self.emit_open_status();
+    }
+
+    fn console(&self) -> Option<&Arc<SqlModelConsole>> {
+        self.console.as_ref()
+    }
+
+    fn has_console(&self) -> bool {
+        self.console.is_some()
+    }
+}
+
+impl SqliteConnection {
+    /// Emit database open status to console if available.
+    #[cfg(feature = "console")]
+    fn emit_open_status(&self) {
+        if let Some(console) = &self.console {
+            // Get database info
+            let mode = if self.path == ":memory:" {
+                "in-memory"
+            } else {
+                "file"
+            };
+
+            // Query journal mode if we can
+            let journal_mode = self
+                .query_sync("PRAGMA journal_mode", &[])
+                .ok()
+                .and_then(|rows| {
+                    rows.first()
+                        .and_then(|r| r.get_as::<String>(0).ok())
+                });
+
+            let page_size = self
+                .query_sync("PRAGMA page_size", &[])
+                .ok()
+                .and_then(|rows| rows.first().and_then(|r| r.get_as::<i64>(0).ok()));
+
+            if console.mode().is_plain() {
+                // Plain text output for agents
+                let journal = journal_mode.as_deref().unwrap_or("unknown");
+                console.status(&format!(
+                    "Opened SQLite database: {} ({} mode, journal: {})",
+                    self.path, mode, journal
+                ));
+            } else {
+                // Rich output
+                console.status(&format!("SQLite database: {}", self.path));
+                console.status(&format!("  Mode: {}", mode));
+                if let Some(journal) = journal_mode {
+                    console.status(&format!("  Journal: {}", journal.to_uppercase()));
+                }
+                if let Some(size) = page_size {
+                    console.status(&format!("  Page size: {} bytes", size));
+                }
+            }
+        }
+    }
+
+    /// Emit transaction state to console if available.
+    #[cfg(feature = "console")]
+    fn emit_transaction_state(&self, state: &str) {
+        if let Some(console) = &self.console {
+            if console.mode().is_plain() {
+                console.status(&format!("Transaction: {}", state));
+            } else {
+                console.status(&format!("[{}] Transaction {}", state, state.to_lowercase()));
+            }
+        }
+    }
+
+    /// Emit query timing to console if available.
+    #[cfg(feature = "console")]
+    fn emit_query_timing(&self, elapsed_ms: f64, rows: usize) {
+        if let Some(console) = &self.console {
+            console.status(&format!(
+                "Query: {:.1}ms, {} rows",
+                elapsed_ms, rows
+            ));
+        }
+    }
+
+    /// No-op when console feature is disabled.
+    #[cfg(not(feature = "console"))]
+    fn emit_open_status(&self) {}
+
+    /// No-op when console feature is disabled.
+    #[cfg(not(feature = "console"))]
+    fn emit_transaction_state(&self, _state: &str) {}
+
+    /// No-op when console feature is disabled.
+    #[cfg(not(feature = "console"))]
+    fn emit_query_timing(&self, _elapsed_ms: f64, _rows: usize) {}
 }
 
 #[cfg(test)]

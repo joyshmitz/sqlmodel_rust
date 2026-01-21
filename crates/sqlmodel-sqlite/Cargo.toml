@@ -11,11 +11,18 @@ description = "SQLite driver for SQLModel Rust"
 [lints]
 workspace = true
 
+[features]
+default = []
+console = ["dep:sqlmodel-console"]
+
 [dependencies]
 sqlmodel-core.workspace = true
 asupersync.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+# Optional console support
+sqlmodel-console = { path = "../sqlmodel-console", optional = true }
 
 [build-dependencies]
 
