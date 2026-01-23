@@ -6,12 +6,11 @@
 //! - Batch operations
 //! - Schema operations
 
+use super::output_capture::CapturedOutput;
 use sqlmodel_console::renderables::{
-    ErrorPanel, ErrorSeverity, OperationProgress, QueryResults, BatchOperationTracker,
+    BatchOperationTracker, ErrorPanel, ErrorSeverity, OperationProgress, QueryResults,
 };
 use sqlmodel_console::{OutputMode, SqlModelConsole};
-use super::output_capture::CapturedOutput;
-use std::time::Duration;
 
 // ============================================================================
 // Complete Query Workflow Tests
@@ -33,8 +32,16 @@ fn e2e_complete_query_workflow() {
     // 3. Results
     let columns = vec!["id".to_string(), "name".to_string(), "email".to_string()];
     let rows = vec![
-        vec!["1".to_string(), "Alice".to_string(), "alice@example.com".to_string()],
-        vec!["2".to_string(), "Bob".to_string(), "bob@example.com".to_string()],
+        vec![
+            "1".to_string(),
+            "Alice".to_string(),
+            "alice@example.com".to_string(),
+        ],
+        vec![
+            "2".to_string(),
+            "Bob".to_string(),
+            "bob@example.com".to_string(),
+        ],
     ];
     let results = QueryResults::from_data(columns, rows);
     workflow_output.push_str(&results.render_plain());
@@ -98,8 +105,7 @@ fn e2e_batch_insert_workflow() {
     workflow_stderr.push_str("Starting batch insert...\n");
 
     // 2. Progress updates
-    let progress = OperationProgress::new("Inserting records", 1000)
-        .completed(1000);
+    let progress = OperationProgress::new("Inserting records", 1000).completed(1000);
     workflow_output.push_str(&progress.render_plain());
     workflow_output.push('\n');
 
@@ -215,8 +221,7 @@ fn e2e_migration_workflow() {
     workflow_stderr.push_str("Found 3 pending migrations\n");
 
     // 2. Progress
-    let progress = OperationProgress::new("Running migrations", 3)
-        .completed(3);
+    let progress = OperationProgress::new("Running migrations", 3).completed(3);
     workflow_output.push_str(&progress.render_plain());
     workflow_output.push('\n');
 
@@ -291,7 +296,10 @@ fn e2e_agent_parseable_workflow() {
 
     // Output should have predictable structure
     let lines: Vec<&str> = output.lines().collect();
-    assert!(lines.len() >= 2, "Should have header and at least one data row");
+    assert!(
+        lines.len() >= 2,
+        "Should have header and at least one data row"
+    );
 }
 
 /// E2E test: JSON workflow for structured output.
@@ -344,8 +352,7 @@ fn e2e_streaming_progress_updates() {
     let mut all_output = String::new();
 
     for completed in [0, 25, 50, 75, 100] {
-        let progress = OperationProgress::new("Processing", 100)
-            .completed(completed);
+        let progress = OperationProgress::new("Processing", 100).completed(completed);
         all_output.push_str(&format!("{}\n", progress.render_plain()));
     }
 
@@ -367,8 +374,7 @@ fn e2e_query_retry_workflow() {
 
     // First attempt fails
     workflow_stderr.push_str("Attempt 1: Executing query...\n");
-    let error = ErrorPanel::new("Timeout", "Query timed out")
-        .severity(ErrorSeverity::Warning);
+    let error = ErrorPanel::new("Timeout", "Query timed out").severity(ErrorSeverity::Warning);
     workflow_output.push_str(&error.render_plain());
     workflow_output.push('\n');
 

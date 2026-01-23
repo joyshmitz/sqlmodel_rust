@@ -6,9 +6,11 @@
 //! - Handle edge cases (0%, 100%, negative values)
 //! - Provide useful output for agents
 
-use sqlmodel_console::renderables::{OperationProgress, IndeterminateSpinner, BatchOperationTracker};
-use sqlmodel_console::{OutputMode, SqlModelConsole};
 use super::output_capture::CapturedOutput;
+use sqlmodel_console::renderables::{
+    BatchOperationTracker, IndeterminateSpinner, OperationProgress,
+};
+use sqlmodel_console::{OutputMode, SqlModelConsole};
 
 // ============================================================================
 // Operation Progress Tests
@@ -17,8 +19,7 @@ use super::output_capture::CapturedOutput;
 /// E2E test: Progress bar basic display.
 #[test]
 fn e2e_progress_bar_basic() {
-    let progress = OperationProgress::new("Processing records", 100)
-        .completed(50);
+    let progress = OperationProgress::new("Processing records", 100).completed(50);
 
     let plain = progress.render_plain();
     let output = CapturedOutput::from_strings(plain, String::new());
@@ -42,8 +43,7 @@ fn e2e_progress_zero_percent() {
 /// E2E test: Progress at 100%.
 #[test]
 fn e2e_progress_complete() {
-    let progress = OperationProgress::new("Completed task", 100)
-        .completed(100);
+    let progress = OperationProgress::new("Completed task", 100).completed(100);
 
     let plain = progress.render_plain();
     let output = CapturedOutput::from_strings(plain.clone(), String::new());
@@ -58,8 +58,7 @@ fn e2e_progress_complete() {
 /// E2E test: Progress with custom total.
 #[test]
 fn e2e_progress_custom_total() {
-    let progress = OperationProgress::new("Migrating users", 1500)
-        .completed(750);
+    let progress = OperationProgress::new("Migrating users", 1500).completed(750);
 
     let plain = progress.render_plain();
     let output = CapturedOutput::from_strings(plain, String::new());
@@ -72,8 +71,7 @@ fn e2e_progress_custom_total() {
 /// E2E test: Progress percentage calculation.
 #[test]
 fn e2e_progress_percentage() {
-    let progress = OperationProgress::new("Test", 200)
-        .completed(50);
+    let progress = OperationProgress::new("Test", 200).completed(50);
 
     assert!((progress.percentage() - 25.0).abs() < 0.1);
 }
@@ -96,13 +94,13 @@ fn e2e_spinner_basic() {
 /// E2E test: Spinner with status update.
 #[test]
 fn e2e_spinner_with_status() {
-    let spinner = IndeterminateSpinner::new("Connecting")
-        .with_status("Establishing connection...");
+    let mut spinner = IndeterminateSpinner::new("Connecting");
+    spinner.set_message("Establishing connection...");
 
     let plain = spinner.render_plain();
     let output = CapturedOutput::from_strings(plain, String::new());
 
-    output.assert_stdout_contains("Connecting");
+    output.assert_stdout_contains("Establishing connection");
     output.assert_plain_mode_clean();
 }
 
@@ -181,9 +179,9 @@ fn e2e_batch_tracker_mixed() {
     let mut tracker = BatchOperationTracker::new("Import records", 10, 1000);
     // Complete batches totaling 850 rows
     for _ in 0..8 {
-        tracker.complete_batch(100);  // 8 batches of 100 = 800 rows
+        tracker.complete_batch(100); // 8 batches of 100 = 800 rows
     }
-    tracker.complete_batch(50);  // 1 more batch of 50 = 850 total
+    tracker.complete_batch(50); // 1 more batch of 50 = 850 total
     // Record 100 errors
     tracker.record_errors(100);
 
@@ -213,22 +211,27 @@ fn e2e_progress_plain_console() {
     output.assert_plain_mode_clean();
 }
 
-/// E2E test: Progress components are JSON-serializable.
+/// E2E test: Progress components provide JSON output.
 #[test]
-fn e2e_progress_json_serializable() {
+fn e2e_progress_json_output() {
+    // All progress components provide to_json() methods for structured output
     let progress = OperationProgress::new("Serializable", 100).completed(25);
-    let json = serde_json::to_string(&progress);
-    assert!(json.is_ok(), "OperationProgress should serialize to JSON");
+    let json = progress.to_json();
+    assert!(!json.is_empty(), "OperationProgress should produce JSON");
+    assert!(json.contains("Serializable"));
 
     let spinner = IndeterminateSpinner::new("Spinner");
-    let json = serde_json::to_string(&spinner);
-    assert!(json.is_ok(), "IndeterminateSpinner should serialize to JSON");
+    let json = spinner.to_json();
+    assert!(!json.is_empty(), "IndeterminateSpinner should produce JSON");
+    assert!(json.contains("Spinner"));
 
     let mut tracker = BatchOperationTracker::new("Tracker", 2, 10);
-    tracker.complete_batch(5);  // Complete 1 batch of 5 rows
-    // BatchOperationTracker uses to_json() method instead of serde_json::to_string
+    tracker.complete_batch(5); // Complete 1 batch of 5 rows
     let json = tracker.to_json();
-    assert!(!json.is_empty(), "BatchOperationTracker should serialize to JSON");
+    assert!(
+        !json.is_empty(),
+        "BatchOperationTracker should produce JSON"
+    );
     assert!(json.contains("Tracker"));
 }
 
@@ -250,8 +253,7 @@ fn e2e_progress_zero_total() {
 /// E2E test: Progress exceeds total.
 #[test]
 fn e2e_progress_exceeds_total() {
-    let progress = OperationProgress::new("Overflow", 100)
-        .completed(150);
+    let progress = OperationProgress::new("Overflow", 100).completed(150);
 
     let plain = progress.render_plain();
     let output = CapturedOutput::from_strings(plain, String::new());
@@ -264,8 +266,7 @@ fn e2e_progress_exceeds_total() {
 #[test]
 fn e2e_progress_long_description() {
     let long_desc = "A".repeat(100);
-    let progress = OperationProgress::new(&long_desc, 100)
-        .completed(50);
+    let progress = OperationProgress::new(&long_desc, 100).completed(50);
 
     let plain = progress.render_plain();
     let output = CapturedOutput::from_strings(plain, String::new());
@@ -277,8 +278,7 @@ fn e2e_progress_long_description() {
 /// E2E test: Unicode in progress description.
 #[test]
 fn e2e_progress_unicode_description() {
-    let progress = OperationProgress::new("处理文件 (Processing files)", 100)
-        .completed(50);
+    let progress = OperationProgress::new("处理文件 (Processing files)", 100).completed(50);
 
     let plain = progress.render_plain();
     let output = CapturedOutput::from_strings(plain, String::new());
@@ -290,8 +290,7 @@ fn e2e_progress_unicode_description() {
 /// E2E test: Special characters in description.
 #[test]
 fn e2e_progress_special_chars() {
-    let progress = OperationProgress::new("Processing <items> & [things]", 100)
-        .completed(50);
+    let progress = OperationProgress::new("Processing <items> & [things]", 100).completed(50);
 
     let plain = progress.render_plain();
     let output = CapturedOutput::from_strings(plain, String::new());

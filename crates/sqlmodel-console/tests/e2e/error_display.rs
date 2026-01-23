@@ -6,9 +6,9 @@
 //! - Produce parseable output in plain mode
 //! - Handle edge cases (empty fields, long content)
 
+use super::output_capture::CapturedOutput;
 use sqlmodel_console::renderables::{ErrorPanel, ErrorSeverity};
 use sqlmodel_console::{OutputMode, SqlModelConsole};
-use super::output_capture::CapturedOutput;
 
 // ============================================================================
 // Error Panel Rendering Tests
@@ -50,13 +50,13 @@ fn e2e_error_panel_severity_levels() {
     ];
 
     for (severity, name) in severities {
-        let panel = ErrorPanel::new(&format!("{name} Message"), "Test detail")
-            .severity(severity);
+        let title = format!("{name} Message");
+        let panel = ErrorPanel::new(&title, "Test detail").severity(severity);
 
         let plain = panel.render_plain();
         let output = CapturedOutput::from_strings(plain, String::new());
 
-        output.assert_stdout_contains(&format!("{name} Message"));
+        output.assert_stdout_contains(&title);
         output.assert_stdout_contains("Test detail");
         output.assert_plain_mode_clean();
     }
@@ -130,8 +130,7 @@ fn e2e_error_panel_long_sql() {
                     ORDER BY p.published_at DESC \
                     LIMIT 100";
 
-    let panel = ErrorPanel::new("Complex Query Failed", "Error in subquery")
-        .with_sql(long_sql);
+    let panel = ErrorPanel::new("Complex Query Failed", "Error in subquery").with_sql(long_sql);
 
     let plain = panel.render_plain();
     let output = CapturedOutput::from_strings(plain, String::new());
@@ -146,12 +145,9 @@ fn e2e_error_panel_long_sql() {
 /// E2E test: Error panel with special characters.
 #[test]
 fn e2e_error_panel_special_chars() {
-    let panel = ErrorPanel::new(
-        "Unicode Error",
-        "Failed to process: café, naïve, 日本語"
-    )
-    .with_sql("SELECT * FROM users WHERE name = 'Müller'")
-    .with_hint("Check encoding settings");
+    let panel = ErrorPanel::new("Unicode Error", "Failed to process: café, naïve, 日本語")
+        .with_sql("SELECT * FROM users WHERE name = 'Müller'")
+        .with_hint("Check encoding settings");
 
     let plain = panel.render_plain();
     let output = CapturedOutput::from_strings(plain, String::new());
@@ -227,11 +223,9 @@ fn e2e_error_structured_json() {
         .with_sqlstate("42000")
         .severity(ErrorSeverity::Error);
 
-    // ErrorPanel should be serializable
-    let json = serde_json::to_string(&panel);
-    assert!(json.is_ok(), "ErrorPanel should serialize to JSON");
-
-    let json_str = json.unwrap();
+    // ErrorPanel provides to_json() method for structured output
+    let json = panel.to_json();
+    let json_str = json.to_string();
     assert!(json_str.contains("JSON Error"));
     assert!(json_str.contains("42000"));
 }

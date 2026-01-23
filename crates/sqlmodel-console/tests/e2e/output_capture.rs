@@ -88,6 +88,7 @@ impl CapturedOutput {
 
     /// Get duration in milliseconds.
     #[must_use]
+    #[allow(clippy::cast_possible_truncation)]
     pub fn duration_ms(&self) -> u64 {
         self.duration.as_millis() as u64
     }
@@ -210,11 +211,10 @@ impl CapturedOutput {
     /// Panics if duration exceeds the limit.
     pub fn assert_duration_under(&self, max_ms: u64) {
         let actual_ms = self.duration_ms();
-        if actual_ms > max_ms {
-            panic!(
-                "Output took {actual_ms}ms, expected under {max_ms}ms"
-            );
-        }
+        assert!(
+            actual_ms <= max_ms,
+            "Output took {actual_ms}ms, expected under {max_ms}ms"
+        );
     }
 }
 
@@ -276,7 +276,7 @@ mod tests {
     fn test_captured_output_with_duration() {
         let output = CapturedOutput::with_duration(
             "test".to_string(),
-            "".to_string(),
+            String::new(),
             Duration::from_millis(100),
         );
 
@@ -285,10 +285,7 @@ mod tests {
 
     #[test]
     fn test_stdout_lines() {
-        let output = CapturedOutput::from_strings(
-            "line1\nline2\nline3".to_string(),
-            String::new(),
-        );
+        let output = CapturedOutput::from_strings("line1\nline2\nline3".to_string(), String::new());
 
         assert_eq!(output.stdout_lines(), vec!["line1", "line2", "line3"]);
     }
@@ -308,28 +305,21 @@ mod tests {
 
     #[test]
     fn test_ansi_detection_in_output() {
-        let plain = CapturedOutput::from_strings(
-            "plain text".to_string(),
-            "plain stderr".to_string(),
-        );
+        let plain =
+            CapturedOutput::from_strings("plain text".to_string(), "plain stderr".to_string());
         assert!(!plain.stdout_has_ansi());
         assert!(!plain.stderr_has_ansi());
         assert!(!plain.has_any_ansi());
 
-        let with_ansi = CapturedOutput::from_strings(
-            "\x1b[31mred\x1b[0m".to_string(),
-            String::new(),
-        );
+        let with_ansi =
+            CapturedOutput::from_strings("\x1b[31mred\x1b[0m".to_string(), String::new());
         assert!(with_ansi.stdout_has_ansi());
         assert!(with_ansi.has_any_ansi());
     }
 
     #[test]
     fn test_assert_stdout_contains() {
-        let output = CapturedOutput::from_strings(
-            "Hello, world!".to_string(),
-            String::new(),
-        );
+        let output = CapturedOutput::from_strings("Hello, world!".to_string(), String::new());
 
         output.assert_stdout_contains("Hello");
         output.assert_stdout_contains("world");
@@ -339,20 +329,14 @@ mod tests {
     #[test]
     #[should_panic(expected = "stdout missing expected substring")]
     fn test_assert_stdout_contains_fails() {
-        let output = CapturedOutput::from_strings(
-            "Hello, world!".to_string(),
-            String::new(),
-        );
+        let output = CapturedOutput::from_strings("Hello, world!".to_string(), String::new());
 
         output.assert_stdout_contains("goodbye");
     }
 
     #[test]
     fn test_assert_stdout_not_contains() {
-        let output = CapturedOutput::from_strings(
-            "Hello, world!".to_string(),
-            String::new(),
-        );
+        let output = CapturedOutput::from_strings("Hello, world!".to_string(), String::new());
 
         output.assert_stdout_not_contains("goodbye");
         output.assert_stdout_not_contains("ANSI");
@@ -361,10 +345,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "stdout contains unwanted substring")]
     fn test_assert_stdout_not_contains_fails() {
-        let output = CapturedOutput::from_strings(
-            "Hello, world!".to_string(),
-            String::new(),
-        );
+        let output = CapturedOutput::from_strings("Hello, world!".to_string(), String::new());
 
         output.assert_stdout_not_contains("Hello");
     }
@@ -382,10 +363,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "plain mode should have no ANSI codes")]
     fn test_assert_plain_mode_clean_fails() {
-        let output = CapturedOutput::from_strings(
-            "\x1b[31mred text\x1b[0m".to_string(),
-            String::new(),
-        );
+        let output =
+            CapturedOutput::from_strings("\x1b[31mred text\x1b[0m".to_string(), String::new());
 
         output.assert_plain_mode_clean();
     }
@@ -397,16 +376,14 @@ mod tests {
 
         assert_eq!(locations.len(), 2);
         assert_eq!(locations[0].0, 4); // First escape at position 4
-        assert_eq!(locations[1].0, 11); // Second escape at position 11
+        // Second escape: "text" (4) + "\x1b[31m" (5) + "red" (3) = 12
+        assert_eq!(locations[1].0, 12);
     }
 
     #[test]
     fn test_assert_duration_under() {
-        let output = CapturedOutput::with_duration(
-            String::new(),
-            String::new(),
-            Duration::from_millis(50),
-        );
+        let output =
+            CapturedOutput::with_duration(String::new(), String::new(), Duration::from_millis(50));
 
         output.assert_duration_under(100);
         output.assert_duration_under(51);
@@ -415,11 +392,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "expected under")]
     fn test_assert_duration_under_fails() {
-        let output = CapturedOutput::with_duration(
-            String::new(),
-            String::new(),
-            Duration::from_millis(100),
-        );
+        let output =
+            CapturedOutput::with_duration(String::new(), String::new(), Duration::from_millis(100));
 
         output.assert_duration_under(50);
     }

@@ -25,9 +25,9 @@
 //! - `progress_tracking`: Tests for progress bars and spinners
 //! - `full_workflow`: Complete workflow tests simulating real usage
 
-pub mod output_capture;
-pub mod mode_switching;
 pub mod error_display;
-pub mod query_results;
-pub mod progress_tracking;
 pub mod full_workflow;
+pub mod mode_switching;
+pub mod output_capture;
+pub mod progress_tracking;
+pub mod query_results;

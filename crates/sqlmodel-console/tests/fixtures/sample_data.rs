@@ -1,5 +1,7 @@
 //! Sample data for testing console components.
 
+#![allow(dead_code)] // These fixtures may not all be used yet
+
 use sqlmodel_console::renderables::{ErrorPanel, ErrorSeverity};
 use sqlmodel_schema::introspect::{ColumnInfo, ForeignKeyInfo, IndexInfo, TableInfo};
 
@@ -108,15 +110,23 @@ pub fn posts_table_info() -> TableInfo {
 
 /// Sample query results - small dataset.
 pub fn sample_query_results_small() -> (Vec<String>, Vec<Vec<String>>) {
-    let columns = vec![
-        "id".to_string(),
-        "name".to_string(),
-        "email".to_string(),
-    ];
+    let columns = vec!["id".to_string(), "name".to_string(), "email".to_string()];
     let rows = vec![
-        vec!["1".to_string(), "Alice".to_string(), "alice@example.com".to_string()],
-        vec!["2".to_string(), "Bob".to_string(), "bob@example.com".to_string()],
-        vec!["3".to_string(), "Carol".to_string(), "carol@example.com".to_string()],
+        vec![
+            "1".to_string(),
+            "Alice".to_string(),
+            "alice@example.com".to_string(),
+        ],
+        vec![
+            "2".to_string(),
+            "Bob".to_string(),
+            "bob@example.com".to_string(),
+        ],
+        vec![
+            "3".to_string(),
+            "Carol".to_string(),
+            "carol@example.com".to_string(),
+        ],
     ];
     (columns, rows)
 }

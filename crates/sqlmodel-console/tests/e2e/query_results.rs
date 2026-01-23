@@ -6,9 +6,9 @@
 //! - Work in plain mode without ANSI codes
 //! - Handle edge cases (empty results, large datasets)
 
+use super::output_capture::CapturedOutput;
 use sqlmodel_console::renderables::QueryResults;
 use sqlmodel_console::{OutputMode, SqlModelConsole};
-use super::output_capture::CapturedOutput;
 
 // ============================================================================
 // Basic Query Result Tests
@@ -19,9 +19,21 @@ use super::output_capture::CapturedOutput;
 fn e2e_simple_query_results() {
     let columns = vec!["id".to_string(), "name".to_string(), "email".to_string()];
     let rows = vec![
-        vec!["1".to_string(), "Alice".to_string(), "alice@example.com".to_string()],
-        vec!["2".to_string(), "Bob".to_string(), "bob@example.com".to_string()],
-        vec!["3".to_string(), "Carol".to_string(), "carol@example.com".to_string()],
+        vec![
+            "1".to_string(),
+            "Alice".to_string(),
+            "alice@example.com".to_string(),
+        ],
+        vec![
+            "2".to_string(),
+            "Bob".to_string(),
+            "bob@example.com".to_string(),
+        ],
+        vec![
+            "3".to_string(),
+            "Carol".to_string(),
+            "carol@example.com".to_string(),
+        ],
     ];
 
     let results = QueryResults::from_data(columns, rows);
@@ -84,7 +96,8 @@ fn e2e_empty_query_results() {
     output.assert_plain_mode_clean();
 
     // Should indicate empty or 0 rows (rows was empty, so check output)
-    let has_empty_indicator = plain.contains("0 rows") || plain.contains("Empty") || plain.lines().count() <= 3;
+    let has_empty_indicator =
+        plain.contains("0 rows") || plain.contains("Empty") || plain.lines().count() <= 3;
     assert!(has_empty_indicator);
 }
 
@@ -107,9 +120,7 @@ fn e2e_single_column_results() {
 #[test]
 fn e2e_many_columns() {
     let columns: Vec<String> = (0..10).map(|i| format!("col_{i}")).collect();
-    let rows = vec![
-        (0..10).map(|i| format!("val_{i}")).collect(),
-    ];
+    let rows = vec![(0..10).map(|i| format!("val_{i}")).collect()];
 
     let results = QueryResults::from_data(columns, rows);
     let plain = results.render_plain();

@@ -9,7 +9,7 @@ pub fn load_golden(name: &str) -> String {
         .join("tests/fixtures/golden")
         .join(name);
     fs::read_to_string(&path)
-        .unwrap_or_else(|e| panic!("Failed to load golden file {:?}: {}", path, e))
+        .unwrap_or_else(|e| panic!("Failed to load golden file {}: {e}", path.display()))
 }
 
 /// Compare output against golden file, updating if UPDATE_GOLDEN=1.
