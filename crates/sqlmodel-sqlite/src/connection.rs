@@ -905,8 +905,22 @@ fn format_value(value: &Value) -> String {
             // Format UUID as hex string: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
             format!(
                 "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
-                u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]
+                u[0],
+                u[1],
+                u[2],
+                u[3],
+                u[4],
+                u[5],
+                u[6],
+                u[7],
+                u[8],
+                u[9],
+                u[10],
+                u[11],
+                u[12],
+                u[13],
+                u[14],
+                u[15]
             )
         }
         Value::Decimal(d) => d.to_string(),
@@ -949,10 +963,7 @@ impl SqliteConnection {
             let journal_mode = self
                 .query_sync("PRAGMA journal_mode", &[])
                 .ok()
-                .and_then(|rows| {
-                    rows.first()
-                        .and_then(|r| r.get_as::<String>(0).ok())
-                });
+                .and_then(|rows| rows.first().and_then(|r| r.get_as::<String>(0).ok()));
 
             let page_size = self
                 .query_sync("PRAGMA page_size", &[])
@@ -996,10 +1007,7 @@ impl SqliteConnection {
     #[cfg(feature = "console")]
     fn emit_query_timing(&self, elapsed_ms: f64, rows: usize) {
         if let Some(console) = &self.console {
-            console.status(&format!(
-                "Query: {:.1}ms, {} rows",
-                elapsed_ms, rows
-            ));
+            console.status(&format!("Query: {:.1}ms, {} rows", elapsed_ms, rows));
         }
     }
 
@@ -1042,9 +1050,7 @@ impl SqliteConnection {
                     let mut widths: Vec<usize> = col_names.iter().map(|c| c.len()).collect();
                     for row in rows.iter().take(20) {
                         for (i, w) in widths.iter_mut().enumerate() {
-                            let val_len = row.get(i)
-                                .map(|v| format_value(v).len())
-                                .unwrap_or(4); // "NULL".len()
+                            let val_len = row.get(i).map(|v| format_value(v).len()).unwrap_or(4); // "NULL".len()
                             if val_len > *w {
                                 *w = val_len;
                             }
@@ -1052,13 +1058,20 @@ impl SqliteConnection {
                     }
 
                     // Build header separator
-                    let sep: String = widths.iter().map(|w| "-".repeat(*w + 2)).collect::<Vec<_>>().join("+");
+                    let sep: String = widths
+                        .iter()
+                        .map(|w| "-".repeat(*w + 2))
+                        .collect::<Vec<_>>()
+                        .join("+");
                     table_output.push_str(&format!("+{}+\n", sep));
 
                     // Header row
-                    let header: String = col_names.iter().enumerate()
+                    let header: String = col_names
+                        .iter()
+                        .enumerate()
                         .map(|(i, name)| format!(" {:width$} ", name, width = widths[i]))
-                        .collect::<Vec<_>>().join("|");
+                        .collect::<Vec<_>>()
+                        .join("|");
                     table_output.push_str(&format!("|{}|\n", header));
                     table_output.push_str(&format!("+{}+\n", sep));
 
@@ -1066,12 +1079,14 @@ impl SqliteConnection {
                     for row in rows.iter().take(20) {
                         let data: String = (0..col_names.len())
                             .map(|i| {
-                                let val = row.get(i)
+                                let val = row
+                                    .get(i)
                                     .map(|v| format_value(v))
                                     .unwrap_or_else(|| "NULL".to_string());
                                 format!(" {:width$} ", val, width = widths[i])
                             })
-                            .collect::<Vec<_>>().join("|");
+                            .collect::<Vec<_>>()
+                            .join("|");
                         table_output.push_str(&format!("|{}|\n", data));
                     }
                     table_output.push_str(&format!("+{}+", sep));
@@ -1120,7 +1135,9 @@ impl SqliteConnection {
             } else {
                 console.status(&format!(
                     "[{}] {} rows affected ({:.1}ms)",
-                    op_type.to_uppercase(), rows_affected, elapsed_ms
+                    op_type.to_uppercase(),
+                    rows_affected,
+                    elapsed_ms
                 ));
             }
         }
@@ -1187,7 +1204,14 @@ impl SqliteConnection {
 
     /// No-op when console feature is disabled.
     #[cfg(not(feature = "console"))]
-    fn emit_query_result(&self, _sql: &str, _col_names: &[String], _rows: &[Row], _elapsed_ms: f64) {}
+    fn emit_query_result(
+        &self,
+        _sql: &str,
+        _col_names: &[String],
+        _rows: &[Row],
+        _elapsed_ms: f64,
+    ) {
+    }
 
     /// No-op when console feature is disabled.
     #[cfg(not(feature = "console"))]
@@ -1473,9 +1497,7 @@ mod tests {
             conn.set_console(Some(console));
 
             // Execute PRAGMA query - should format as table
-            let rows = conn
-                .query_sync("PRAGMA table_info(test)", &[])
-                .unwrap();
+            let rows = conn.query_sync("PRAGMA table_info(test)", &[]).unwrap();
 
             // Verify we got the expected columns
             assert!(!rows.is_empty());
@@ -1565,9 +1587,7 @@ mod tests {
             )
             .unwrap();
 
-            let rows = conn
-                .query_sync("PRAGMA table_info(test)", &[])
-                .unwrap();
+            let rows = conn.query_sync("PRAGMA table_info(test)", &[]).unwrap();
             assert!(!rows.is_empty());
         }
 

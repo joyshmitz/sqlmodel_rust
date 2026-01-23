@@ -626,10 +626,7 @@ impl MySqlConnection {
         }
 
         // Check for EOF packet (if not CLIENT_DEPRECATE_EOF)
-        let server_caps = self
-            .server_caps
-            .as_ref()
-            .map_or(0, |c| c.capabilities);
+        let server_caps = self.server_caps.as_ref().map_or(0, |c| c.capabilities);
         if server_caps & capabilities::CLIENT_DEPRECATE_EOF == 0 {
             let (payload, _) = self.read_packet()?;
             if payload.first() == Some(&0xFE) {
@@ -1048,7 +1045,8 @@ impl MySqlConnection {
                     }
                 }
                 sqlmodel_console::OutputMode::Rich => {
-                    let status_icon = if status.starts_with("OK") || status.starts_with("Connected") {
+                    let status_icon = if status.starts_with("OK") || status.starts_with("Connected")
+                    {
                         "✓"
                     } else if status.starts_with("Error") || status.starts_with("Failed") {
                         "✗"
@@ -1190,7 +1188,11 @@ impl MySqlConnection {
                         .collect::<Vec<_>>()
                         .join(" | ");
 
-                    let separator: String = widths.iter().map(|w| "-".repeat(*w)).collect::<Vec<_>>().join("-+-");
+                    let separator: String = widths
+                        .iter()
+                        .map(|w| "-".repeat(*w))
+                        .collect::<Vec<_>>()
+                        .join("-+-");
 
                     console.status(&header);
                     console.status(&separator);
@@ -1199,7 +1201,9 @@ impl MySqlConnection {
                         let row_str: String = row
                             .values()
                             .zip(&widths)
-                            .map(|(val, width)| format!("{:width$}", format_value(val), width = width))
+                            .map(|(val, width)| {
+                                format!("{:width$}", format_value(val), width = width)
+                            })
                             .collect::<Vec<_>>()
                             .join(" | ");
                         console.status(&row_str);
@@ -1235,8 +1239,22 @@ fn format_value(value: &Value) -> String {
         Value::Uuid(u) => {
             format!(
                 "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-                u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
-                u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]
+                u[0],
+                u[1],
+                u[2],
+                u[3],
+                u[4],
+                u[5],
+                u[6],
+                u[7],
+                u[8],
+                u[9],
+                u[10],
+                u[11],
+                u[12],
+                u[13],
+                u[14],
+                u[15]
             )
         }
         Value::Json(j) => j.to_string(),
@@ -1378,7 +1396,10 @@ mod tests {
             assert_eq!(format_value(&Value::BigInt(9_999_999_999)), "9999999999");
             assert!(format_value(&Value::Float(3.14)).starts_with("3.14"));
             assert!(format_value(&Value::Double(2.718281828)).starts_with("2.71828"));
-            assert_eq!(format_value(&Value::Decimal("123.45".to_string())), "123.45");
+            assert_eq!(
+                format_value(&Value::Decimal("123.45".to_string())),
+                "123.45"
+            );
             assert_eq!(format_value(&Value::Text("hello".to_string())), "hello");
             assert_eq!(format_value(&Value::Bytes(vec![1, 2, 3])), "<3 bytes>");
             assert!(format_value(&Value::Date(19000)).contains("date:"));
@@ -1425,8 +1446,8 @@ mod tests {
         #[test]
         fn test_format_value_uuid() {
             let uuid: [u8; 16] = [
-                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
-                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+                0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc,
+                0xde, 0xf0,
             ];
             let result = format_value(&Value::Uuid(uuid));
             assert_eq!(result, "12345678-9abc-def0-1234-56789abcdef0");

@@ -328,8 +328,10 @@ pub fn decode_text_value(field_type: FieldType, data: &[u8], is_unsigned: bool) 
         // TINYINT (8-bit)
         FieldType::Tiny => {
             if is_unsigned {
-                text.parse::<u8>()
-                    .map_or_else(|_| Value::Text(text.into_owned()), |v| Value::TinyInt(v as i8))
+                text.parse::<u8>().map_or_else(
+                    |_| Value::Text(text.into_owned()),
+                    |v| Value::TinyInt(v as i8),
+                )
             } else {
                 text.parse::<i8>()
                     .map_or_else(|_| Value::Text(text.into_owned()), Value::TinyInt)
@@ -338,8 +340,10 @@ pub fn decode_text_value(field_type: FieldType, data: &[u8], is_unsigned: bool) 
         // SMALLINT (16-bit)
         FieldType::Short | FieldType::Year => {
             if is_unsigned {
-                text.parse::<u16>()
-                    .map_or_else(|_| Value::Text(text.into_owned()), |v| Value::SmallInt(v as i16))
+                text.parse::<u16>().map_or_else(
+                    |_| Value::Text(text.into_owned()),
+                    |v| Value::SmallInt(v as i16),
+                )
             } else {
                 text.parse::<i16>()
                     .map_or_else(|_| Value::Text(text.into_owned()), Value::SmallInt)
@@ -358,8 +362,10 @@ pub fn decode_text_value(field_type: FieldType, data: &[u8], is_unsigned: bool) 
         // BIGINT (64-bit)
         FieldType::LongLong => {
             if is_unsigned {
-                text.parse::<u64>()
-                    .map_or_else(|_| Value::Text(text.into_owned()), |v| Value::BigInt(v as i64))
+                text.parse::<u64>().map_or_else(
+                    |_| Value::Text(text.into_owned()),
+                    |v| Value::BigInt(v as i64),
+                )
             } else {
                 text.parse::<i64>()
                     .map_or_else(|_| Value::Text(text.into_owned()), Value::BigInt)
@@ -390,8 +396,7 @@ pub fn decode_text_value(field_type: FieldType, data: &[u8], is_unsigned: bool) 
         // JSON
         FieldType::Json => {
             // Try to parse as JSON, fall back to text
-            serde_json::from_str(&text)
-                .map_or_else(|_| Value::Text(text.into_owned()), Value::Json)
+            serde_json::from_str(&text).map_or_else(|_| Value::Text(text.into_owned()), Value::Json)
         }
 
         // NULL type
@@ -483,8 +488,7 @@ pub fn decode_binary_value(field_type: FieldType, data: &[u8], is_unsigned: bool
         // JSON
         FieldType::Json => {
             let text = String::from_utf8_lossy(data);
-            serde_json::from_str(&text)
-                .map_or_else(|_| Value::Bytes(data.to_vec()), Value::Json)
+            serde_json::from_str(&text).map_or_else(|_| Value::Bytes(data.to_vec()), Value::Json)
         }
 
         // Date/Time types - binary format encodes components
@@ -859,7 +863,10 @@ mod tests {
     fn test_format_value() {
         assert_eq!(format_value_for_sql(&Value::Null), "NULL");
         assert_eq!(format_value_for_sql(&Value::Int(42)), "42");
-        assert_eq!(format_value_for_sql(&Value::Text("hello".to_string())), "'hello'");
+        assert_eq!(
+            format_value_for_sql(&Value::Text("hello".to_string())),
+            "'hello'"
+        );
         assert_eq!(format_value_for_sql(&Value::Bool(true)), "TRUE");
     }
 
@@ -868,7 +875,10 @@ mod tests {
         let sql = "SELECT * FROM users WHERE id = ? AND name = ?";
         let params = vec![Value::Int(1), Value::Text("Alice".to_string())];
         let result = interpolate_params(sql, &params);
-        assert_eq!(result, "SELECT * FROM users WHERE id = 1 AND name = 'Alice'");
+        assert_eq!(
+            result,
+            "SELECT * FROM users WHERE id = 1 AND name = 'Alice'"
+        );
     }
 
     #[test]
@@ -876,7 +886,10 @@ mod tests {
         let sql = "SELECT * FROM users WHERE id = $1 AND name = $2";
         let params = vec![Value::Int(1), Value::Text("Alice".to_string())];
         let result = interpolate_params(sql, &params);
-        assert_eq!(result, "SELECT * FROM users WHERE id = 1 AND name = 'Alice'");
+        assert_eq!(
+            result,
+            "SELECT * FROM users WHERE id = 1 AND name = 'Alice'"
+        );
     }
 
     #[test]

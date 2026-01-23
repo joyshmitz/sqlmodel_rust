@@ -520,8 +520,10 @@ impl SchemaTree {
 
         // Sections
         #[allow(clippy::type_complexity)]
-        let mut sections: Vec<(&str, Box<dyn Fn(&str, bool, &mut Vec<String>, &Theme) + '_>)> =
-            Vec::new();
+        let mut sections: Vec<(
+            &str,
+            Box<dyn Fn(&str, bool, &mut Vec<String>, &Theme) + '_>,
+        )> = Vec::new();
 
         if !table.columns.is_empty() {
             let columns = table.columns.clone();
