@@ -1,8 +1,9 @@
 mod fixtures;
 
+use fixtures::mock_types::{MockConnection, MockPoolStats};
 use fixtures::*;
-use sqlmodel_console::renderables::PoolStatsProvider;
 use sqlmodel_console::ConsoleAware;
+use sqlmodel_console::renderables::PoolStatsProvider;
 
 #[test]
 fn test_user_table_info() {
