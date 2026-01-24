@@ -483,7 +483,7 @@ impl TryFrom<Value> for [u8; 16] {
     }
 }
 
-/// TryFrom for Option<T> - returns None for Null, tries to convert otherwise
+/// TryFrom for `Option<T>` - returns None for Null, tries to convert otherwise
 impl<T> TryFrom<Value> for Option<T>
 where
     T: TryFrom<Value, Error = Error>,
