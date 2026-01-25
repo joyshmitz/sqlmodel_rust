@@ -264,7 +264,7 @@ fn bench_progress_update(b: &mut Bencher) {
     b.iter(|| {
         i = (i + 1) % 10000;
         progress.set_completed(i);
-        black_box(&progress)
+        let _ = black_box(&progress);
     });
 }
 
@@ -273,7 +273,7 @@ fn bench_progress_increment(b: &mut Bencher) {
     let mut progress = OperationProgress::new("Inserting rows", 10000);
     b.iter(|| {
         progress.increment();
-        black_box(&progress)
+        let _ = black_box(&progress);
     });
 }
 
@@ -340,7 +340,7 @@ fn bench_batch_tracker_complete_batch(b: &mut Bencher) {
     let mut tracker = BatchOperationTracker::new("Bulk insert", 100, 10000);
     b.iter(|| {
         tracker.complete_batch(100);
-        black_box(&tracker)
+        let _ = black_box(&tracker);
     });
 }
 
