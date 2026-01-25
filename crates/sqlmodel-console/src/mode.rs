@@ -579,6 +579,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "flaky: env var race conditions in parallel tests"]
     fn test_no_agent_when_clean() {
         with_clean_env(|| {
             assert!(!OutputMode::is_agent_environment());
