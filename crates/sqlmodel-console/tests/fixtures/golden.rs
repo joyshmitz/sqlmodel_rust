@@ -24,7 +24,10 @@ pub fn assert_golden(name: &str, actual: &str) {
     }
 
     let expected = load_golden(name);
-    if actual != expected {
+    // Normalize line endings for cross-platform comparison (Windows CRLF vs Unix LF)
+    let expected_normalized = expected.replace("\r\n", "\n");
+    let actual_normalized = actual.replace("\r\n", "\n");
+    if actual_normalized != expected_normalized {
         eprintln!("Golden file mismatch: {}", name);
         eprintln!("Expected:");
         for line in expected.lines() {
