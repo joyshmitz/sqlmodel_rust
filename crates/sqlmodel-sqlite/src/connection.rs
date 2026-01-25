@@ -1378,6 +1378,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_type_conversions() {
         let conn = SqliteConnection::open_memory().unwrap();
         conn.execute_raw(
