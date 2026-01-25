@@ -111,7 +111,7 @@ impl OutputMode {
         }
 
         // Dumb terminal
-        if env::var("TERM").map(|t| t == "dumb").unwrap_or(false) {
+        if env::var("TERM").is_ok_and(|t| t == "dumb") {
             return Self::Plain;
         }
 
@@ -301,12 +301,10 @@ impl std::fmt::Display for OutputMode {
 ///
 /// Recognizes: `1`, `true`, `yes`, `on` (case-insensitive).
 fn env_is_truthy(name: &str) -> bool {
-    env::var(name)
-        .map(|v| {
-            let v = v.to_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false)
+    env::var(name).is_ok_and(|v| {
+        let v = v.to_lowercase();
+        v == "1" || v == "true" || v == "yes" || v == "on"
+    })
 }
 
 #[cfg(test)]
