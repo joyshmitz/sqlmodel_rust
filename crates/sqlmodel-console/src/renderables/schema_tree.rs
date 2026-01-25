@@ -291,10 +291,10 @@ impl SchemaTree {
         let connector = if is_last { last_branch } else { branch };
 
         // Table name with icon
-        let pk_info = if table.primary_key.is_empty() {
-            String::new()
-        } else {
+        let pk_info = if self.config.show_constraints && !table.primary_key.is_empty() {
             format!(" [PK: {}]", table.primary_key.join(", "))
+        } else {
+            String::new()
         };
         lines.push(format!("{prefix}{connector}Table: {}{pk_info}", table.name));
 
@@ -502,10 +502,10 @@ impl SchemaTree {
         let pk_color = theme.dim.color_code();
 
         // Table name
-        let pk_info = if table.primary_key.is_empty() {
-            String::new()
-        } else {
+        let pk_info = if self.config.show_constraints && !table.primary_key.is_empty() {
             format!(" {pk_color}[PK: {}]{reset}", table.primary_key.join(", "))
+        } else {
+            String::new()
         };
         lines.push(format!(
             "{dim}{prefix}{connector}{reset}{table_color}Table:{reset} {name_color}{}{reset}{pk_info}",

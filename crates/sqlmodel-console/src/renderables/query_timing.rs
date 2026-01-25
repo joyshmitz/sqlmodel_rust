@@ -405,9 +405,9 @@ mod tests {
     fn test_render_plain_with_phases() {
         let timing = QueryTiming::new()
             .total(Duration::from_millis(10))
-            .parse(Duration::from_micros(1000))
-            .plan(Duration::from_micros(2000))
-            .execute(Duration::from_micros(7000));
+            .parse(Duration::from_millis(1))
+            .plan(Duration::from_millis(2))
+            .execute(Duration::from_millis(7));
 
         let output = timing.render_plain();
         assert!(output.contains("Parse"));
@@ -419,8 +419,8 @@ mod tests {
     fn test_render_styled_contains_ansi() {
         let timing = QueryTiming::new()
             .total(Duration::from_millis(10))
-            .parse(Duration::from_micros(5000))
-            .execute(Duration::from_micros(5000));
+            .parse(Duration::from_millis(5))
+            .execute(Duration::from_millis(5));
 
         let styled = timing.render_styled();
         assert!(styled.contains('\x1b'));
@@ -430,8 +430,8 @@ mod tests {
     fn test_render_styled_contains_bars() {
         let timing = QueryTiming::new()
             .total(Duration::from_millis(10))
-            .parse(Duration::from_micros(5000))
-            .execute(Duration::from_micros(5000));
+            .parse(Duration::from_millis(5))
+            .execute(Duration::from_millis(5));
 
         let styled = timing.render_styled();
         assert!(styled.contains('█') || styled.contains('░'));
@@ -442,7 +442,7 @@ mod tests {
         let timing = QueryTiming::new()
             .total(Duration::from_millis(10))
             .rows(5)
-            .parse(Duration::from_micros(3000));
+            .parse(Duration::from_millis(3));
 
         let json = timing.to_json();
         assert_eq!(json["row_count"], 5);
@@ -453,12 +453,12 @@ mod tests {
     #[test]
     fn test_effective_total_from_phases() {
         let timing = QueryTiming::new()
-            .parse(Duration::from_micros(1000))
-            .execute(Duration::from_micros(2000));
+            .parse(Duration::from_millis(1))
+            .execute(Duration::from_millis(2));
 
         // No explicit total set, should sum phases
         let total = timing.effective_total();
-        assert_eq!(total, Duration::from_micros(3000));
+        assert_eq!(total, Duration::from_millis(3));
     }
 
     #[test]
@@ -506,7 +506,7 @@ mod tests {
 
     #[test]
     fn test_fetch_phase() {
-        let timing = QueryTiming::new().fetch(Duration::from_micros(1000));
+        let timing = QueryTiming::new().fetch(Duration::from_millis(1));
 
         assert_eq!(timing.phases.len(), 1);
         assert_eq!(timing.phases[0].name, "Fetch");
@@ -514,7 +514,7 @@ mod tests {
 
     #[test]
     fn test_custom_phase() {
-        let timing = QueryTiming::new().phase("Custom", Duration::from_micros(1000));
+        let timing = QueryTiming::new().phase("Custom", Duration::from_millis(1));
 
         assert_eq!(timing.phases.len(), 1);
         assert_eq!(timing.phases[0].name, "Custom");

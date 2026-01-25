@@ -72,6 +72,18 @@ jobs:
           git clone https://github.com/Dicklesworthstone/rich_rust.git rich_rust 2>$null
           if (-not $?) { Write-Host "Dependencies already exist or clone failed" }
 
+      - name: Install SQLite (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          vcpkg integrate install
+          vcpkg install sqlite3:x64-windows
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          echo "SQLITE3_LIB_DIR=$vcpkgRoot\installed\x64-windows\lib" >> $env:GITHUB_ENV
+          echo "SQLITE3_INCLUDE_DIR=$vcpkgRoot\installed\x64-windows\include" >> $env:GITHUB_ENV
+          # Add to PATH for runtime DLL
+          echo "$vcpkgRoot\installed\x64-windows\bin" >> $env:GITHUB_PATH
+
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
 
@@ -194,6 +206,18 @@ jobs:
           git clone https://github.com/Dicklesworthstone/asupersync.git asupersync 2>$null
           git clone https://github.com/Dicklesworthstone/rich_rust.git rich_rust 2>$null
           if (-not $?) { Write-Host "Dependencies already exist or clone failed" }
+
+      - name: Install SQLite (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          vcpkg integrate install
+          vcpkg install sqlite3:x64-windows
+          $vcpkgRoot = $env:VCPKG_INSTALLATION_ROOT
+          echo "SQLITE3_LIB_DIR=$vcpkgRoot\installed\x64-windows\lib" >> $env:GITHUB_ENV
+          echo "SQLITE3_INCLUDE_DIR=$vcpkgRoot\installed\x64-windows\include" >> $env:GITHUB_ENV
+          # Add to PATH for runtime DLL
+          echo "$vcpkgRoot\installed\x64-windows\bin" >> $env:GITHUB_PATH
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@nightly
