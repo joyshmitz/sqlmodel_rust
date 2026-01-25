@@ -218,21 +218,21 @@ mod tests {
     #[test]
     fn test_write_u24_le() {
         let mut writer = PacketWriter::new();
-        writer.write_u24_le(0x123456);
+        writer.write_u24_le(0x0012_3456);
         assert_eq!(writer.as_bytes(), &[0x56, 0x34, 0x12]);
     }
 
     #[test]
     fn test_write_u32_le() {
         let mut writer = PacketWriter::new();
-        writer.write_u32_le(0x12345678);
+        writer.write_u32_le(0x1234_5678);
         assert_eq!(writer.as_bytes(), &[0x78, 0x56, 0x34, 0x12]);
     }
 
     #[test]
     fn test_write_u64_le() {
         let mut writer = PacketWriter::new();
-        writer.write_u64_le(0x0807060504030201);
+        writer.write_u64_le(0x0807_0605_0403_0201);
         assert_eq!(
             writer.as_bytes(),
             &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]
@@ -253,12 +253,12 @@ mod tests {
 
         // 3-byte value
         let mut writer = PacketWriter::new();
-        writer.write_lenenc_int(0x123456);
+        writer.write_lenenc_int(0x0012_3456);
         assert_eq!(writer.as_bytes(), &[0xFD, 0x56, 0x34, 0x12]);
 
         // 8-byte value
         let mut writer = PacketWriter::new();
-        writer.write_lenenc_int(0x0807060504030201);
+        writer.write_lenenc_int(0x0807_0605_0403_0201);
         assert_eq!(
             writer.as_bytes(),
             &[0xFE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]

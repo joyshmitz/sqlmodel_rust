@@ -364,7 +364,7 @@ fn bench_batch_tracker_render_styled(b: &mut Bencher) {
 
 const SAMPLE_SQL_SIMPLE: &str = "SELECT * FROM users WHERE id = 1";
 
-const SAMPLE_SQL_COMPLEX: &str = r#"
+const SAMPLE_SQL_COMPLEX: &str = r"
 SELECT u.id, u.name, u.email, COUNT(o.id) as order_count
 FROM users u
 LEFT JOIN orders o ON o.user_id = u.id
@@ -373,7 +373,7 @@ GROUP BY u.id, u.name, u.email
 HAVING COUNT(o.id) > 5
 ORDER BY order_count DESC
 LIMIT 100 OFFSET 0
-"#;
+";
 
 #[bench]
 fn bench_highlighter_creation(b: &mut Bencher) {

@@ -285,7 +285,7 @@ mod tests {
     #[test]
     fn test_packet_header_roundtrip() {
         let header = PacketHeader {
-            payload_length: 0x123456,
+            payload_length: 0x0012_3456,
             sequence_id: 7,
         };
         let bytes = header.to_bytes();
@@ -295,6 +295,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cast_possible_truncation)]
     fn test_packet_header_max_size() {
         let header = PacketHeader {
             payload_length: MAX_PACKET_SIZE as u32,

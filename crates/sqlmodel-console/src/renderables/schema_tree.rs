@@ -5,13 +5,12 @@
 //! # Example
 //!
 //! ```rust
-//! use sqlmodel_console::renderables::{SchemaTree, SchemaTreeConfig};
-//! use sqlmodel_schema::{TableInfo, ColumnInfo};
+//! use sqlmodel_console::renderables::{SchemaTree, SchemaTreeConfig, TableData, ColumnData};
 //!
-//! let table = TableInfo {
+//! let table = TableData {
 //!     name: "heroes".to_string(),
 //!     columns: vec![
-//!         ColumnInfo {
+//!         ColumnData {
 //!             name: "id".to_string(),
 //!             sql_type: "INTEGER".to_string(),
 //!             nullable: false,
@@ -19,7 +18,7 @@
 //!             primary_key: true,
 //!             auto_increment: true,
 //!         },
-//!         ColumnInfo {
+//!         ColumnData {
 //!             name: "name".to_string(),
 //!             sql_type: "TEXT".to_string(),
 //!             nullable: false,

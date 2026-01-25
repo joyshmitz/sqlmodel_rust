@@ -305,19 +305,19 @@ mod tests {
     #[test]
     fn test_read_u24_le() {
         let mut reader = PacketReader::new(&[0x56, 0x34, 0x12]);
-        assert_eq!(reader.read_u24_le(), Some(0x123456));
+        assert_eq!(reader.read_u24_le(), Some(0x0012_3456));
     }
 
     #[test]
     fn test_read_u32_le() {
         let mut reader = PacketReader::new(&[0x78, 0x56, 0x34, 0x12]);
-        assert_eq!(reader.read_u32_le(), Some(0x12345678));
+        assert_eq!(reader.read_u32_le(), Some(0x1234_5678));
     }
 
     #[test]
     fn test_read_u64_le() {
         let mut reader = PacketReader::new(&[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
-        assert_eq!(reader.read_u64_le(), Some(0x0807060504030201));
+        assert_eq!(reader.read_u64_le(), Some(0x0807_0605_0403_0201));
     }
 
     #[test]
@@ -332,11 +332,11 @@ mod tests {
 
         // 3-byte value
         let mut reader = PacketReader::new(&[0xFD, 0x56, 0x34, 0x12]);
-        assert_eq!(reader.read_lenenc_int(), Some(0x123456));
+        assert_eq!(reader.read_lenenc_int(), Some(0x0012_3456));
 
         // 8-byte value
         let mut reader = PacketReader::new(&[0xFE, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
-        assert_eq!(reader.read_lenenc_int(), Some(0x0807060504030201));
+        assert_eq!(reader.read_lenenc_int(), Some(0x0807_0605_0403_0201));
     }
 
     #[test]

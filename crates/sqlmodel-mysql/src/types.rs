@@ -942,6 +942,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_decode_text_float() {
         let val = decode_text_value(FieldType::Double, b"3.14", false);
         if let Value::Double(f) = val {
@@ -976,6 +977,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn test_decode_binary_double() {
         let pi_bytes = 3.14159_f64.to_le_bytes();
         let val = decode_binary_value(FieldType::Double, &pi_bytes, false);
