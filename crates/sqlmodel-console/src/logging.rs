@@ -114,12 +114,10 @@ pub fn min_log_level() -> LogLevel {
 /// Called automatically on first log attempt, but can be called
 /// explicitly to ensure logging is set up early.
 pub fn init_logging() {
-    let enabled = env::var("SQLMODEL_LOG")
-        .map(|v| {
-            let v = v.to_lowercase();
-            v == "1" || v == "true" || v == "yes" || v == "on"
-        })
-        .unwrap_or(false);
+    let enabled = env::var("SQLMODEL_LOG").is_ok_and(|v| {
+        let v = v.to_lowercase();
+        v == "1" || v == "true" || v == "yes" || v == "on"
+    });
 
     LOGGING_ENABLED.store(enabled, Ordering::Relaxed);
 
