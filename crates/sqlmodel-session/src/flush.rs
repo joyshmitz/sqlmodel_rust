@@ -955,4 +955,224 @@ mod tests {
         assert_eq!(result.deleted, 0);
         assert_eq!(result.total(), 0);
     }
+
+    // ========================================================================
+    // Link Table Operation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_link_table_op_link_constructor() {
+        let op = LinkTableOp::link(
+            "hero_powers".to_string(),
+            "hero_id".to_string(),
+            Value::BigInt(1),
+            "power_id".to_string(),
+            Value::BigInt(5),
+        );
+
+        match op {
+            LinkTableOp::Link {
+                table,
+                local_column,
+                local_value,
+                remote_column,
+                remote_value,
+            } => {
+                assert_eq!(table, "hero_powers");
+                assert_eq!(local_column, "hero_id");
+                assert_eq!(local_value, Value::BigInt(1));
+                assert_eq!(remote_column, "power_id");
+                assert_eq!(remote_value, Value::BigInt(5));
+            }
+            _ => panic!("Expected Link variant"),
+        }
+    }
+
+    #[test]
+    fn test_link_table_op_unlink_constructor() {
+        let op = LinkTableOp::unlink(
+            "hero_powers".to_string(),
+            "hero_id".to_string(),
+            Value::BigInt(1),
+            "power_id".to_string(),
+            Value::BigInt(5),
+        );
+
+        match op {
+            LinkTableOp::Unlink {
+                table,
+                local_column,
+                local_value,
+                remote_column,
+                remote_value,
+            } => {
+                assert_eq!(table, "hero_powers");
+                assert_eq!(local_column, "hero_id");
+                assert_eq!(local_value, Value::BigInt(1));
+                assert_eq!(remote_column, "power_id");
+                assert_eq!(remote_value, Value::BigInt(5));
+            }
+            _ => panic!("Expected Unlink variant"),
+        }
+    }
+
+    #[test]
+    fn test_link_table_op_is_link() {
+        let link = LinkTableOp::link(
+            "t".to_string(),
+            "a".to_string(),
+            Value::BigInt(1),
+            "b".to_string(),
+            Value::BigInt(2),
+        );
+        let unlink = LinkTableOp::unlink(
+            "t".to_string(),
+            "a".to_string(),
+            Value::BigInt(1),
+            "b".to_string(),
+            Value::BigInt(2),
+        );
+
+        assert!(matches!(link, LinkTableOp::Link { .. }));
+        assert!(matches!(unlink, LinkTableOp::Unlink { .. }));
+    }
+
+    #[test]
+    fn test_link_table_op_debug_format() {
+        let link = LinkTableOp::link(
+            "hero_powers".to_string(),
+            "hero_id".to_string(),
+            Value::BigInt(1),
+            "power_id".to_string(),
+            Value::BigInt(5),
+        );
+        let debug_str = format!("{:?}", link);
+        assert!(debug_str.contains("Link"));
+        assert!(debug_str.contains("hero_powers"));
+    }
+
+    #[test]
+    fn test_link_table_op_clone() {
+        let op = LinkTableOp::link(
+            "hero_powers".to_string(),
+            "hero_id".to_string(),
+            Value::BigInt(1),
+            "power_id".to_string(),
+            Value::BigInt(5),
+        );
+        let cloned = op.clone();
+
+        match (op, cloned) {
+            (
+                LinkTableOp::Link {
+                    table: t1,
+                    local_value: lv1,
+                    remote_value: rv1,
+                    ..
+                },
+                LinkTableOp::Link {
+                    table: t2,
+                    local_value: lv2,
+                    remote_value: rv2,
+                    ..
+                },
+            ) => {
+                assert_eq!(t1, t2);
+                assert_eq!(lv1, lv2);
+                assert_eq!(rv1, rv2);
+            }
+            _ => panic!("Clone should preserve variant"),
+        }
+    }
+
+    #[test]
+    fn test_link_table_ops_empty_vec() {
+        // Test that an empty ops vec handles correctly
+        let ops: Vec<LinkTableOp> = vec![];
+        assert!(ops.is_empty());
+    }
+
+    #[test]
+    fn test_link_table_ops_multiple_operations() {
+        let ops = vec![
+            LinkTableOp::link(
+                "hero_powers".to_string(),
+                "hero_id".to_string(),
+                Value::BigInt(1),
+                "power_id".to_string(),
+                Value::BigInt(1),
+            ),
+            LinkTableOp::link(
+                "hero_powers".to_string(),
+                "hero_id".to_string(),
+                Value::BigInt(1),
+                "power_id".to_string(),
+                Value::BigInt(2),
+            ),
+            LinkTableOp::unlink(
+                "hero_powers".to_string(),
+                "hero_id".to_string(),
+                Value::BigInt(1),
+                "power_id".to_string(),
+                Value::BigInt(3),
+            ),
+        ];
+
+        let links: Vec<_> = ops
+            .iter()
+            .filter(|o| matches!(o, LinkTableOp::Link { .. }))
+            .collect();
+        let unlinks: Vec<_> = ops
+            .iter()
+            .filter(|o| matches!(o, LinkTableOp::Unlink { .. }))
+            .collect();
+
+        assert_eq!(links.len(), 2);
+        assert_eq!(unlinks.len(), 1);
+    }
+
+    #[test]
+    fn test_link_table_op_with_different_value_types() {
+        // Test with string values
+        let op_str = LinkTableOp::link(
+            "tag_items".to_string(),
+            "tag_id".to_string(),
+            Value::Text("tag-uuid-123".to_string()),
+            "item_id".to_string(),
+            Value::Text("item-uuid-456".to_string()),
+        );
+
+        match op_str {
+            LinkTableOp::Link {
+                local_value,
+                remote_value,
+                ..
+            } => {
+                assert!(matches!(local_value, Value::Text(_)));
+                assert!(matches!(remote_value, Value::Text(_)));
+            }
+            _ => panic!("Expected Link"),
+        }
+
+        // Test with integer values
+        let op_int = LinkTableOp::link(
+            "user_roles".to_string(),
+            "user_id".to_string(),
+            Value::Int(42),
+            "role_id".to_string(),
+            Value::Int(7),
+        );
+
+        match op_int {
+            LinkTableOp::Link {
+                local_value,
+                remote_value,
+                ..
+            } => {
+                assert!(matches!(local_value, Value::Int(_)));
+                assert!(matches!(remote_value, Value::Int(_)));
+            }
+            _ => panic!("Expected Link"),
+        }
+    }
 }
