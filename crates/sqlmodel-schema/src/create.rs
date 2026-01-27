@@ -54,14 +54,28 @@ impl<M: Model> CreateTable<M> {
             if let Some(fk) = field.foreign_key {
                 let parts: Vec<&str> = fk.split('.').collect();
                 if parts.len() == 2 {
-                    constraints.push(format!(
+                    let mut fk_sql = format!(
                         "CONSTRAINT \"fk_{}_{}\" FOREIGN KEY (\"{}\") REFERENCES \"{}\"(\"{}\")",
                         M::TABLE_NAME,
                         field.column_name,
                         field.column_name,
                         parts[0],
                         parts[1]
-                    ));
+                    );
+
+                    // Add ON DELETE action if specified
+                    if let Some(on_delete) = field.on_delete {
+                        fk_sql.push_str(" ON DELETE ");
+                        fk_sql.push_str(on_delete.as_sql());
+                    }
+
+                    // Add ON UPDATE action if specified
+                    if let Some(on_update) = field.on_update {
+                        fk_sql.push_str(" ON UPDATE ");
+                        fk_sql.push_str(on_update.as_sql());
+                    }
+
+                    constraints.push(fk_sql);
                 }
             }
         }
@@ -134,6 +148,8 @@ mod tests {
                     unique: false,
                     default: None,
                     foreign_key: None,
+                    on_delete: None,
+                    on_update: None,
                     index: None,
                 },
                 FieldInfo {
@@ -146,6 +162,8 @@ mod tests {
                     unique: true,
                     default: None,
                     foreign_key: None,
+                    on_delete: None,
+                    on_update: None,
                     index: None,
                 },
                 FieldInfo {
@@ -158,6 +176,8 @@ mod tests {
                     unique: false,
                     default: None,
                     foreign_key: None,
+                    on_delete: None,
+                    on_update: None,
                     index: None,
                 },
                 FieldInfo {
@@ -170,6 +190,8 @@ mod tests {
                     unique: false,
                     default: None,
                     foreign_key: Some("teams.id"),
+                    on_delete: None,
+                    on_update: None,
                     index: None,
                 },
             ];
@@ -297,6 +319,8 @@ mod tests {
                     unique: false,
                     default: None,
                     foreign_key: None,
+                    on_delete: None,
+                    on_update: None,
                     index: None,
                 },
                 FieldInfo {
@@ -309,6 +333,8 @@ mod tests {
                     unique: false,
                     default: Some("true"),
                     foreign_key: None,
+                    on_delete: None,
+                    on_update: None,
                     index: None,
                 },
             ];
@@ -336,6 +362,103 @@ mod tests {
     fn test_create_table_default_value() {
         let sql = CreateTable::<TestWithDefault>::new().build();
         assert!(sql.contains("\"is_active\" BOOLEAN NOT NULL DEFAULT true"));
+    }
+
+    // Test model with ON DELETE CASCADE
+    struct TestWithOnDelete;
+
+    impl Model for TestWithOnDelete {
+        const TABLE_NAME: &'static str = "comments";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            use sqlmodel_core::ReferentialAction;
+            static FIELDS: &[FieldInfo] = &[
+                FieldInfo {
+                    name: "id",
+                    column_name: "id",
+                    sql_type: SqlType::BigInt,
+                    nullable: true,
+                    primary_key: true,
+                    auto_increment: true,
+                    unique: false,
+                    default: None,
+                    foreign_key: None,
+                    on_delete: None,
+                    on_update: None,
+                    index: None,
+                },
+                FieldInfo {
+                    name: "post_id",
+                    column_name: "post_id",
+                    sql_type: SqlType::BigInt,
+                    nullable: false,
+                    primary_key: false,
+                    auto_increment: false,
+                    unique: false,
+                    default: None,
+                    foreign_key: Some("posts.id"),
+                    on_delete: Some(ReferentialAction::Cascade),
+                    on_update: Some(ReferentialAction::NoAction),
+                    index: None,
+                },
+            ];
+            FIELDS
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![]
+        }
+
+        fn from_row(_row: &Row) -> sqlmodel_core::Result<Self> {
+            Ok(TestWithOnDelete)
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            vec![]
+        }
+
+        fn is_new(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn test_create_table_on_delete_cascade() {
+        let sql = CreateTable::<TestWithOnDelete>::new().build();
+        assert!(sql.contains("FOREIGN KEY (\"post_id\") REFERENCES \"posts\"(\"id\") ON DELETE CASCADE ON UPDATE NO ACTION"));
+    }
+
+    #[test]
+    fn test_referential_action_as_sql() {
+        use sqlmodel_core::ReferentialAction;
+        assert_eq!(ReferentialAction::NoAction.as_sql(), "NO ACTION");
+        assert_eq!(ReferentialAction::Restrict.as_sql(), "RESTRICT");
+        assert_eq!(ReferentialAction::Cascade.as_sql(), "CASCADE");
+        assert_eq!(ReferentialAction::SetNull.as_sql(), "SET NULL");
+        assert_eq!(ReferentialAction::SetDefault.as_sql(), "SET DEFAULT");
+    }
+
+    #[test]
+    fn test_referential_action_from_str() {
+        use sqlmodel_core::ReferentialAction;
+        assert_eq!(
+            ReferentialAction::from_str("CASCADE"),
+            Some(ReferentialAction::Cascade)
+        );
+        assert_eq!(
+            ReferentialAction::from_str("cascade"),
+            Some(ReferentialAction::Cascade)
+        );
+        assert_eq!(
+            ReferentialAction::from_str("SET NULL"),
+            Some(ReferentialAction::SetNull)
+        );
+        assert_eq!(
+            ReferentialAction::from_str("SETNULL"),
+            Some(ReferentialAction::SetNull)
+        );
+        assert_eq!(ReferentialAction::from_str("invalid"), None);
     }
 }
 

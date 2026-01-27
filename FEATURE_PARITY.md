@@ -52,7 +52,8 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Primary key | `Field(primary_key=True)` | `#[sqlmodel(primary_key)]` | ✅ Complete |
 | Auto increment | Automatic for int PKs | `#[sqlmodel(auto_increment)]` | ✅ Complete |
 | Foreign key | `Field(foreign_key="...")` | `#[sqlmodel(foreign_key = "...")]` | ✅ Complete |
-| On delete action | `Field(ondelete="CASCADE")` | `#[sqlmodel(on_delete = "...")]` | ❌ TODO |
+| On delete action | `Field(ondelete="CASCADE")` | `ReferentialAction::Cascade` | ⚠️ Core done, macro TODO |
+| On update action | `Field(onupdate="...")` | `ReferentialAction::*` | ⚠️ Core done, macro TODO |
 | Unique constraint | `Field(unique=True)` | `#[sqlmodel(unique)]` | ✅ Complete |
 | Nullable | `Field(nullable=True)` | `Option<T>` | ✅ Complete |
 | Index | `Field(index=True)` | `#[sqlmodel(index = "...")]` | ✅ Complete |

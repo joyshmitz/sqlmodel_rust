@@ -2,6 +2,55 @@
 
 use crate::types::SqlType;
 
+/// Referential action for foreign key constraints (ON DELETE / ON UPDATE).
+///
+/// These define what happens to referencing rows when the referenced row is
+/// deleted or updated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReferentialAction {
+    /// No action - raise error if any references exist.
+    /// This is the default and most restrictive option.
+    #[default]
+    NoAction,
+    /// Restrict - same as NO ACTION (alias for compatibility).
+    Restrict,
+    /// Cascade - automatically delete/update referencing rows.
+    Cascade,
+    /// Set null - set referencing columns to NULL.
+    SetNull,
+    /// Set default - set referencing columns to their default values.
+    SetDefault,
+}
+
+impl ReferentialAction {
+    /// Get the SQL representation of this action.
+    #[must_use]
+    pub const fn as_sql(&self) -> &'static str {
+        match self {
+            ReferentialAction::NoAction => "NO ACTION",
+            ReferentialAction::Restrict => "RESTRICT",
+            ReferentialAction::Cascade => "CASCADE",
+            ReferentialAction::SetNull => "SET NULL",
+            ReferentialAction::SetDefault => "SET DEFAULT",
+        }
+    }
+
+    /// Parse a referential action from a string (case-insensitive).
+    ///
+    /// Returns `None` if the string is not a recognized action.
+    #[must_use]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s.to_uppercase().as_str() {
+            "NO ACTION" | "NOACTION" | "NO_ACTION" => Some(ReferentialAction::NoAction),
+            "RESTRICT" => Some(ReferentialAction::Restrict),
+            "CASCADE" => Some(ReferentialAction::Cascade),
+            "SET NULL" | "SETNULL" | "SET_NULL" => Some(ReferentialAction::SetNull),
+            "SET DEFAULT" | "SETDEFAULT" | "SET_DEFAULT" => Some(ReferentialAction::SetDefault),
+            _ => None,
+        }
+    }
+}
+
 /// Metadata about a model field/column.
 #[derive(Debug, Clone)]
 pub struct FieldInfo {
@@ -23,6 +72,10 @@ pub struct FieldInfo {
     pub default: Option<&'static str>,
     /// Foreign key reference (table.column)
     pub foreign_key: Option<&'static str>,
+    /// Referential action for ON DELETE (only valid with foreign_key)
+    pub on_delete: Option<ReferentialAction>,
+    /// Referential action for ON UPDATE (only valid with foreign_key)
+    pub on_update: Option<ReferentialAction>,
     /// Index name if indexed
     pub index: Option<&'static str>,
 }
@@ -40,6 +93,8 @@ impl FieldInfo {
             unique: false,
             default: None,
             foreign_key: None,
+            on_delete: None,
+            on_update: None,
             index: None,
         }
     }
@@ -95,6 +150,34 @@ impl FieldInfo {
     /// Set foreign key reference from optional.
     pub const fn foreign_key_opt(mut self, reference: Option<&'static str>) -> Self {
         self.foreign_key = reference;
+        self
+    }
+
+    /// Set ON DELETE action for foreign key.
+    ///
+    /// This is only meaningful when `foreign_key` is also set.
+    pub const fn on_delete(mut self, action: ReferentialAction) -> Self {
+        self.on_delete = Some(action);
+        self
+    }
+
+    /// Set ON DELETE action from optional.
+    pub const fn on_delete_opt(mut self, action: Option<ReferentialAction>) -> Self {
+        self.on_delete = action;
+        self
+    }
+
+    /// Set ON UPDATE action for foreign key.
+    ///
+    /// This is only meaningful when `foreign_key` is also set.
+    pub const fn on_update(mut self, action: ReferentialAction) -> Self {
+        self.on_update = Some(action);
+        self
+    }
+
+    /// Set ON UPDATE action from optional.
+    pub const fn on_update_opt(mut self, action: Option<ReferentialAction>) -> Self {
+        self.on_update = action;
         self
     }
 

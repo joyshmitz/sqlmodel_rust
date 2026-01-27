@@ -1301,7 +1301,7 @@ mod tests {
         let expr = Expr::col("id").eq(1);
         let mut params = Vec::new();
         let sql = expr.build_with_dialect(Dialect::Mysql, &mut params, 0);
-        assert_eq!(sql, "\"id\" = ?");
+        assert_eq!(sql, "`id` = ?");
     }
 
     // ==================== Complex Expression Tests ====================
