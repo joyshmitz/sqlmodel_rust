@@ -1343,6 +1343,38 @@ fn query_error_msg(msg: impl Into<String>) -> Error {
     })
 }
 
+/// Validate a savepoint name to prevent SQL injection.
+///
+/// MySQL identifiers must:
+/// - Not be empty
+/// - Start with a letter or underscore
+/// - Contain only letters, digits, underscores, or dollar signs
+/// - Be at most 64 characters
+fn validate_savepoint_name(name: &str) -> Result<(), Error> {
+    if name.is_empty() {
+        return Err(query_error_msg("Savepoint name cannot be empty"));
+    }
+    if name.len() > 64 {
+        return Err(query_error_msg("Savepoint name exceeds maximum length of 64 characters"));
+    }
+    let mut chars = name.chars();
+    let first = chars.next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return Err(query_error_msg(
+            "Savepoint name must start with a letter or underscore",
+        ));
+    }
+    for c in chars {
+        if !c.is_ascii_alphanumeric() && c != '_' && c != '$' {
+            return Err(query_error_msg(format!(
+                "Savepoint name contains invalid character: '{}'",
+                c
+            )));
+        }
+    }
+    Ok(())
+}
+
 // === Shared connection wrapper ===
 
 /// A thread-safe, shared MySQL connection with interior mutability.
@@ -1720,8 +1752,14 @@ impl<'conn> TransactionOps for SharedMySqlTransaction<'conn> {
         name: &str,
     ) -> impl Future<Output = Outcome<(), Error>> + Send {
         let inner = Arc::clone(&self.inner);
+        // Validate name before building SQL to prevent injection
+        let validation_result = validate_savepoint_name(name);
         let sql = format!("SAVEPOINT {}", name);
         async move {
+            // Return validation error if name was invalid
+            if let Err(e) = validation_result {
+                return Outcome::Err(e);
+            }
             let mut guard = match inner.lock(cx).await {
                 Ok(g) => g,
                 Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
@@ -1741,8 +1779,14 @@ impl<'conn> TransactionOps for SharedMySqlTransaction<'conn> {
         name: &str,
     ) -> impl Future<Output = Outcome<(), Error>> + Send {
         let inner = Arc::clone(&self.inner);
+        // Validate name before building SQL to prevent injection
+        let validation_result = validate_savepoint_name(name);
         let sql = format!("ROLLBACK TO SAVEPOINT {}", name);
         async move {
+            // Return validation error if name was invalid
+            if let Err(e) = validation_result {
+                return Outcome::Err(e);
+            }
             let mut guard = match inner.lock(cx).await {
                 Ok(g) => g,
                 Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
@@ -1762,8 +1806,14 @@ impl<'conn> TransactionOps for SharedMySqlTransaction<'conn> {
         name: &str,
     ) -> impl Future<Output = Outcome<(), Error>> + Send {
         let inner = Arc::clone(&self.inner);
+        // Validate name before building SQL to prevent injection
+        let validation_result = validate_savepoint_name(name);
         let sql = format!("RELEASE SAVEPOINT {}", name);
         async move {
+            // Return validation error if name was invalid
+            if let Err(e) = validation_result {
+                return Outcome::Err(e);
+            }
             let mut guard = match inner.lock(cx).await {
                 Ok(g) => g,
                 Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
@@ -1843,5 +1893,35 @@ mod tests {
 
         let err = connection_error("conn failed");
         assert!(matches!(err, Error::Connection(_)));
+    }
+
+    #[test]
+    fn test_validate_savepoint_name_valid() {
+        // Valid names
+        assert!(validate_savepoint_name("sp1").is_ok());
+        assert!(validate_savepoint_name("_savepoint").is_ok());
+        assert!(validate_savepoint_name("SavePoint_123").is_ok());
+        assert!(validate_savepoint_name("sp$test").is_ok());
+        assert!(validate_savepoint_name("a").is_ok());
+        assert!(validate_savepoint_name("_").is_ok());
+    }
+
+    #[test]
+    fn test_validate_savepoint_name_invalid() {
+        // Empty name
+        assert!(validate_savepoint_name("").is_err());
+
+        // Starts with digit
+        assert!(validate_savepoint_name("1savepoint").is_err());
+
+        // Contains invalid characters
+        assert!(validate_savepoint_name("save-point").is_err());
+        assert!(validate_savepoint_name("save point").is_err());
+        assert!(validate_savepoint_name("save;drop table").is_err());
+        assert!(validate_savepoint_name("sp'--").is_err());
+
+        // Too long (over 64 chars)
+        let long_name = "a".repeat(65);
+        assert!(validate_savepoint_name(&long_name).is_err());
     }
 }
