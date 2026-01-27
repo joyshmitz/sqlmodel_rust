@@ -757,15 +757,14 @@ mod tests {
         assert_eq!(pending, MigrationStatus::Pending);
         assert_ne!(pending, applied);
 
-        match applied {
-            MigrationStatus::Applied { at } => assert_eq!(at, 1_234_567_890),
-            _ => assert!(false, "Expected Applied variant"),
-        }
-
-        match failed {
-            MigrationStatus::Failed { error } => assert_eq!(error, "Test error"),
-            _ => assert!(false, "Expected Failed variant"),
-        }
+        assert!(matches!(
+            applied,
+            MigrationStatus::Applied { at } if at == 1_234_567_890
+        ));
+        assert!(matches!(
+            failed,
+            MigrationStatus::Failed { ref error } if error == "Test error"
+        ));
     }
 
     #[test]
