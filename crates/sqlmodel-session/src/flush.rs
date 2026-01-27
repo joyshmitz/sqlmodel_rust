@@ -54,6 +54,157 @@ pub enum PendingOp {
     },
 }
 
+/// A pending link table operation (for many-to-many relationships).
+#[derive(Debug, Clone)]
+pub enum LinkTableOp {
+    /// Insert a link (relationship).
+    Link {
+        /// Link table name.
+        table: String,
+        /// Local (parent) column name.
+        local_column: String,
+        /// Local (parent) PK value.
+        local_value: Value,
+        /// Remote (child) column name.
+        remote_column: String,
+        /// Remote (child) PK value.
+        remote_value: Value,
+    },
+    /// Delete a link (relationship).
+    Unlink {
+        /// Link table name.
+        table: String,
+        /// Local (parent) column name.
+        local_column: String,
+        /// Local (parent) PK value.
+        local_value: Value,
+        /// Remote (child) column name.
+        remote_column: String,
+        /// Remote (child) PK value.
+        remote_value: Value,
+    },
+}
+
+impl LinkTableOp {
+    /// Create a link operation.
+    pub fn link(
+        table: impl Into<String>,
+        local_column: impl Into<String>,
+        local_value: Value,
+        remote_column: impl Into<String>,
+        remote_value: Value,
+    ) -> Self {
+        Self::Link {
+            table: table.into(),
+            local_column: local_column.into(),
+            local_value,
+            remote_column: remote_column.into(),
+            remote_value,
+        }
+    }
+
+    /// Create an unlink operation.
+    pub fn unlink(
+        table: impl Into<String>,
+        local_column: impl Into<String>,
+        local_value: Value,
+        remote_column: impl Into<String>,
+        remote_value: Value,
+    ) -> Self {
+        Self::Unlink {
+            table: table.into(),
+            local_column: local_column.into(),
+            local_value,
+            remote_column: remote_column.into(),
+            remote_value,
+        }
+    }
+
+    /// Get the table name.
+    pub fn table(&self) -> &str {
+        match self {
+            LinkTableOp::Link { table, .. } => table,
+            LinkTableOp::Unlink { table, .. } => table,
+        }
+    }
+
+    /// Check if this is a link (insert) operation.
+    pub fn is_link(&self) -> bool {
+        matches!(self, LinkTableOp::Link { .. })
+    }
+
+    /// Check if this is an unlink (delete) operation.
+    pub fn is_unlink(&self) -> bool {
+        matches!(self, LinkTableOp::Unlink { .. })
+    }
+
+    /// Execute this link table operation.
+    #[tracing::instrument(level = "debug", skip(cx, conn))]
+    pub async fn execute<C: Connection>(&self, cx: &Cx, conn: &C) -> Outcome<(), Error> {
+        match self {
+            LinkTableOp::Link {
+                table,
+                local_column,
+                local_value,
+                remote_column,
+                remote_value,
+            } => {
+                let sql = format!(
+                    "INSERT INTO \"{}\" (\"{}\", \"{}\") VALUES ($1, $2)",
+                    table, local_column, remote_column
+                );
+                tracing::trace!(sql = %sql, "Executing link INSERT");
+                conn.execute(cx, &sql, &[local_value.clone(), remote_value.clone()])
+                    .await
+                    .map(|_| ())
+            }
+            LinkTableOp::Unlink {
+                table,
+                local_column,
+                local_value,
+                remote_column,
+                remote_value,
+            } => {
+                let sql = format!(
+                    "DELETE FROM \"{}\" WHERE \"{}\" = $1 AND \"{}\" = $2",
+                    table, local_column, remote_column
+                );
+                tracing::trace!(sql = %sql, "Executing link DELETE");
+                conn.execute(cx, &sql, &[local_value.clone(), remote_value.clone()])
+                    .await
+                    .map(|_| ())
+            }
+        }
+    }
+}
+
+/// Execute a batch of link table operations.
+#[tracing::instrument(level = "debug", skip(cx, conn, ops))]
+pub async fn execute_link_table_ops<C: Connection>(
+    cx: &Cx,
+    conn: &C,
+    ops: &[LinkTableOp],
+) -> Outcome<usize, Error> {
+    if ops.is_empty() {
+        return Outcome::Ok(0);
+    }
+
+    tracing::info!(count = ops.len(), "Executing link table operations");
+
+    let mut count = 0;
+    for op in ops {
+        match op.execute(cx, conn).await {
+            Outcome::Ok(()) => count += 1,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        }
+    }
+
+    tracing::debug!(executed = count, "Link table operations complete");
+    Outcome::Ok(count)
+}
+
 impl PendingOp {
     /// Get the table name for this operation.
     pub fn table(&self) -> &'static str {
@@ -199,11 +350,7 @@ impl FlushPlan {
 
     /// Execute the flush plan against the database.
     #[tracing::instrument(level = "info", skip(self, cx, conn))]
-    pub async fn execute<C: Connection>(
-        &self,
-        cx: &Cx,
-        conn: &C,
-    ) -> Outcome<FlushResult, Error> {
+    pub async fn execute<C: Connection>(&self, cx: &Cx, conn: &C) -> Outcome<FlushResult, Error> {
         tracing::info!(
             deletes = self.deletes.len(),
             inserts = self.inserts.len(),
@@ -297,9 +444,8 @@ impl FlushPlan {
         }
 
         let table = ops[0].table();
-        let columns = match ops[0] {
-            PendingOp::Insert { columns, .. } => columns,
-            _ => return Outcome::Ok(0),
+        let PendingOp::Insert { columns, .. } = ops[0] else {
+            return Outcome::Ok(0);
         };
 
         tracing::debug!(table = table, count = ops.len(), "Executing insert batch");
@@ -355,9 +501,8 @@ impl FlushPlan {
         }
 
         let table = ops[0].table();
-        let pk_columns = match ops[0] {
-            PendingOp::Delete { pk_columns, .. } => pk_columns,
-            _ => return Outcome::Ok(0),
+        let PendingOp::Delete { pk_columns, .. } = ops[0] else {
+            return Outcome::Ok(0);
         };
 
         tracing::debug!(table = table, count = ops.len(), "Executing delete batch");
@@ -436,16 +581,16 @@ impl FlushPlan {
         conn: &C,
         op: &PendingOp,
     ) -> Outcome<(), Error> {
-        let (table, pk_columns, pk_values, set_columns, set_values) = match op {
-            PendingOp::Update {
-                table,
-                pk_columns,
-                pk_values,
-                set_columns,
-                set_values,
-                ..
-            } => (table, pk_columns, pk_values, set_columns, set_values),
-            _ => return Outcome::Ok(()),
+        let PendingOp::Update {
+            table,
+            pk_columns,
+            pk_values,
+            set_columns,
+            set_values,
+            ..
+        } = op
+        else {
+            return Outcome::Ok(());
         };
 
         if set_columns.is_empty() {

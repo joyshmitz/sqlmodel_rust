@@ -269,8 +269,7 @@ impl MigrationWriter {
             "-- Generated: {}\n\n",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
+                .map_or(0, |d| d.as_secs())
         ));
 
         // UP migration
@@ -552,7 +551,7 @@ mod tests {
         assert!(version.chars().all(|c| c.is_ascii_digit()));
         // Year should be reasonable (2020-2100)
         let year: i32 = version[0..4].parse().unwrap();
-        assert!(year >= 2020 && year <= 2100);
+        assert!((2020..=2100).contains(&year));
     }
 
     #[test]
@@ -573,7 +572,12 @@ mod tests {
 
     #[test]
     fn test_migration_new() {
-        let m = Migration::new("001", "Create users table", "CREATE TABLE users", "DROP TABLE users");
+        let m = Migration::new(
+            "001",
+            "Create users table",
+            "CREATE TABLE users",
+            "DROP TABLE users",
+        );
         assert_eq!(m.id, "001");
         assert_eq!(m.description, "Create users table");
         assert_eq!(m.up, "CREATE TABLE users");
@@ -657,17 +661,16 @@ mod tests {
     #[test]
     fn test_filename_sanitization() {
         let writer = MigrationWriter::new("/tmp");
-        let m = Migration::new(
-            "20260127120000",
-            "Create Users Table!!!",
-            "",
-            "",
-        );
+        let m = Migration::new("20260127120000", "Create Users Table!!!", "", "");
         let filename = writer.filename(&m);
         assert!(filename.starts_with("20260127120000_"));
-        assert!(filename.ends_with(".sql"));
-        assert!(!filename.contains("!"));
-        assert!(!filename.contains(" "));
+        assert!(
+            Path::new(&filename)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("sql"))
+        );
+        assert!(!filename.contains('!'));
+        assert!(!filename.contains(' '));
     }
 
     #[test]
@@ -675,7 +678,11 @@ mod tests {
         let writer = MigrationWriter::new("/tmp").with_format(MigrationFormat::Rust);
         let m = Migration::new("20260127120000", "Test migration", "", "");
         let filename = writer.filename(&m);
-        assert!(filename.ends_with(".rs"));
+        assert!(
+            Path::new(&filename)
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("rs"))
+        );
     }
 
     #[test]
@@ -742,7 +749,7 @@ mod tests {
     #[test]
     fn test_migration_status_enum() {
         let pending = MigrationStatus::Pending;
-        let applied = MigrationStatus::Applied { at: 1234567890 };
+        let applied = MigrationStatus::Applied { at: 1_234_567_890 };
         let failed = MigrationStatus::Failed {
             error: "Test error".to_string(),
         };
@@ -750,16 +757,14 @@ mod tests {
         assert_eq!(pending, MigrationStatus::Pending);
         assert_ne!(pending, applied);
 
-        if let MigrationStatus::Applied { at } = applied {
-            assert_eq!(at, 1234567890);
-        } else {
-            panic!("Expected Applied variant");
+        match applied {
+            MigrationStatus::Applied { at } => assert_eq!(at, 1_234_567_890),
+            _ => assert!(false, "Expected Applied variant"),
         }
 
-        if let MigrationStatus::Failed { error } = failed {
-            assert_eq!(error, "Test error");
-        } else {
-            panic!("Expected Failed variant");
+        match failed {
+            MigrationStatus::Failed { error } => assert_eq!(error, "Test error"),
+            _ => assert!(false, "Expected Failed variant"),
         }
     }
 

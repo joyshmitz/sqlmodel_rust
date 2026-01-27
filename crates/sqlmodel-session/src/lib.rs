@@ -36,7 +36,9 @@ pub mod change_tracker;
 pub mod flush;
 
 pub use change_tracker::{ChangeTracker, ObjectSnapshot};
-pub use flush::{FlushOrderer, FlushPlan, FlushResult, PendingOp};
+pub use flush::{
+    FlushOrderer, FlushPlan, FlushResult, LinkTableOp, PendingOp, execute_link_table_ops,
+};
 
 use asupersync::{Cx, Outcome};
 use serde::{Deserialize, Serialize};
@@ -1021,6 +1023,95 @@ impl<C: Connection> Session<C> {
         Outcome::Ok(loaded_count)
     }
 
+    /// Flush pending link/unlink operations for many-to-many relationships.
+    ///
+    /// This method persists pending link and unlink operations that were tracked
+    /// via `RelatedMany::link()` and `RelatedMany::unlink()` calls.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Add a power to a hero
+    /// hero.powers.link(&fly_power);
+    ///
+    /// // Remove a power from a hero
+    /// hero.powers.unlink(&x_ray_vision);
+    ///
+    /// // Flush the link table operations
+    /// let link_info = LinkTableInfo::new("hero_powers", "hero_id", "power_id");
+    /// session.flush_related_many(&cx, &mut [hero], |h| &mut h.powers, |h| h.id.unwrap(), &link_info).await?;
+    /// ```
+    #[tracing::instrument(level = "debug", skip(self, cx, objects, accessor, parent_pk))]
+    pub async fn flush_related_many<P, Child, FA, FP>(
+        &mut self,
+        cx: &Cx,
+        objects: &mut [P],
+        accessor: FA,
+        parent_pk: FP,
+        link_table: &sqlmodel_core::LinkTableInfo,
+    ) -> Outcome<usize, Error>
+    where
+        P: Model + 'static,
+        Child: Model + 'static,
+        FA: Fn(&mut P) -> &mut sqlmodel_core::RelatedMany<Child>,
+        FP: Fn(&P) -> Value,
+    {
+        let mut ops = Vec::new();
+
+        // Collect pending operations from all objects
+        for obj in objects.iter_mut() {
+            let parent_pk_value = parent_pk(obj);
+            let related = accessor(obj);
+
+            // Collect pending links
+            for child_pk_values in related.take_pending_links() {
+                if let Some(child_pk) = child_pk_values.first() {
+                    ops.push(LinkTableOp::link(
+                        link_table.table_name.to_string(),
+                        link_table.local_column.to_string(),
+                        parent_pk_value.clone(),
+                        link_table.remote_column.to_string(),
+                        child_pk.clone(),
+                    ));
+                }
+            }
+
+            // Collect pending unlinks
+            for child_pk_values in related.take_pending_unlinks() {
+                if let Some(child_pk) = child_pk_values.first() {
+                    ops.push(LinkTableOp::unlink(
+                        link_table.table_name.to_string(),
+                        link_table.local_column.to_string(),
+                        parent_pk_value.clone(),
+                        link_table.remote_column.to_string(),
+                        child_pk.clone(),
+                    ));
+                }
+            }
+        }
+
+        if ops.is_empty() {
+            return Outcome::Ok(0);
+        }
+
+        tracing::info!(
+            parent_model = std::any::type_name::<P>(),
+            related_model = std::any::type_name::<Child>(),
+            link_count = ops
+                .iter()
+                .filter(|o| matches!(o, LinkTableOp::Link { .. }))
+                .count(),
+            unlink_count = ops
+                .iter()
+                .filter(|o| matches!(o, LinkTableOp::Unlink { .. }))
+                .count(),
+            link_table = link_table.table_name,
+            "Flushing many-to-many relationship changes"
+        );
+
+        flush::execute_link_table_ops(cx, &self.connection, &ops).await
+    }
+
     // ========================================================================
     // Debug Diagnostics
     // ========================================================================
@@ -1155,9 +1246,10 @@ mod tests {
     fn unwrap_outcome<T>(outcome: Outcome<T, Error>) -> T {
         match outcome {
             Outcome::Ok(v) => v,
-            Outcome::Err(e) => panic!("unexpected error: {e}"),
-            Outcome::Cancelled(r) => panic!("cancelled: {r:?}"),
-            Outcome::Panicked(p) => panic!("panicked: {p:?}"),
+            other => {
+                assert!(false, "unexpected outcome: {other:?}");
+                loop {}
+            }
         }
     }
 

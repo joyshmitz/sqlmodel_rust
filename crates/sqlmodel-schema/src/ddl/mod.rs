@@ -12,7 +12,9 @@ pub use postgres::PostgresDdlGenerator;
 pub use sqlite::SqliteDdlGenerator;
 
 use crate::diff::SchemaOperation;
-use crate::introspect::{ColumnInfo, Dialect, ForeignKeyInfo, IndexInfo, TableInfo, UniqueConstraintInfo};
+use crate::introspect::{
+    ColumnInfo, Dialect, ForeignKeyInfo, IndexInfo, TableInfo, UniqueConstraintInfo,
+};
 
 /// Generates DDL SQL statements from schema operations.
 pub trait DdlGenerator {
@@ -69,10 +71,7 @@ fn quote_identifier(name: &str, dialect: Dialect) -> String {
 
 /// Format a column definition for CREATE TABLE or ADD COLUMN.
 fn format_column_def(col: &ColumnInfo, dialect: Dialect) -> String {
-    let mut parts = vec![
-        quote_identifier(&col.name, dialect),
-        col.sql_type.clone(),
-    ];
+    let mut parts = vec![quote_identifier(&col.name, dialect), col.sql_type.clone()];
 
     if !col.nullable {
         parts.push("NOT NULL".to_string());
@@ -144,7 +143,11 @@ fn format_unique_constraint(unique: &UniqueConstraintInfo, dialect: Dialect) -> 
         .collect();
 
     if let Some(ref name) = unique.name {
-        format!("CONSTRAINT {} UNIQUE ({})", quote_identifier(name, dialect), cols.join(", "))
+        format!(
+            "CONSTRAINT {} UNIQUE ({})",
+            quote_identifier(name, dialect),
+            cols.join(", ")
+        )
     } else {
         format!("UNIQUE ({})", cols.join(", "))
     }
@@ -298,10 +301,10 @@ fn generate_create_index(table: &str, index: &IndexInfo, dialect: Dialect) -> St
         }
         Dialect::Mysql => {
             if let Some(ref idx_type) = index.index_type {
-                if idx_type.to_uppercase() != "BTREE" {
-                    format!(" USING {}", idx_type)
-                } else {
+                if idx_type.eq_ignore_ascii_case("BTREE") {
                     String::new()
+                } else {
+                    format!(" USING {}", idx_type)
                 }
             } else {
                 String::new()
@@ -557,9 +560,18 @@ mod tests {
 
     #[test]
     fn test_referential_action_formatting() {
-        assert_eq!(format_referential_action(Some(&"CASCADE".to_string())), "CASCADE");
-        assert_eq!(format_referential_action(Some(&"cascade".to_string())), "CASCADE");
-        assert_eq!(format_referential_action(Some(&"SET NULL".to_string())), "SET NULL");
+        assert_eq!(
+            format_referential_action(Some(&"CASCADE".to_string())),
+            "CASCADE"
+        );
+        assert_eq!(
+            format_referential_action(Some(&"cascade".to_string())),
+            "CASCADE"
+        );
+        assert_eq!(
+            format_referential_action(Some(&"SET NULL".to_string())),
+            "SET NULL"
+        );
         assert_eq!(format_referential_action(None), "NO ACTION");
     }
 }

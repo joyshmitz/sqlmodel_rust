@@ -27,7 +27,7 @@ pub use error::{Error, FieldValidationError, Result, ValidationError, Validation
 pub use field::{Column, Field, FieldInfo, ReferentialAction};
 pub use model::Model;
 pub use relationship::{
-    Lazy, LinkTableInfo, Related, RelatedMany, RelationshipInfo, RelationshipKind,
+    Lazy, LazyLoader, LinkTableInfo, Related, RelatedMany, RelationshipInfo, RelationshipKind,
 };
 pub use row::Row;
 pub use types::{SqlType, TypeInfo};

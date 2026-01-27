@@ -18,7 +18,8 @@ pub mod migrate;
 
 pub use create::{CreateTable, SchemaBuilder};
 pub use ddl::{
-    DdlGenerator, MysqlDdlGenerator, PostgresDdlGenerator, SqliteDdlGenerator, generator_for_dialect,
+    DdlGenerator, MysqlDdlGenerator, PostgresDdlGenerator, SqliteDdlGenerator,
+    generator_for_dialect,
 };
 pub use expected::{
     ModelSchema, ModelTuple, expected_schema, normalize_sql_type, table_schema_from_fields,

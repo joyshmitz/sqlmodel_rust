@@ -204,12 +204,11 @@ mod tests {
     impl Model for TestHero {
         const TABLE_NAME: &'static str = "heroes";
         const PRIMARY_KEY: &'static [&'static str] = &["id"];
-        const RELATIONSHIPS: &'static [RelationshipInfo] = &[RelationshipInfo::new(
-            "team",
-            "teams",
-            RelationshipKind::ManyToOne,
-        )
-        .local_key("team_id")];
+        const RELATIONSHIPS: &'static [RelationshipInfo] =
+            &[
+                RelationshipInfo::new("team", "teams", RelationshipKind::ManyToOne)
+                    .local_key("team_id"),
+            ];
 
         fn fields() -> &'static [FieldInfo] {
             &[]
@@ -319,12 +318,10 @@ mod tests {
 
     #[test]
     fn test_build_join_many_to_many() {
-        let rel = RelationshipInfo::new("powers", "powers", RelationshipKind::ManyToMany)
-            .link_table(sqlmodel_core::LinkTableInfo::new(
-                "hero_powers",
-                "hero_id",
-                "power_id",
-            ));
+        let rel =
+            RelationshipInfo::new("powers", "powers", RelationshipKind::ManyToMany).link_table(
+                sqlmodel_core::LinkTableInfo::new("hero_powers", "hero_id", "power_id"),
+            );
 
         let (sql, params) = build_join_clause("heroes", &rel, 0);
 

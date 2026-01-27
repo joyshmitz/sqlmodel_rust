@@ -3,9 +3,9 @@
 //! MySQL has comprehensive ALTER TABLE support for most schema operations.
 
 use super::{
-    format_fk_constraint, generate_add_column, generate_create_index, generate_create_table,
-    generate_drop_index, generate_drop_table, generate_rename_column, generate_rename_table,
-    quote_identifier, DdlGenerator,
+    DdlGenerator, format_fk_constraint, generate_add_column, generate_create_index,
+    generate_create_table, generate_drop_index, generate_drop_table, generate_rename_column,
+    generate_rename_table, quote_identifier,
 };
 use crate::diff::SchemaOperation;
 use crate::introspect::Dialect;
@@ -127,9 +127,10 @@ impl DdlGenerator for MysqlDdlGenerator {
 
             // Foreign Keys
             SchemaOperation::AddForeignKey { table, fk } => {
-                let constraint_name = fk.name.clone().unwrap_or_else(|| {
-                    format!("fk_{}_{}", table, fk.column)
-                });
+                let constraint_name = fk
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("fk_{}_{}", table, fk.column));
                 vec![format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} {}",
                     quote_identifier(table, Dialect::Mysql),
@@ -152,9 +153,10 @@ impl DdlGenerator for MysqlDdlGenerator {
                     .iter()
                     .map(|c| quote_identifier(c, Dialect::Mysql))
                     .collect();
-                let name = constraint.name.clone().unwrap_or_else(|| {
-                    format!("uk_{}_{}", table, constraint.columns.join("_"))
-                });
+                let name = constraint
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("uk_{}_{}", table, constraint.columns.join("_")));
                 vec![format!(
                     "ALTER TABLE {} ADD CONSTRAINT {} UNIQUE ({})",
                     quote_identifier(table, Dialect::Mysql),
@@ -196,7 +198,9 @@ impl DdlGenerator for MysqlDdlGenerator {
 mod tests {
     use super::*;
     use crate::diff::SchemaOperation;
-    use crate::introspect::{ColumnInfo, ForeignKeyInfo, IndexInfo, ParsedSqlType, TableInfo, UniqueConstraintInfo};
+    use crate::introspect::{
+        ColumnInfo, ForeignKeyInfo, IndexInfo, ParsedSqlType, TableInfo, UniqueConstraintInfo,
+    };
 
     fn make_column(name: &str, sql_type: &str, nullable: bool) -> ColumnInfo {
         ColumnInfo {

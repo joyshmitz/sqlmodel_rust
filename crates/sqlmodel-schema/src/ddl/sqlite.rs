@@ -3,9 +3,9 @@
 //! SQLite has limited ALTER TABLE support, requiring table recreation for some operations.
 
 use super::{
-    generate_add_column, generate_create_index, generate_create_table, generate_drop_index,
-    generate_drop_table, generate_rename_column, generate_rename_table, quote_identifier,
-    DdlGenerator,
+    DdlGenerator, generate_add_column, generate_create_index, generate_create_table,
+    generate_drop_index, generate_drop_table, generate_rename_column, generate_rename_table,
+    quote_identifier,
 };
 use crate::diff::SchemaOperation;
 use crate::introspect::Dialect;
@@ -175,9 +175,10 @@ impl DdlGenerator for SqliteDdlGenerator {
                     .iter()
                     .map(|c| quote_identifier(c, Dialect::Sqlite))
                     .collect();
-                let name = constraint.name.clone().unwrap_or_else(|| {
-                    format!("uk_{}_{}", table, constraint.columns.join("_"))
-                });
+                let name = constraint
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| format!("uk_{}_{}", table, constraint.columns.join("_")));
                 vec![format!(
                     "CREATE UNIQUE INDEX {} ON {}({})",
                     quote_identifier(&name, Dialect::Sqlite),
@@ -215,7 +216,9 @@ impl DdlGenerator for SqliteDdlGenerator {
 mod tests {
     use super::*;
     use crate::diff::SchemaOperation;
-    use crate::introspect::{ColumnInfo, ForeignKeyInfo, IndexInfo, ParsedSqlType, TableInfo, UniqueConstraintInfo};
+    use crate::introspect::{
+        ColumnInfo, ForeignKeyInfo, IndexInfo, ParsedSqlType, TableInfo, UniqueConstraintInfo,
+    };
 
     fn make_column(name: &str, sql_type: &str, nullable: bool) -> ColumnInfo {
         ColumnInfo {

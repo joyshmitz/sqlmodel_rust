@@ -133,19 +133,14 @@ impl Row {
     #[must_use]
     pub fn prefix_is_all_null(&self, prefix: &str) -> bool {
         let prefix_with_sep = format!("{}__", prefix);
-        let mut found_any = false;
-
         for (name, value) in self.iter() {
-            if name.starts_with(&prefix_with_sep) {
-                found_any = true;
-                if !value.is_null() {
-                    return false;
-                }
+            if name.starts_with(&prefix_with_sep) && !value.is_null() {
+                return false;
             }
         }
 
-        // If we found no columns with prefix, consider it "all null"
-        !found_any || found_any
+        // If we found no columns with prefix, consider it "all null".
+        true
     }
 
     /// Create a new row with shared column metadata.
