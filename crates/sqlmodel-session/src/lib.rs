@@ -40,9 +40,10 @@ pub use flush::{FlushOrderer, FlushPlan, FlushResult, PendingOp};
 
 use asupersync::{Cx, Outcome};
 use serde::{Deserialize, Serialize};
-use sqlmodel_core::{Connection, Error, Lazy, Model, Value};
+use sqlmodel_core::{Connection, Error, Lazy, LazyLoader, Model, Value};
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::future::Future;
 use std::hash::{Hash, Hasher};
 
 // ============================================================================
@@ -586,7 +587,7 @@ impl<C: Connection> Session<C> {
         for key in &inserts {
             if let Some(tracked) = self.identity_map.get_mut(key) {
                 // Build INSERT statement
-                let columns: Vec<&str> = tracked.column_names.to_vec();
+                let columns = tracked.column_names.clone();
                 let placeholders: Vec<String> =
                     (1..=columns.len()).map(|i| format!("${}", i)).collect();
 
@@ -869,7 +870,7 @@ impl<C: Connection> Session<C> {
             let lazy = accessor(obj);
             if !lazy.is_loaded() {
                 if let Some(fk) = lazy.fk() {
-                    let fk_hash = hash_values(&[fk.clone()]);
+                    let fk_hash = hash_values(std::slice::from_ref(fk));
                     let related = lookup.get(&fk_hash).cloned();
                     let found = related.is_some();
                     let _ = lazy.set_loaded(related);
@@ -886,6 +887,135 @@ impl<C: Connection> Session<C> {
             query_count = 1,
             loaded_count = loaded_count,
             "Batch load complete"
+        );
+
+        Outcome::Ok(loaded_count)
+    }
+
+    /// Batch load many-to-many relationships for multiple parent objects.
+    ///
+    /// This method loads related objects via a link table in a single query,
+    /// avoiding the N+1 problem for many-to-many relationships.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Load 100 heroes
+    /// let mut heroes = session.query::<Hero>().all().await?;
+    ///
+    /// // Without batch loading: 100 queries (N+1 problem)
+    /// // With batch loading: 1 query via JOIN
+    /// let link_info = LinkTableInfo::new("hero_powers", "hero_id", "power_id");
+    /// session.load_many_to_many(&cx, &mut heroes, |h| &mut h.powers, |h| h.id.unwrap(), &link_info).await?;
+    ///
+    /// // All powers now loaded
+    /// for hero in &heroes {
+    ///     if let Some(powers) = hero.powers.get() {
+    ///         println!("{} has {} powers", hero.name, powers.len());
+    ///     }
+    /// }
+    /// ```
+    #[tracing::instrument(level = "debug", skip(self, cx, objects, accessor, parent_pk))]
+    pub async fn load_many_to_many<P, Child, FA, FP>(
+        &mut self,
+        cx: &Cx,
+        objects: &mut [P],
+        accessor: FA,
+        parent_pk: FP,
+        link_table: &sqlmodel_core::LinkTableInfo,
+    ) -> Outcome<usize, Error>
+    where
+        P: Model + 'static,
+        Child: Model + Clone + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
+        FA: Fn(&mut P) -> &mut sqlmodel_core::RelatedMany<Child>,
+        FP: Fn(&P) -> Value,
+    {
+        // Collect all parent PK values
+        let pks: Vec<Value> = objects.iter().map(&parent_pk).collect();
+
+        tracing::info!(
+            parent_model = std::any::type_name::<P>(),
+            related_model = std::any::type_name::<Child>(),
+            parent_count = pks.len(),
+            link_table = link_table.table_name,
+            "Batch loading many-to-many relationships"
+        );
+
+        if pks.is_empty() {
+            return Outcome::Ok(0);
+        }
+
+        // Build query with JOIN through link table:
+        // SELECT child.*, link.local_column as __parent_pk
+        // FROM child
+        // JOIN link ON child.pk = link.remote_column
+        // WHERE link.local_column IN (...)
+        let child_pk_col = Child::PRIMARY_KEY.first().unwrap_or(&"id");
+        let placeholders: Vec<String> = (1..=pks.len()).map(|i| format!("${}", i)).collect();
+        let sql = format!(
+            "SELECT \"{}\".*, \"{}\".\"{}\" AS __parent_pk FROM \"{}\" \
+             JOIN \"{}\" ON \"{}\".\"{}\" = \"{}\".\"{}\" \
+             WHERE \"{}\".\"{}\" IN ({})",
+            Child::TABLE_NAME,
+            link_table.table_name,
+            link_table.local_column,
+            Child::TABLE_NAME,
+            link_table.table_name,
+            Child::TABLE_NAME,
+            child_pk_col,
+            link_table.table_name,
+            link_table.remote_column,
+            link_table.table_name,
+            link_table.local_column,
+            placeholders.join(", ")
+        );
+
+        tracing::trace!(sql = %sql, "Many-to-many batch SQL");
+
+        let rows = match self.connection.query(cx, &sql, &pks).await {
+            Outcome::Ok(rows) => rows,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        // Group children by parent PK
+        let mut by_parent: HashMap<u64, Vec<Child>> = HashMap::new();
+        for row in &rows {
+            // Extract the parent PK from the __parent_pk alias
+            let parent_pk_value: Value = match row.get_by_name("__parent_pk") {
+                Some(v) => v.clone(),
+                None => continue,
+            };
+            let parent_pk_hash = hash_values(std::slice::from_ref(&parent_pk_value));
+
+            // Parse the child model
+            match Child::from_row(row) {
+                Ok(child) => {
+                    by_parent.entry(parent_pk_hash).or_default().push(child);
+                }
+                Err(_) => continue,
+            }
+        }
+
+        // Populate each RelatedMany field
+        let mut loaded_count = 0;
+        for obj in objects {
+            let pk = parent_pk(obj);
+            let pk_hash = hash_values(std::slice::from_ref(&pk));
+            let children = by_parent.remove(&pk_hash).unwrap_or_default();
+            let child_count = children.len();
+
+            let related = accessor(obj);
+            related.set_parent_pk(pk);
+            let _ = related.set_loaded(children);
+            loaded_count += child_count;
+        }
+
+        tracing::debug!(
+            query_count = 1,
+            total_children = loaded_count,
+            "Many-to-many batch load complete"
         );
 
         Outcome::Ok(loaded_count)
@@ -932,6 +1062,20 @@ impl<C: Connection> Session<C> {
     }
 }
 
+impl<C, M> LazyLoader<M> for Session<C>
+where
+    C: Connection,
+    M: Model + Clone + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
+{
+    fn get(
+        &mut self,
+        cx: &Cx,
+        pk: Value,
+    ) -> impl Future<Output = Outcome<Option<M>, Error>> + Send {
+        Session::get(self, cx, pk)
+    }
+}
+
 /// Debug information about session state.
 #[derive(Debug, Clone)]
 pub struct SessionDebugInfo {
@@ -952,8 +1096,12 @@ pub struct SessionDebugInfo {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(clippy::manual_async_fn)] // Mock trait impls must match trait signatures
 mod tests {
     use super::*;
+    use asupersync::runtime::RuntimeBuilder;
+    use sqlmodel_core::Row;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn test_session_config_defaults() {
@@ -1002,5 +1150,353 @@ mod tests {
         assert_eq!(info.tracked, 5);
         assert_eq!(info.pending_new, 2);
         assert!(info.in_transaction);
+    }
+
+    fn unwrap_outcome<T>(outcome: Outcome<T, Error>) -> T {
+        match outcome {
+            Outcome::Ok(v) => v,
+            Outcome::Err(e) => panic!("unexpected error: {e}"),
+            Outcome::Cancelled(r) => panic!("cancelled: {r:?}"),
+            Outcome::Panicked(p) => panic!("panicked: {p:?}"),
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Team {
+        id: Option<i64>,
+        name: String,
+    }
+
+    impl Model for Team {
+        const TABLE_NAME: &'static str = "teams";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [sqlmodel_core::FieldInfo] {
+            &[]
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![]
+        }
+
+        fn from_row(row: &Row) -> sqlmodel_core::Result<Self> {
+            let id: i64 = row.get_named("id")?;
+            let name: String = row.get_named("name")?;
+            Ok(Self { id: Some(id), name })
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            self.id
+                .map_or_else(|| vec![Value::Null], |id| vec![Value::BigInt(id)])
+        }
+
+        fn is_new(&self) -> bool {
+            self.id.is_none()
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct Hero {
+        id: Option<i64>,
+        team: Lazy<Team>,
+    }
+
+    impl Model for Hero {
+        const TABLE_NAME: &'static str = "heroes";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [sqlmodel_core::FieldInfo] {
+            &[]
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![]
+        }
+
+        fn from_row(_row: &Row) -> sqlmodel_core::Result<Self> {
+            Ok(Self {
+                id: None,
+                team: Lazy::empty(),
+            })
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            self.id
+                .map_or_else(|| vec![Value::Null], |id| vec![Value::BigInt(id)])
+        }
+
+        fn is_new(&self) -> bool {
+            self.id.is_none()
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct MockState {
+        query_calls: usize,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MockConnection {
+        state: Arc<Mutex<MockState>>,
+    }
+
+    impl sqlmodel_core::Connection for MockConnection {
+        type Tx<'conn>
+            = MockTransaction
+        where
+            Self: 'conn;
+
+        fn query(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            params: &[Value],
+        ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
+            let params = params.to_vec();
+            let state = Arc::clone(&self.state);
+            async move {
+                state.lock().expect("lock poisoned").query_calls += 1;
+
+                let mut rows = Vec::new();
+                for v in params {
+                    match v {
+                        Value::BigInt(1) => rows.push(Row::new(
+                            vec!["id".into(), "name".into()],
+                            vec![Value::BigInt(1), Value::Text("Avengers".into())],
+                        )),
+                        Value::BigInt(2) => rows.push(Row::new(
+                            vec!["id".into(), "name".into()],
+                            vec![Value::BigInt(2), Value::Text("X-Men".into())],
+                        )),
+                        _ => {}
+                    }
+                }
+
+                Outcome::Ok(rows)
+            }
+        }
+
+        fn query_one(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _params: &[Value],
+        ) -> impl Future<Output = Outcome<Option<Row>, Error>> + Send {
+            async { Outcome::Ok(None) }
+        }
+
+        fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _params: &[Value],
+        ) -> impl Future<Output = Outcome<u64, Error>> + Send {
+            async { Outcome::Ok(0) }
+        }
+
+        fn insert(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _params: &[Value],
+        ) -> impl Future<Output = Outcome<i64, Error>> + Send {
+            async { Outcome::Ok(0) }
+        }
+
+        fn batch(
+            &self,
+            _cx: &Cx,
+            _statements: &[(String, Vec<Value>)],
+        ) -> impl Future<Output = Outcome<Vec<u64>, Error>> + Send {
+            async { Outcome::Ok(vec![]) }
+        }
+
+        fn begin(&self, _cx: &Cx) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
+            async { Outcome::Ok(MockTransaction) }
+        }
+
+        fn begin_with(
+            &self,
+            _cx: &Cx,
+            _isolation: sqlmodel_core::connection::IsolationLevel,
+        ) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
+            async { Outcome::Ok(MockTransaction) }
+        }
+
+        fn prepare(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+        ) -> impl Future<Output = Outcome<sqlmodel_core::connection::PreparedStatement, Error>> + Send
+        {
+            async {
+                Outcome::Ok(sqlmodel_core::connection::PreparedStatement::new(
+                    0,
+                    String::new(),
+                    0,
+                ))
+            }
+        }
+
+        fn query_prepared(
+            &self,
+            _cx: &Cx,
+            _stmt: &sqlmodel_core::connection::PreparedStatement,
+            _params: &[Value],
+        ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
+            async { Outcome::Ok(vec![]) }
+        }
+
+        fn execute_prepared(
+            &self,
+            _cx: &Cx,
+            _stmt: &sqlmodel_core::connection::PreparedStatement,
+            _params: &[Value],
+        ) -> impl Future<Output = Outcome<u64, Error>> + Send {
+            async { Outcome::Ok(0) }
+        }
+
+        fn ping(&self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
+            async { Outcome::Ok(()) }
+        }
+
+        fn close(self, _cx: &Cx) -> impl Future<Output = sqlmodel_core::Result<()>> + Send {
+            async { Ok(()) }
+        }
+    }
+
+    struct MockTransaction;
+
+    impl sqlmodel_core::connection::TransactionOps for MockTransaction {
+        fn query(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _params: &[Value],
+        ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
+            async { Outcome::Ok(vec![]) }
+        }
+
+        fn query_one(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _params: &[Value],
+        ) -> impl Future<Output = Outcome<Option<Row>, Error>> + Send {
+            async { Outcome::Ok(None) }
+        }
+
+        fn execute(
+            &self,
+            _cx: &Cx,
+            _sql: &str,
+            _params: &[Value],
+        ) -> impl Future<Output = Outcome<u64, Error>> + Send {
+            async { Outcome::Ok(0) }
+        }
+
+        fn savepoint(
+            &self,
+            _cx: &Cx,
+            _name: &str,
+        ) -> impl Future<Output = Outcome<(), Error>> + Send {
+            async { Outcome::Ok(()) }
+        }
+
+        fn rollback_to(
+            &self,
+            _cx: &Cx,
+            _name: &str,
+        ) -> impl Future<Output = Outcome<(), Error>> + Send {
+            async { Outcome::Ok(()) }
+        }
+
+        fn release(
+            &self,
+            _cx: &Cx,
+            _name: &str,
+        ) -> impl Future<Output = Outcome<(), Error>> + Send {
+            async { Outcome::Ok(()) }
+        }
+
+        fn commit(self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
+            async { Outcome::Ok(()) }
+        }
+
+        fn rollback(self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
+            async { Outcome::Ok(()) }
+        }
+    }
+
+    #[test]
+    fn test_load_many_single_query_and_populates_lazy() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        let heroes = vec![
+            Hero {
+                id: Some(1),
+                team: Lazy::from_fk(1_i64),
+            },
+            Hero {
+                id: Some(2),
+                team: Lazy::from_fk(2_i64),
+            },
+            Hero {
+                id: Some(3),
+                team: Lazy::from_fk(1_i64),
+            },
+            Hero {
+                id: Some(4),
+                team: Lazy::empty(),
+            },
+            Hero {
+                id: Some(5),
+                team: Lazy::from_fk(999_i64),
+            },
+        ];
+
+        rt.block_on(async {
+            let loaded = unwrap_outcome(
+                session
+                    .load_many::<Hero, Team, _>(&cx, &heroes, |h| &h.team)
+                    .await,
+            );
+            assert_eq!(loaded, 3);
+
+            // Populated / cached
+            assert!(heroes[0].team.is_loaded());
+            assert_eq!(heroes[0].team.get().unwrap().name, "Avengers");
+            assert_eq!(heroes[1].team.get().unwrap().name, "X-Men");
+            assert_eq!(heroes[2].team.get().unwrap().name, "Avengers");
+
+            // Empty FK gets cached as loaded-none
+            assert!(heroes[3].team.is_loaded());
+            assert!(heroes[3].team.get().is_none());
+
+            // Missing object gets cached as loaded-none
+            assert!(heroes[4].team.is_loaded());
+            assert!(heroes[4].team.get().is_none());
+
+            // Identity map populated: get() should not hit the connection again
+            let team1 = unwrap_outcome(session.get::<Team>(&cx, 1_i64).await);
+            assert_eq!(
+                team1,
+                Some(Team {
+                    id: Some(1),
+                    name: "Avengers".to_string()
+                })
+            );
+        });
+
+        assert_eq!(state.lock().expect("lock poisoned").query_calls, 1);
     }
 }

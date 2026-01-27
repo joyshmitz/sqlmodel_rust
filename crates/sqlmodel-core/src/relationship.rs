@@ -165,7 +165,8 @@ impl Default for RelationshipInfo {
 /// `sqlmodel-core`). `sqlmodel-session` provides the blanket impl.
 pub trait LazyLoader<M: Model> {
     /// Load an object by primary key.
-    fn get(&mut self, cx: &Cx, pk: Value) -> impl Future<Output = Outcome<Option<M>, Error>> + Send;
+    fn get(&mut self, cx: &Cx, pk: Value)
+    -> impl Future<Output = Outcome<Option<M>, Error>> + Send;
 }
 
 /// A related single object (many-to-one or one-to-one).
@@ -303,28 +304,63 @@ where
     }
 }
 
-/// A collection of related objects (one-to-many).
+/// A collection of related objects (one-to-many or many-to-many).
 ///
 /// This wrapper can be in one of two states:
 /// - **Unloaded**: the collection has not been fetched yet
 /// - **Loaded**: the objects have been fetched and cached
+///
+/// For many-to-many relationships, use `link()` and `unlink()` to track
+/// changes that will be flushed to the link table.
 pub struct RelatedMany<T: Model> {
     /// The loaded objects (if fetched).
     loaded: OnceLock<Vec<T>>,
-    /// Foreign key column on the related model.
+    /// Foreign key column on the related model (for one-to-many).
     fk_column: &'static str,
     /// Parent's primary key value.
     parent_pk: Option<Value>,
+    /// Link table info for many-to-many relationships.
+    link_table: Option<LinkTableInfo>,
+    /// Pending link operations (PK values to INSERT into link table).
+    pending_links: std::sync::Mutex<Vec<Vec<Value>>>,
+    /// Pending unlink operations (PK values to DELETE from link table).
+    pending_unlinks: std::sync::Mutex<Vec<Vec<Value>>>,
 }
 
 impl<T: Model> RelatedMany<T> {
     /// Create a new unloaded RelatedMany with the FK column name.
+    ///
+    /// Use this for one-to-many relationships where the related model
+    /// has a foreign key column pointing back to this model.
     #[must_use]
-    pub const fn new(fk_column: &'static str) -> Self {
+    pub fn new(fk_column: &'static str) -> Self {
         Self {
             loaded: OnceLock::new(),
             fk_column,
             parent_pk: None,
+            link_table: None,
+            pending_links: std::sync::Mutex::new(Vec::new()),
+            pending_unlinks: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Create for a many-to-many relationship with a link table.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let link = LinkTableInfo::new("hero_powers", "hero_id", "power_id");
+    /// let powers: RelatedMany<Power> = RelatedMany::with_link_table(link);
+    /// ```
+    #[must_use]
+    pub fn with_link_table(link_table: LinkTableInfo) -> Self {
+        Self {
+            loaded: OnceLock::new(),
+            fk_column: "",
+            parent_pk: None,
+            link_table: Some(link_table),
+            pending_links: std::sync::Mutex::new(Vec::new()),
+            pending_unlinks: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -335,6 +371,9 @@ impl<T: Model> RelatedMany<T> {
             loaded: OnceLock::new(),
             fk_column,
             parent_pk: Some(pk.into()),
+            link_table: None,
+            pending_links: std::sync::Mutex::new(Vec::new()),
+            pending_unlinks: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -374,7 +413,7 @@ impl<T: Model> RelatedMany<T> {
 
     /// Get the FK column name.
     #[must_use]
-    pub const fn fk_column(&self) -> &'static str {
+    pub fn fk_column(&self) -> &'static str {
         self.fk_column
     }
 
@@ -382,6 +421,89 @@ impl<T: Model> RelatedMany<T> {
     #[must_use]
     pub fn parent_pk(&self) -> Option<&Value> {
         self.parent_pk.as_ref()
+    }
+
+    /// Set the parent PK value.
+    pub fn set_parent_pk(&mut self, pk: impl Into<Value>) {
+        self.parent_pk = Some(pk.into());
+    }
+
+    /// Get the link table info (if this is a many-to-many relationship).
+    #[must_use]
+    pub fn link_table(&self) -> Option<&LinkTableInfo> {
+        self.link_table.as_ref()
+    }
+
+    /// Check if this is a many-to-many relationship (has link table).
+    #[must_use]
+    pub fn is_many_to_many(&self) -> bool {
+        self.link_table.is_some()
+    }
+
+    /// Track a link operation (will INSERT into link table on flush).
+    ///
+    /// The object should already exist in the database. This method
+    /// records the relationship to be persisted when flush() is called.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// hero.powers.link(&fireball);
+    /// session.flush().await?; // Inserts into hero_powers table
+    /// ```
+    pub fn link(&self, obj: &T) {
+        let pk = obj.primary_key_value();
+        if let Ok(mut pending) = self.pending_links.lock() {
+            pending.push(pk);
+        }
+    }
+
+    /// Track an unlink operation (will DELETE from link table on flush).
+    ///
+    /// This method records the relationship removal to be persisted
+    /// when flush() is called.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// hero.powers.unlink(&fireball);
+    /// session.flush().await?; // Deletes from hero_powers table
+    /// ```
+    pub fn unlink(&self, obj: &T) {
+        let pk = obj.primary_key_value();
+        if let Ok(mut pending) = self.pending_unlinks.lock() {
+            pending.push(pk);
+        }
+    }
+
+    /// Get and clear pending link operations.
+    ///
+    /// Returns the PK values that should be INSERTed into the link table.
+    /// This is used by the flush system.
+    pub fn take_pending_links(&self) -> Vec<Vec<Value>> {
+        self.pending_links
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    }
+
+    /// Get and clear pending unlink operations.
+    ///
+    /// Returns the PK values that should be DELETEd from the link table.
+    /// This is used by the flush system.
+    pub fn take_pending_unlinks(&self) -> Vec<Vec<Value>> {
+        self.pending_unlinks
+            .lock()
+            .map(|mut v| std::mem::take(&mut *v))
+            .unwrap_or_default()
+    }
+
+    /// Check if there are pending link/unlink operations.
+    #[must_use]
+    pub fn has_pending_ops(&self) -> bool {
+        let has_links = self.pending_links.lock().is_ok_and(|v| !v.is_empty());
+        let has_unlinks = self.pending_unlinks.lock().is_ok_and(|v| !v.is_empty());
+        has_links || has_unlinks
     }
 }
 
@@ -397,6 +519,19 @@ impl<T: Model + Clone> Clone for RelatedMany<T> {
             loaded: OnceLock::new(),
             fk_column: self.fk_column,
             parent_pk: self.parent_pk.clone(),
+            link_table: self.link_table,
+            pending_links: std::sync::Mutex::new(
+                self.pending_links
+                    .lock()
+                    .map(|v| v.clone())
+                    .unwrap_or_default(),
+            ),
+            pending_unlinks: std::sync::Mutex::new(
+                self.pending_unlinks
+                    .lock()
+                    .map(|v| v.clone())
+                    .unwrap_or_default(),
+            ),
         };
 
         if let Some(vec) = self.loaded.get() {
@@ -409,10 +544,16 @@ impl<T: Model + Clone> Clone for RelatedMany<T> {
 
 impl<T: Model + fmt::Debug> fmt::Debug for RelatedMany<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let pending_links_count = self.pending_links.lock().map_or(0, |v| v.len());
+        let pending_unlinks_count = self.pending_unlinks.lock().map_or(0, |v| v.len());
+
         f.debug_struct("RelatedMany")
             .field("loaded", &self.loaded.get())
             .field("fk_column", &self.fk_column)
             .field("parent_pk", &self.parent_pk)
+            .field("link_table", &self.link_table)
+            .field("pending_links_count", &pending_links_count)
+            .field("pending_unlinks_count", &pending_unlinks_count)
             .finish()
     }
 }
@@ -570,7 +711,8 @@ impl<T: Model> Lazy<T> {
     /// Check if load() has been called.
     #[must_use]
     pub fn is_loaded(&self) -> bool {
-        self.load_attempted.load(std::sync::atomic::Ordering::Acquire)
+        self.load_attempted
+            .load(std::sync::atomic::Ordering::Acquire)
     }
 
     /// Check if the relationship is empty (null FK).
@@ -620,7 +762,8 @@ impl<T: Model + Clone> Clone for Lazy<T> {
             fk_value: self.fk_value.clone(),
             loaded: OnceLock::new(),
             load_attempted: std::sync::atomic::AtomicBool::new(
-                self.load_attempted.load(std::sync::atomic::Ordering::Acquire),
+                self.load_attempted
+                    .load(std::sync::atomic::Ordering::Acquire),
             ),
         };
 
@@ -746,7 +889,10 @@ mod tests {
         }
 
         fn primary_key_value(&self) -> Vec<Value> {
-            vec![]
+            match self.id {
+                Some(id) => vec![Value::from(id)],
+                None => vec![],
+            }
         }
 
         fn is_new(&self) -> bool {
@@ -1021,6 +1167,125 @@ mod tests {
     }
 
     // ========================================================================
+    // RelatedMany Many-to-Many Tests
+    // ========================================================================
+
+    #[test]
+    fn test_related_many_with_link_table() {
+        let link = LinkTableInfo::new("hero_powers", "hero_id", "power_id");
+        let rel: RelatedMany<Team> = RelatedMany::with_link_table(link);
+
+        assert!(rel.is_many_to_many());
+        assert_eq!(rel.link_table().unwrap().table_name, "hero_powers");
+        assert_eq!(rel.link_table().unwrap().local_column, "hero_id");
+        assert_eq!(rel.link_table().unwrap().remote_column, "power_id");
+    }
+
+    #[test]
+    fn test_related_many_link_tracks_pending() {
+        let rel: RelatedMany<Team> = RelatedMany::new("");
+        let team = Team {
+            id: Some(1),
+            name: "A".to_string(),
+        };
+
+        assert!(!rel.has_pending_ops());
+        rel.link(&team);
+        assert!(rel.has_pending_ops());
+
+        let pending = rel.take_pending_links();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], vec![Value::from(1_i64)]);
+
+        // Should be cleared
+        assert!(!rel.has_pending_ops());
+    }
+
+    #[test]
+    fn test_related_many_unlink_tracks_pending() {
+        let rel: RelatedMany<Team> = RelatedMany::new("");
+        let team = Team {
+            id: Some(2),
+            name: "B".to_string(),
+        };
+
+        rel.unlink(&team);
+        assert!(rel.has_pending_ops());
+
+        let pending = rel.take_pending_unlinks();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0], vec![Value::from(2_i64)]);
+    }
+
+    #[test]
+    fn test_related_many_multiple_links() {
+        let rel: RelatedMany<Team> = RelatedMany::new("");
+        let team1 = Team {
+            id: Some(1),
+            name: "A".to_string(),
+        };
+        let team2 = Team {
+            id: Some(2),
+            name: "B".to_string(),
+        };
+
+        rel.link(&team1);
+        rel.link(&team2);
+
+        let pending = rel.take_pending_links();
+        assert_eq!(pending.len(), 2);
+    }
+
+    #[test]
+    fn test_related_many_link_and_unlink_together() {
+        let rel: RelatedMany<Team> = RelatedMany::new("");
+        let team1 = Team {
+            id: Some(1),
+            name: "A".to_string(),
+        };
+        let team2 = Team {
+            id: Some(2),
+            name: "B".to_string(),
+        };
+
+        rel.link(&team1);
+        rel.unlink(&team2);
+        assert!(rel.has_pending_ops());
+
+        let links = rel.take_pending_links();
+        let unlinks = rel.take_pending_unlinks();
+
+        assert_eq!(links.len(), 1);
+        assert_eq!(unlinks.len(), 1);
+        assert!(!rel.has_pending_ops());
+    }
+
+    #[test]
+    fn test_related_many_clone_preserves_pending() {
+        let rel: RelatedMany<Team> = RelatedMany::new("");
+        let team = Team {
+            id: Some(1),
+            name: "A".to_string(),
+        };
+
+        rel.link(&team);
+        let cloned = rel.clone();
+
+        assert!(cloned.has_pending_ops());
+        let pending = cloned.take_pending_links();
+        assert_eq!(pending.len(), 1);
+    }
+
+    #[test]
+    fn test_related_many_set_parent_pk() {
+        let mut rel: RelatedMany<Team> = RelatedMany::new("team_id");
+        assert!(rel.parent_pk().is_none());
+
+        rel.set_parent_pk(42_i64);
+        assert_eq!(rel.parent_pk(), Some(&Value::from(42_i64)));
+    }
+
+    // ========================================================================
     // Lazy<T> Tests
     // ========================================================================
 
@@ -1114,14 +1379,14 @@ mod tests {
             let mut lazy = Lazy::<Team>::from_fk(1_i64);
             let mut loader = Loader::default();
 
-            let loaded = lazy.load(&cx, &mut loader).await;
-            assert!(matches!(loaded, Outcome::Ok(Some(_))));
+            let outcome = lazy.load(&cx, &mut loader).await;
+            assert!(matches!(outcome, Outcome::Ok(Some(_))));
             assert!(lazy.is_loaded());
             assert_eq!(loader.calls, 1);
 
             // Cached: no second call to the loader
-            let loaded2 = lazy.load(&cx, &mut loader).await;
-            assert!(matches!(loaded2, Outcome::Ok(Some(_))));
+            let outcome2 = lazy.load(&cx, &mut loader).await;
+            assert!(matches!(outcome2, Outcome::Ok(Some(_))));
             assert_eq!(loader.calls, 1);
         });
     }
@@ -1153,8 +1418,8 @@ mod tests {
             let mut lazy = Lazy::<Team>::empty();
             let mut loader = Loader::default();
 
-            let loaded = lazy.load(&cx, &mut loader).await;
-            assert!(matches!(loaded, Outcome::Ok(None)));
+            let outcome = lazy.load(&cx, &mut loader).await;
+            assert!(matches!(outcome, Outcome::Ok(None)));
             assert!(lazy.is_loaded());
             assert_eq!(loader.calls, 0);
         });
@@ -1187,8 +1452,8 @@ mod tests {
             let mut lazy = Lazy::<Team>::from_fk(1_i64);
             let mut loader = Loader::default();
 
-            let loaded = lazy.load(&cx, &mut loader).await;
-            assert!(matches!(loaded, Outcome::Err(_)));
+            let outcome = lazy.load(&cx, &mut loader).await;
+            assert!(matches!(outcome, Outcome::Err(_)));
             assert!(!lazy.is_loaded());
             assert_eq!(loader.calls, 1);
         });
