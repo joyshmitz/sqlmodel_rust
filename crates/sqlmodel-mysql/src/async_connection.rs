@@ -1777,6 +1777,9 @@ impl<'conn> TransactionOps for SharedMySqlTransaction<'conn> {
         }
     }
 
+    // Note: clippy incorrectly flags `self.committed = true` as unused, but
+    // the Drop impl reads this field to determine if rollback logging is needed.
+    #[allow(unused_assignments)]
     fn commit(mut self, cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
         async move {
             let mut guard = match self.inner.lock(cx).await {
