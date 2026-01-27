@@ -70,7 +70,8 @@ pub struct MySqlAsyncConnection {
 /// and decode results from a prepared statement.
 #[derive(Debug, Clone)]
 struct PreparedStmtMeta {
-    /// Server-assigned statement ID
+    /// Server-assigned statement ID (stored for potential future use in close/reset)
+    #[allow(dead_code)]
     statement_id: u32,
     /// Parameter column definitions (for type encoding)
     params: Vec<ColumnDef>,
@@ -217,32 +218,37 @@ impl MySqlAsyncConnection {
 
     /// Read a complete packet from the stream asynchronously.
     async fn read_packet_async(&mut self) -> Outcome<(Vec<u8>, u8), Error> {
-        // Read header (4 bytes)
+        // Read header (4 bytes) - must loop since TCP can fragment reads
         let mut header_buf = [0u8; 4];
 
         match &mut self.stream {
             ConnectionStream::Async(stream) => {
-                let mut read_buf = ReadBuf::new(&mut header_buf);
-                // Use poll-based reading with async
-                match std::future::poll_fn(|cx| {
-                    std::pin::Pin::new(&mut *stream).poll_read(cx, &mut read_buf)
-                })
-                .await
-                {
-                    Ok(()) if read_buf.filled().len() == 4 => {}
-                    Ok(()) => {
-                        return Outcome::Err(Error::Connection(ConnectionError {
-                            kind: ConnectionErrorKind::Disconnected,
-                            message: "Connection closed while reading header".to_string(),
-                            source: None,
-                        }));
-                    }
-                    Err(e) => {
-                        return Outcome::Err(Error::Connection(ConnectionError {
-                            kind: ConnectionErrorKind::Disconnected,
-                            message: format!("Failed to read packet header: {}", e),
-                            source: Some(Box::new(e)),
-                        }));
+                let mut header_read = 0;
+                while header_read < 4 {
+                    let mut read_buf = ReadBuf::new(&mut header_buf[header_read..]);
+                    match std::future::poll_fn(|cx| {
+                        std::pin::Pin::new(&mut *stream).poll_read(cx, &mut read_buf)
+                    })
+                    .await
+                    {
+                        Ok(()) => {
+                            let n = read_buf.filled().len();
+                            if n == 0 {
+                                return Outcome::Err(Error::Connection(ConnectionError {
+                                    kind: ConnectionErrorKind::Disconnected,
+                                    message: "Connection closed while reading header".to_string(),
+                                    source: None,
+                                }));
+                            }
+                            header_read += n;
+                        }
+                        Err(e) => {
+                            return Outcome::Err(Error::Connection(ConnectionError {
+                                kind: ConnectionErrorKind::Disconnected,
+                                message: format!("Failed to read packet header: {}", e),
+                                source: Some(Box::new(e)),
+                            }));
+                        }
                     }
                 }
             }
@@ -311,20 +317,37 @@ impl MySqlAsyncConnection {
         // Handle multi-packet payloads
         if payload_len == MAX_PACKET_SIZE {
             loop {
+                // Read continuation header with loop (TCP can fragment)
                 let mut header_buf = [0u8; 4];
                 match &mut self.stream {
                     ConnectionStream::Async(stream) => {
-                        let mut read_buf = ReadBuf::new(&mut header_buf);
-                        if let Err(e) = std::future::poll_fn(|cx| {
-                            std::pin::Pin::new(&mut *stream).poll_read(cx, &mut read_buf)
-                        })
-                        .await
-                        {
-                            return Outcome::Err(Error::Connection(ConnectionError {
-                                kind: ConnectionErrorKind::Disconnected,
-                                message: format!("Failed to read continuation header: {}", e),
-                                source: Some(Box::new(e)),
-                            }));
+                        let mut header_read = 0;
+                        while header_read < 4 {
+                            let mut read_buf = ReadBuf::new(&mut header_buf[header_read..]);
+                            match std::future::poll_fn(|cx| {
+                                std::pin::Pin::new(&mut *stream).poll_read(cx, &mut read_buf)
+                            })
+                            .await
+                            {
+                                Ok(()) => {
+                                    let n = read_buf.filled().len();
+                                    if n == 0 {
+                                        return Outcome::Err(Error::Connection(ConnectionError {
+                                            kind: ConnectionErrorKind::Disconnected,
+                                            message: "Connection closed while reading continuation header".to_string(),
+                                            source: None,
+                                        }));
+                                    }
+                                    header_read += n;
+                                }
+                                Err(e) => {
+                                    return Outcome::Err(Error::Connection(ConnectionError {
+                                        kind: ConnectionErrorKind::Disconnected,
+                                        message: format!("Failed to read continuation header: {}", e),
+                                        source: Some(Box::new(e)),
+                                    }));
+                                }
+                            }
                         }
                     }
                     ConnectionStream::Sync(stream) => {
@@ -357,7 +380,11 @@ impl MySqlAsyncConnection {
                                     Ok(()) => {
                                         let n = read_buf.filled().len();
                                         if n == 0 {
-                                            break;
+                                            return Outcome::Err(Error::Connection(ConnectionError {
+                                                kind: ConnectionErrorKind::Disconnected,
+                                                message: "Connection closed while reading continuation payload".to_string(),
+                                                source: None,
+                                            }));
                                         }
                                         total_read += n;
                                     }
@@ -404,18 +431,31 @@ impl MySqlAsyncConnection {
 
         match &mut self.stream {
             ConnectionStream::Async(stream) => {
-                match std::future::poll_fn(|cx| {
-                    std::pin::Pin::new(&mut *stream).poll_write(cx, &packet)
-                })
-                .await
-                {
-                    Ok(_) => {}
-                    Err(e) => {
-                        return Outcome::Err(Error::Connection(ConnectionError {
-                            kind: ConnectionErrorKind::Disconnected,
-                            message: format!("Failed to write packet: {}", e),
-                            source: Some(Box::new(e)),
-                        }));
+                // Loop to handle partial writes (poll_write may return fewer bytes)
+                let mut written = 0;
+                while written < packet.len() {
+                    match std::future::poll_fn(|cx| {
+                        std::pin::Pin::new(&mut *stream).poll_write(cx, &packet[written..])
+                    })
+                    .await
+                    {
+                        Ok(n) => {
+                            if n == 0 {
+                                return Outcome::Err(Error::Connection(ConnectionError {
+                                    kind: ConnectionErrorKind::Disconnected,
+                                    message: "Connection closed while writing packet".to_string(),
+                                    source: None,
+                                }));
+                            }
+                            written += n;
+                        }
+                        Err(e) => {
+                            return Outcome::Err(Error::Connection(ConnectionError {
+                                kind: ConnectionErrorKind::Disconnected,
+                                message: format!("Failed to write packet: {}", e),
+                                source: Some(Box::new(e)),
+                            }));
+                        }
                     }
                 }
 
@@ -1178,7 +1218,7 @@ impl MySqlAsyncConnection {
         self.sequence_id = 0;
 
         // Build and send COM_STMT_EXECUTE
-        let param_types: Vec<FieldType> = meta.params.iter().map(|c| c.field_type).collect();
+        let param_types: Vec<FieldType> = meta.params.iter().map(|c| c.column_type).collect();
         let packet = prepared::build_stmt_execute_packet(
             stmt_id,
             params,
@@ -1367,8 +1407,6 @@ impl MySqlAsyncConnection {
 
     /// Parse a binary protocol row.
     fn parse_binary_row(&self, data: &[u8], columns: &[ColumnDef]) -> Row {
-        use crate::types::decode_binary_value;
-
         // Binary row format:
         // - 0x00 header (1 byte)
         // - NULL bitmap ((column_count + 7 + 2) / 8 bytes)
@@ -1404,7 +1442,9 @@ impl MySqlAsyncConnection {
             if is_null {
                 values.push(Value::Null);
             } else {
-                let (value, consumed) = decode_binary_value(&data[pos..], col.field_type);
+                let is_unsigned = col.flags & 0x20 != 0; // UNSIGNED_FLAG
+                let (value, consumed) =
+                    decode_binary_value_with_len(&data[pos..], col.column_type, is_unsigned);
                 values.push(value);
                 pos += consumed;
             }
@@ -2088,39 +2128,53 @@ impl Connection for SharedMySqlConnection {
 
     fn prepare(
         &self,
-        _cx: &Cx,
-        _sql: &str,
+        cx: &Cx,
+        sql: &str,
     ) -> impl Future<Output = Outcome<PreparedStatement, Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        let sql = sql.to_string();
         async move {
-            Outcome::Err(connection_error(
-                "Prepared statements not yet implemented for MySQL async",
-            ))
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            guard.prepare_async(cx, &sql).await
         }
     }
 
     fn query_prepared(
         &self,
-        _cx: &Cx,
-        _stmt: &PreparedStatement,
-        _params: &[Value],
+        cx: &Cx,
+        stmt: &PreparedStatement,
+        params: &[Value],
     ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        let stmt = stmt.clone();
+        let params = params.to_vec();
         async move {
-            Outcome::Err(connection_error(
-                "Prepared query not yet implemented for MySQL async",
-            ))
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            guard.query_prepared_async(cx, &stmt, &params).await
         }
     }
 
     fn execute_prepared(
         &self,
-        _cx: &Cx,
-        _stmt: &PreparedStatement,
-        _params: &[Value],
+        cx: &Cx,
+        stmt: &PreparedStatement,
+        params: &[Value],
     ) -> impl Future<Output = Outcome<u64, Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        let stmt = stmt.clone();
+        let params = params.to_vec();
         async move {
-            Outcome::Err(connection_error(
-                "Prepared execute not yet implemented for MySQL async",
-            ))
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            guard.execute_prepared_async(cx, &stmt, &params).await
         }
     }
 
