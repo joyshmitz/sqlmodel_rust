@@ -4,17 +4,22 @@
 //! - Schema definition from Model types
 //! - Expected schema extraction from Model definitions
 //! - Schema diff engine for comparing schemas
+//! - DDL generation for SQLite, MySQL, PostgreSQL
 //! - Table creation/alteration SQL generation
 //! - Migration tracking and execution
 //! - Database introspection
 
 pub mod create;
+pub mod ddl;
 pub mod diff;
 pub mod expected;
 pub mod introspect;
 pub mod migrate;
 
 pub use create::{CreateTable, SchemaBuilder};
+pub use ddl::{
+    DdlGenerator, MysqlDdlGenerator, PostgresDdlGenerator, SqliteDdlGenerator, generator_for_dialect,
+};
 pub use expected::{
     ModelSchema, ModelTuple, expected_schema, normalize_sql_type, table_schema_from_fields,
     table_schema_from_model,
