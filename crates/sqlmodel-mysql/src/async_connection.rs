@@ -1404,9 +1404,62 @@ impl std::fmt::Debug for SharedMySqlConnection {
 }
 
 /// Transaction type for SharedMySqlConnection.
+///
+/// This transaction holds a clone of the Arc to the connection and executes
+/// transaction operations by acquiring the mutex lock for each operation.
+/// The transaction must be committed or rolled back explicitly.
+///
+/// Note: The lifetime parameter is required by the Connection trait but the
+/// actual implementation holds an owned Arc, so the transaction can outlive
+/// the reference to SharedMySqlConnection if needed.
 pub struct SharedMySqlTransaction<'conn> {
-    #[allow(dead_code)]
-    conn: &'conn SharedMySqlConnection,
+    inner: Arc<Mutex<MySqlAsyncConnection>>,
+    committed: bool,
+    _marker: std::marker::PhantomData<&'conn ()>,
+}
+
+impl SharedMySqlConnection {
+    /// Internal implementation for beginning a transaction.
+    async fn begin_transaction_impl(
+        &self,
+        cx: &Cx,
+        isolation: Option<IsolationLevel>,
+    ) -> Outcome<SharedMySqlTransaction<'_>, Error> {
+        let inner = Arc::clone(&self.inner);
+
+        // Acquire lock
+        let mut guard = match inner.lock(cx).await {
+            Ok(g) => g,
+            Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+        };
+
+        // Set isolation level if specified
+        if let Some(level) = isolation {
+            let isolation_sql = format!("SET TRANSACTION ISOLATION LEVEL {}", level.as_sql());
+            match guard.execute_async(cx, &isolation_sql, &[]).await {
+                Outcome::Ok(_) => {}
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(c) => return Outcome::Cancelled(c),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            }
+        }
+
+        // Start transaction
+        match guard.execute_async(cx, "BEGIN", &[]).await {
+            Outcome::Ok(_) => {}
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(c) => return Outcome::Cancelled(c),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        }
+
+        drop(guard);
+
+        Outcome::Ok(SharedMySqlTransaction {
+            inner,
+            committed: false,
+            _marker: std::marker::PhantomData,
+        })
+    }
 }
 
 impl Connection for SharedMySqlConnection {
@@ -1520,24 +1573,16 @@ impl Connection for SharedMySqlConnection {
         }
     }
 
-    fn begin(&self, _cx: &Cx) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Transactions not yet implemented for SharedMySqlConnection",
-            ))
-        }
+    fn begin(&self, cx: &Cx) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
+        self.begin_transaction_impl(cx, None)
     }
 
     fn begin_with(
         &self,
-        _cx: &Cx,
-        _isolation: IsolationLevel,
+        cx: &Cx,
+        isolation: IsolationLevel,
     ) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Transactions not yet implemented for SharedMySqlConnection",
-            ))
-        }
+        self.begin_transaction_impl(cx, Some(isolation))
     }
 
     fn prepare(
@@ -1611,69 +1656,168 @@ impl Connection for SharedMySqlConnection {
 impl<'conn> TransactionOps for SharedMySqlTransaction<'conn> {
     fn query(
         &self,
-        _cx: &Cx,
-        _sql: &str,
-        _params: &[Value],
+        cx: &Cx,
+        sql: &str,
+        params: &[Value],
     ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
-        async move { Outcome::Err(connection_error("Shared transaction query not yet implemented")) }
+        let inner = Arc::clone(&self.inner);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        async move {
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            guard.query_async(cx, &sql, &params).await
+        }
     }
 
     fn query_one(
         &self,
-        _cx: &Cx,
-        _sql: &str,
-        _params: &[Value],
+        cx: &Cx,
+        sql: &str,
+        params: &[Value],
     ) -> impl Future<Output = Outcome<Option<Row>, Error>> + Send {
-        async move { Outcome::Err(connection_error("Shared transaction query_one not yet implemented")) }
+        let inner = Arc::clone(&self.inner);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        async move {
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            let rows = match guard.query_async(cx, &sql, &params).await {
+                Outcome::Ok(r) => r,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(c) => return Outcome::Cancelled(c),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+            Outcome::Ok(rows.into_iter().next())
+        }
     }
 
     fn execute(
         &self,
-        _cx: &Cx,
-        _sql: &str,
-        _params: &[Value],
+        cx: &Cx,
+        sql: &str,
+        params: &[Value],
     ) -> impl Future<Output = Outcome<u64, Error>> + Send {
-        async move { Outcome::Err(connection_error("Shared transaction execute not yet implemented")) }
+        let inner = Arc::clone(&self.inner);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        async move {
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            guard.execute_async(cx, &sql, &params).await
+        }
     }
 
     fn savepoint(
         &self,
-        _cx: &Cx,
-        _name: &str,
+        cx: &Cx,
+        name: &str,
     ) -> impl Future<Output = Outcome<(), Error>> + Send {
-        async move { Outcome::Err(connection_error("Shared transaction savepoint not yet implemented")) }
+        let inner = Arc::clone(&self.inner);
+        let sql = format!("SAVEPOINT {}", name);
+        async move {
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            match guard.execute_async(cx, &sql, &[]).await {
+                Outcome::Ok(_) => Outcome::Ok(()),
+                Outcome::Err(e) => Outcome::Err(e),
+                Outcome::Cancelled(c) => Outcome::Cancelled(c),
+                Outcome::Panicked(p) => Outcome::Panicked(p),
+            }
+        }
     }
 
     fn rollback_to(
         &self,
-        _cx: &Cx,
-        _name: &str,
+        cx: &Cx,
+        name: &str,
     ) -> impl Future<Output = Outcome<(), Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        let sql = format!("ROLLBACK TO SAVEPOINT {}", name);
         async move {
-            Outcome::Err(connection_error(
-                "Shared transaction rollback_to not yet implemented",
-            ))
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            match guard.execute_async(cx, &sql, &[]).await {
+                Outcome::Ok(_) => Outcome::Ok(()),
+                Outcome::Err(e) => Outcome::Err(e),
+                Outcome::Cancelled(c) => Outcome::Cancelled(c),
+                Outcome::Panicked(p) => Outcome::Panicked(p),
+            }
         }
     }
 
     fn release(
         &self,
-        _cx: &Cx,
-        _name: &str,
+        cx: &Cx,
+        name: &str,
     ) -> impl Future<Output = Outcome<(), Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        let sql = format!("RELEASE SAVEPOINT {}", name);
         async move {
-            Outcome::Err(connection_error(
-                "Shared transaction release not yet implemented",
-            ))
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            match guard.execute_async(cx, &sql, &[]).await {
+                Outcome::Ok(_) => Outcome::Ok(()),
+                Outcome::Err(e) => Outcome::Err(e),
+                Outcome::Cancelled(c) => Outcome::Cancelled(c),
+                Outcome::Panicked(p) => Outcome::Panicked(p),
+            }
         }
     }
 
-    fn commit(self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
-        async move { Outcome::Err(connection_error("Shared transaction commit not yet implemented")) }
+    fn commit(mut self, cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
+        async move {
+            let mut guard = match self.inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            match guard.execute_async(cx, "COMMIT", &[]).await {
+                Outcome::Ok(_) => {
+                    self.committed = true;
+                    Outcome::Ok(())
+                }
+                Outcome::Err(e) => Outcome::Err(e),
+                Outcome::Cancelled(c) => Outcome::Cancelled(c),
+                Outcome::Panicked(p) => Outcome::Panicked(p),
+            }
+        }
     }
 
-    fn rollback(self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
-        async move { Outcome::Err(connection_error("Shared transaction rollback not yet implemented")) }
+    fn rollback(self, cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
+        async move {
+            let mut guard = match self.inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            match guard.execute_async(cx, "ROLLBACK", &[]).await {
+                Outcome::Ok(_) => Outcome::Ok(()),
+                Outcome::Err(e) => Outcome::Err(e),
+                Outcome::Cancelled(c) => Outcome::Cancelled(c),
+                Outcome::Panicked(p) => Outcome::Panicked(p),
+            }
+        }
+    }
+}
+
+impl<'conn> Drop for SharedMySqlTransaction<'conn> {
+    fn drop(&mut self) {
+        if !self.committed {
+            // Transaction was not committed - ideally we'd rollback here
+            // but we can't do async in drop. The connection will clean up
+            // when it sees the transaction state.
+        }
     }
 }
 

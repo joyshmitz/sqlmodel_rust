@@ -38,7 +38,7 @@ pub mod connection;
 pub mod protocol;
 pub mod types;
 
-pub use async_connection::MySqlAsyncConnection;
+pub use async_connection::{MySqlAsyncConnection, SharedMySqlConnection};
 pub use config::{MySqlConfig, SslMode};
 pub use connection::{ConnectionState, MySqlConnection};
 

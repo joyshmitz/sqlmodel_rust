@@ -79,31 +79,37 @@ The async migration requires:
 Example target API:
 
 ```rust
-use sqlmodel_core::Connection;
-use asupersync::Cx;
+use sqlmodel_core::{Connection, Value};
+use asupersync::{Cx, Outcome};
 
 // With async Connection trait
-let rows = conn.query(&cx, "SELECT * FROM users WHERE id = ?", &[Value::Int(1)]).await?;
-let mut tx = conn.begin(&cx).await?;
-tx.execute(&cx, "INSERT INTO logs (msg) VALUES (?)", &[Value::Text("action".into())]).await?;
-tx.commit(&cx).await?;
+async fn example(cx: &Cx, conn: &impl Connection) -> Outcome<(), sqlmodel_core::Error> {
+    let rows = conn.query(cx, "SELECT * FROM users WHERE id = ?", &[Value::Int(1)]).await?;
+    let tx = conn.begin(cx).await?;
+    tx.execute(cx, "INSERT INTO logs (msg) VALUES (?)", &[Value::Text("action".into())]).await?;
+    tx.commit(cx).await?;
+    Outcome::Ok(())
+}
 ```
 
 ## Type Mapping
 
-| MySQL Type | Rust Type |
-|------------|-----------|
-| TINYINT | `i8` |
-| SMALLINT | `i16` |
-| INT | `i32` |
-| BIGINT | `i64` |
-| FLOAT | `f32` |
-| DOUBLE | `f64` |
-| VARCHAR, TEXT | `String` |
-| BLOB | `Vec<u8>` |
-| DATE | Date value |
-| DATETIME | Timestamp value |
-| JSON | `serde_json::Value` |
+| MySQL Type | Value Variant | Rust Type |
+|------------|---------------|-----------|
+| TINYINT | `Value::TinyInt` | `i8` |
+| SMALLINT | `Value::SmallInt` | `i16` |
+| INT | `Value::Int` | `i32` |
+| BIGINT | `Value::BigInt` | `i64` |
+| FLOAT | `Value::Float` | `f32` |
+| DOUBLE | `Value::Double` | `f64` |
+| DECIMAL | `Value::Decimal` | `String` (arbitrary precision) |
+| VARCHAR, TEXT | `Value::Text` | `String` |
+| BLOB, BINARY | `Value::Bytes` | `Vec<u8>` |
+| DATE | `Value::Date` | `i32` (days since epoch) |
+| TIME | `Value::Time` | `i64` (microseconds since midnight) |
+| DATETIME | `Value::Timestamp` | `i64` (microseconds since epoch) |
+| TIMESTAMP | `Value::TimestampTz` | `i64` (microseconds since epoch, UTC) |
+| JSON | `Value::Json` | `serde_json::Value` |
 
 ## References
 
