@@ -263,6 +263,90 @@ impl FromValue for i64 {
     }
 }
 
+impl FromValue for u8 {
+    fn from_value(value: &Value) -> Result<Self> {
+        let v = value.as_i64().ok_or_else(|| {
+            Error::Type(TypeError {
+                expected: "u8",
+                actual: value.type_name().to_string(),
+                column: None,
+                rust_type: None,
+            })
+        })?;
+        u8::try_from(v).map_err(|_| {
+            Error::Type(TypeError {
+                expected: "u8",
+                actual: format!("value {} out of range", v),
+                column: None,
+                rust_type: None,
+            })
+        })
+    }
+}
+
+impl FromValue for u16 {
+    fn from_value(value: &Value) -> Result<Self> {
+        let v = value.as_i64().ok_or_else(|| {
+            Error::Type(TypeError {
+                expected: "u16",
+                actual: value.type_name().to_string(),
+                column: None,
+                rust_type: None,
+            })
+        })?;
+        u16::try_from(v).map_err(|_| {
+            Error::Type(TypeError {
+                expected: "u16",
+                actual: format!("value {} out of range", v),
+                column: None,
+                rust_type: None,
+            })
+        })
+    }
+}
+
+impl FromValue for u32 {
+    fn from_value(value: &Value) -> Result<Self> {
+        let v = value.as_i64().ok_or_else(|| {
+            Error::Type(TypeError {
+                expected: "u32",
+                actual: value.type_name().to_string(),
+                column: None,
+                rust_type: None,
+            })
+        })?;
+        u32::try_from(v).map_err(|_| {
+            Error::Type(TypeError {
+                expected: "u32",
+                actual: format!("value {} out of range", v),
+                column: None,
+                rust_type: None,
+            })
+        })
+    }
+}
+
+impl FromValue for u64 {
+    fn from_value(value: &Value) -> Result<Self> {
+        let v = value.as_i64().ok_or_else(|| {
+            Error::Type(TypeError {
+                expected: "u64",
+                actual: value.type_name().to_string(),
+                column: None,
+                rust_type: None,
+            })
+        })?;
+        u64::try_from(v).map_err(|_| {
+            Error::Type(TypeError {
+                expected: "u64",
+                actual: format!("value {} out of range", v),
+                column: None,
+                rust_type: None,
+            })
+        })
+    }
+}
+
 #[allow(clippy::cast_possible_truncation)]
 impl FromValue for f32 {
     fn from_value(value: &Value) -> Result<Self> {
