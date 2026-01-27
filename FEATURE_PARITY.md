@@ -11,7 +11,7 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Category | Implemented | Total | Coverage |
 |----------|-------------|-------|----------|
 | Core Model | 12 | 12 | 100% |
-| Field Options | 11 | 14 | 79% |
+| Field Options | 13 | 14 | 93% |
 | Query Building | 22 | 22 | 100% |
 | Expression Operators | 20 | 20 | 100% |
 | Session/Connection | 8 | 8 | 100% |
@@ -22,7 +22,7 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Serialization | 4 | 4 | 100% |
 | Database Drivers | 3 | 3 | 100% |
 | Connection Pooling | 8 | 8 | 100% |
-| **TOTAL** | **105** | **117** | **90%** |
+| **TOTAL** | **107** | **117** | **91%** |
 
 ---
 
@@ -52,8 +52,8 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Primary key | `Field(primary_key=True)` | `#[sqlmodel(primary_key)]` | ✅ Complete |
 | Auto increment | Automatic for int PKs | `#[sqlmodel(auto_increment)]` | ✅ Complete |
 | Foreign key | `Field(foreign_key="...")` | `#[sqlmodel(foreign_key = "...")]` | ✅ Complete |
-| On delete action | `Field(ondelete="CASCADE")` | `ReferentialAction::Cascade` | ⚠️ Core done, macro TODO |
-| On update action | `Field(onupdate="...")` | `ReferentialAction::*` | ⚠️ Core done, macro TODO |
+| On delete action | `Field(ondelete="CASCADE")` | `#[sqlmodel(on_delete = "CASCADE")]` | ✅ Complete |
+| On update action | `Field(onupdate="...")` | `#[sqlmodel(on_update = "...")]` | ✅ Complete |
 | Unique constraint | `Field(unique=True)` | `#[sqlmodel(unique)]` | ✅ Complete |
 | Nullable | `Field(nullable=True)` | `Option<T>` | ✅ Complete |
 | Index | `Field(index=True)` | `#[sqlmodel(index = "...")]` | ✅ Complete |
@@ -323,7 +323,7 @@ The Rust SQLModel implementation is **~86% feature complete** compared to Python
 ### Remaining Gaps
 
 1. **Full regex support** - Validation pattern matching is simplified (email, url)
-2. **Some field options** - on_delete action, decimal precision/scale
+2. **Some field options** - decimal precision/scale
 3. **Advanced type inference** - DateTime/UUID need explicit sql_type
 
 ### Explicitly Excluded Features
