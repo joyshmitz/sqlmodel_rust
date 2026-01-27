@@ -28,7 +28,7 @@
 //! conn.execute_raw("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)").unwrap();
 //!
 //! // Insert data using the Connection trait
-//! let cx = Cx::background();
+//! let cx = Cx::for_testing();
 //! match conn.insert(&cx, "INSERT INTO users (name) VALUES (?)", &[Value::Text("Alice".into())]).await {
 //!     Outcome::Ok(id) => println!("Inserted user with id: {}", id),
 //!     Outcome::Err(e) => eprintln!("Error: {}", e),

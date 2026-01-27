@@ -30,7 +30,7 @@ use crate::protocol::{
     Command, ErrPacket, PacketHeader, PacketReader, PacketType, PacketWriter, capabilities,
     charset, prepared, MAX_PACKET_SIZE,
 };
-use crate::types::{ColumnDef, FieldType, decode_text_value, interpolate_params};
+use crate::types::{ColumnDef, FieldType, decode_binary_value_with_len, decode_text_value, interpolate_params};
 
 /// Async MySQL connection.
 ///
@@ -1023,6 +1023,448 @@ impl MySqlAsyncConnection {
             Outcome::Err(e) => Outcome::Err(e),
             Outcome::Cancelled(c) => Outcome::Cancelled(c),
             Outcome::Panicked(p) => Outcome::Panicked(p),
+        }
+    }
+
+    /// Prepare a statement for later execution using the binary protocol.
+    ///
+    /// This sends COM_STMT_PREPARE to the server and stores the metadata
+    /// needed for later execution via `query_prepared_async` or `execute_prepared_async`.
+    pub async fn prepare_async(
+        &mut self,
+        _cx: &Cx,
+        sql: &str,
+    ) -> Outcome<PreparedStatement, Error> {
+        if !self.is_ready() && self.state != ConnectionState::InTransaction {
+            return Outcome::Err(connection_error("Connection not ready for prepare"));
+        }
+
+        self.sequence_id = 0;
+
+        // Send COM_STMT_PREPARE
+        let packet = prepared::build_stmt_prepare_packet(sql, self.sequence_id);
+        if let Outcome::Err(e) = self.write_packet_raw_async(&packet).await {
+            return Outcome::Err(e);
+        }
+
+        // Read response
+        let (payload, _) = match self.read_packet_async().await {
+            Outcome::Ok(p) => p,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        // Check for error
+        if payload.first() == Some(&0xFF) {
+            let mut reader = PacketReader::new(&payload);
+            let err = match reader.parse_err_packet() {
+                Some(e) => e,
+                None => return Outcome::Err(protocol_error("Invalid error packet")),
+            };
+            return Outcome::Err(query_error(&err));
+        }
+
+        // Parse COM_STMT_PREPARE_OK
+        let prep_ok = match prepared::parse_stmt_prepare_ok(&payload) {
+            Some(ok) => ok,
+            None => return Outcome::Err(protocol_error("Invalid prepare OK response")),
+        };
+
+        // Read parameter column definitions
+        let mut param_defs = Vec::with_capacity(prep_ok.num_params as usize);
+        for _ in 0..prep_ok.num_params {
+            let (payload, _) = match self.read_packet_async().await {
+                Outcome::Ok(p) => p,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+            match self.parse_column_def(&payload) {
+                Ok(col) => param_defs.push(col),
+                Err(e) => return Outcome::Err(e),
+            }
+        }
+
+        // Read EOF after params (if not CLIENT_DEPRECATE_EOF)
+        let server_caps = self.server_caps.as_ref().map_or(0, |c| c.capabilities);
+        if prep_ok.num_params > 0 && server_caps & capabilities::CLIENT_DEPRECATE_EOF == 0 {
+            let (payload, _) = match self.read_packet_async().await {
+                Outcome::Ok(p) => p,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+            if payload.first() != Some(&0xFE) {
+                return Outcome::Err(protocol_error("Expected EOF after param definitions"));
+            }
+        }
+
+        // Read column definitions
+        let mut column_defs = Vec::with_capacity(prep_ok.num_columns as usize);
+        for _ in 0..prep_ok.num_columns {
+            let (payload, _) = match self.read_packet_async().await {
+                Outcome::Ok(p) => p,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+            match self.parse_column_def(&payload) {
+                Ok(col) => column_defs.push(col),
+                Err(e) => return Outcome::Err(e),
+            }
+        }
+
+        // Read EOF after columns (if not CLIENT_DEPRECATE_EOF)
+        if prep_ok.num_columns > 0 && server_caps & capabilities::CLIENT_DEPRECATE_EOF == 0 {
+            let (payload, _) = match self.read_packet_async().await {
+                Outcome::Ok(p) => p,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+            if payload.first() != Some(&0xFE) {
+                return Outcome::Err(protocol_error("Expected EOF after column definitions"));
+            }
+        }
+
+        // Store metadata
+        let meta = PreparedStmtMeta {
+            statement_id: prep_ok.statement_id,
+            params: param_defs,
+            columns: column_defs.clone(),
+        };
+        self.prepared_stmts.insert(prep_ok.statement_id, meta);
+
+        // Return core PreparedStatement
+        let column_names: Vec<String> = column_defs.iter().map(|c| c.name.clone()).collect();
+        Outcome::Ok(PreparedStatement::with_columns(
+            u64::from(prep_ok.statement_id),
+            sql.to_string(),
+            prep_ok.num_params as usize,
+            column_names,
+        ))
+    }
+
+    /// Execute a prepared statement and return result rows (binary protocol).
+    pub async fn query_prepared_async(
+        &mut self,
+        _cx: &Cx,
+        stmt: &PreparedStatement,
+        params: &[Value],
+    ) -> Outcome<Vec<Row>, Error> {
+        let stmt_id = stmt.id() as u32;
+
+        // Look up metadata
+        let meta = match self.prepared_stmts.get(&stmt_id) {
+            Some(m) => m.clone(),
+            None => return Outcome::Err(connection_error("Unknown prepared statement")),
+        };
+
+        // Verify param count
+        if params.len() != meta.params.len() {
+            return Outcome::Err(connection_error(format!(
+                "Expected {} parameters, got {}",
+                meta.params.len(),
+                params.len()
+            )));
+        }
+
+        if !self.is_ready() && self.state != ConnectionState::InTransaction {
+            return Outcome::Err(connection_error("Connection not ready for query"));
+        }
+
+        self.state = ConnectionState::InQuery;
+        self.sequence_id = 0;
+
+        // Build and send COM_STMT_EXECUTE
+        let param_types: Vec<FieldType> = meta.params.iter().map(|c| c.field_type).collect();
+        let packet = prepared::build_stmt_execute_packet(
+            stmt_id,
+            params,
+            Some(&param_types),
+            self.sequence_id,
+        );
+        if let Outcome::Err(e) = self.write_packet_raw_async(&packet).await {
+            return Outcome::Err(e);
+        }
+
+        // Read response
+        let (payload, _) = match self.read_packet_async().await {
+            Outcome::Ok(p) => p,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        if payload.is_empty() {
+            self.state = ConnectionState::Ready;
+            return Outcome::Err(protocol_error("Empty execute response"));
+        }
+
+        match PacketType::from_first_byte(payload[0], payload.len() as u32) {
+            PacketType::Ok => {
+                // Non-SELECT statement - parse OK packet
+                let mut reader = PacketReader::new(&payload);
+                if let Some(ok) = reader.parse_ok_packet() {
+                    self.affected_rows = ok.affected_rows;
+                    self.last_insert_id = ok.last_insert_id;
+                    self.status_flags = ok.status_flags;
+                    self.warnings = ok.warnings;
+                }
+                self.state = ConnectionState::Ready;
+                Outcome::Ok(vec![])
+            }
+            PacketType::Error => {
+                self.state = ConnectionState::Ready;
+                let mut reader = PacketReader::new(&payload);
+                let err = match reader.parse_err_packet() {
+                    Some(e) => e,
+                    None => return Outcome::Err(protocol_error("Invalid error packet")),
+                };
+                Outcome::Err(query_error(&err))
+            }
+            _ => {
+                // Result set - read binary protocol rows
+                self.read_binary_result_set_async(&payload, &meta.columns).await
+            }
+        }
+    }
+
+    /// Execute a prepared statement and return affected row count.
+    pub async fn execute_prepared_async(
+        &mut self,
+        cx: &Cx,
+        stmt: &PreparedStatement,
+        params: &[Value],
+    ) -> Outcome<u64, Error> {
+        match self.query_prepared_async(cx, stmt, params).await {
+            Outcome::Ok(_) => Outcome::Ok(self.affected_rows),
+            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Cancelled(c) => Outcome::Cancelled(c),
+            Outcome::Panicked(p) => Outcome::Panicked(p),
+        }
+    }
+
+    /// Close a prepared statement.
+    pub async fn close_prepared_async(&mut self, stmt: &PreparedStatement) {
+        let stmt_id = stmt.id() as u32;
+        self.prepared_stmts.remove(&stmt_id);
+
+        self.sequence_id = 0;
+        let packet = prepared::build_stmt_close_packet(stmt_id, self.sequence_id);
+        // Best effort - no response expected
+        let _ = self.write_packet_raw_async(&packet).await;
+    }
+
+    /// Read a binary protocol result set.
+    async fn read_binary_result_set_async(
+        &mut self,
+        first_packet: &[u8],
+        columns: &[ColumnDef],
+    ) -> Outcome<Vec<Row>, Error> {
+        // First packet contains column count
+        let mut reader = PacketReader::new(first_packet);
+        let column_count = match reader.read_lenenc_int() {
+            Some(c) => c as usize,
+            None => return Outcome::Err(protocol_error("Invalid column count")),
+        };
+
+        // The column definitions were already provided from prepare
+        // But server sends them again in binary result set - we need to read them
+        let mut result_columns = Vec::with_capacity(column_count);
+        for _ in 0..column_count {
+            let (payload, _) = match self.read_packet_async().await {
+                Outcome::Ok(p) => p,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+            match self.parse_column_def(&payload) {
+                Ok(col) => result_columns.push(col),
+                Err(e) => return Outcome::Err(e),
+            }
+        }
+
+        // Use the columns from the result set if available, otherwise use prepared metadata
+        let cols = if result_columns.len() == columns.len() {
+            &result_columns
+        } else {
+            columns
+        };
+
+        // Check for EOF packet
+        let server_caps = self.server_caps.as_ref().map_or(0, |c| c.capabilities);
+        if server_caps & capabilities::CLIENT_DEPRECATE_EOF == 0 {
+            let (payload, _) = match self.read_packet_async().await {
+                Outcome::Ok(p) => p,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+            if payload.first() == Some(&0xFE) {
+                // EOF packet - continue to rows
+            }
+        }
+
+        // Read binary rows until EOF or OK
+        let mut rows = Vec::new();
+        loop {
+            let (payload, _) = match self.read_packet_async().await {
+                Outcome::Ok(p) => p,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+
+            if payload.is_empty() {
+                break;
+            }
+
+            match PacketType::from_first_byte(payload[0], payload.len() as u32) {
+                PacketType::Eof | PacketType::Ok => {
+                    let mut reader = PacketReader::new(&payload);
+                    if payload[0] == 0x00 {
+                        if let Some(ok) = reader.parse_ok_packet() {
+                            self.status_flags = ok.status_flags;
+                            self.warnings = ok.warnings;
+                        }
+                    } else if payload[0] == 0xFE {
+                        if let Some(eof) = reader.parse_eof_packet() {
+                            self.status_flags = eof.status_flags;
+                            self.warnings = eof.warnings;
+                        }
+                    }
+                    break;
+                }
+                PacketType::Error => {
+                    let mut reader = PacketReader::new(&payload);
+                    let err = match reader.parse_err_packet() {
+                        Some(e) => e,
+                        None => return Outcome::Err(protocol_error("Invalid error packet")),
+                    };
+                    self.state = ConnectionState::Ready;
+                    return Outcome::Err(query_error(&err));
+                }
+                _ => {
+                    let row = self.parse_binary_row(&payload, cols);
+                    rows.push(row);
+                }
+            }
+        }
+
+        self.state = if self.status_flags
+            & crate::protocol::server_status::SERVER_STATUS_IN_TRANS
+            != 0
+        {
+            ConnectionState::InTransaction
+        } else {
+            ConnectionState::Ready
+        };
+
+        Outcome::Ok(rows)
+    }
+
+    /// Parse a binary protocol row.
+    fn parse_binary_row(&self, data: &[u8], columns: &[ColumnDef]) -> Row {
+        use crate::types::decode_binary_value;
+
+        // Binary row format:
+        // - 0x00 header (1 byte)
+        // - NULL bitmap ((column_count + 7 + 2) / 8 bytes)
+        // - Column values (only non-NULL)
+
+        let mut values = Vec::with_capacity(columns.len());
+        let mut column_names = Vec::with_capacity(columns.len());
+
+        if data.is_empty() {
+            return Row::new(column_names, values);
+        }
+
+        // Skip header byte (0x00)
+        let mut pos = 1;
+
+        // NULL bitmap: (column_count + 7 + 2) / 8 bytes
+        // The +2 offset is for the reserved bits at the beginning
+        let null_bitmap_len = (columns.len() + 7 + 2) / 8;
+        if pos + null_bitmap_len > data.len() {
+            return Row::new(column_names, values);
+        }
+        let null_bitmap = &data[pos..pos + null_bitmap_len];
+        pos += null_bitmap_len;
+
+        // Parse column values
+        for (i, col) in columns.iter().enumerate() {
+            column_names.push(col.name.clone());
+
+            // Check NULL bitmap (bit position is i + 2 due to offset)
+            let bit_pos = i + 2;
+            let is_null = (null_bitmap[bit_pos / 8] & (1 << (bit_pos % 8))) != 0;
+
+            if is_null {
+                values.push(Value::Null);
+            } else {
+                let (value, consumed) = decode_binary_value(&data[pos..], col.field_type);
+                values.push(value);
+                pos += consumed;
+            }
+        }
+
+        Row::new(column_names, values)
+    }
+
+    /// Write a pre-built packet (with header already included).
+    async fn write_packet_raw_async(&mut self, packet: &[u8]) -> Outcome<(), Error> {
+        match &mut self.stream {
+            ConnectionStream::Async(stream) => {
+                let mut written = 0;
+                while written < packet.len() {
+                    match std::future::poll_fn(|cx| {
+                        std::pin::Pin::new(&mut *stream).poll_write(cx, &packet[written..])
+                    })
+                    .await
+                    {
+                        Ok(n) => written += n,
+                        Err(e) => {
+                            return Outcome::Err(Error::Connection(ConnectionError {
+                                kind: ConnectionErrorKind::Disconnected,
+                                message: format!("Failed to write packet: {}", e),
+                                source: Some(Box::new(e)),
+                            }));
+                        }
+                    }
+                }
+                // Flush
+                if let Err(e) = std::future::poll_fn(|cx| {
+                    std::pin::Pin::new(&mut *stream).poll_flush(cx)
+                })
+                .await
+                {
+                    return Outcome::Err(Error::Connection(ConnectionError {
+                        kind: ConnectionErrorKind::Disconnected,
+                        message: format!("Failed to flush: {}", e),
+                        source: Some(Box::new(e)),
+                    }));
+                }
+                Outcome::Ok(())
+            }
+            ConnectionStream::Sync(stream) => {
+                if let Err(e) = stream.write_all(packet) {
+                    return Outcome::Err(Error::Connection(ConnectionError {
+                        kind: ConnectionErrorKind::Disconnected,
+                        message: format!("Failed to write packet: {}", e),
+                        source: Some(Box::new(e)),
+                    }));
+                }
+                if let Err(e) = stream.flush() {
+                    return Outcome::Err(Error::Connection(ConnectionError {
+                        kind: ConnectionErrorKind::Disconnected,
+                        message: format!("Failed to flush: {}", e),
+                        source: Some(Box::new(e)),
+                    }));
+                }
+                Outcome::Ok(())
+            }
         }
     }
 
