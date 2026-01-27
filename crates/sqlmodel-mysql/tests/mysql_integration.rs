@@ -147,7 +147,10 @@ fn mysql_insert_and_select_roundtrip() {
         let _ = conn.execute(&cx, &drop_sql, &[]).await;
         unwrap_outcome(conn.execute(&cx, &create_sql, &[]).await);
 
-        let id = unwrap_outcome(conn.insert(&cx, &insert_sql, &[Value::Text("Alice".into())]).await);
+        let id = unwrap_outcome(
+            conn.insert(&cx, &insert_sql, &[Value::Text("Alice".into())])
+                .await,
+        );
         assert!(id > 0);
 
         let rows = unwrap_outcome(conn.query(&cx, &select_sql, &[Value::BigInt(id)]).await);
@@ -189,10 +192,16 @@ fn mysql_transaction_rollback_discards_changes() {
         unwrap_outcome(conn.execute(&cx, &create_sql, &[]).await);
 
         let tx = unwrap_outcome(conn.begin(&cx).await);
-        unwrap_outcome(tx.execute(&cx, &insert_sql, &[Value::Text("Bob".into())]).await);
+        unwrap_outcome(
+            tx.execute(&cx, &insert_sql, &[Value::Text("Bob".into())])
+                .await,
+        );
         unwrap_outcome(tx.rollback(&cx).await);
 
-        let rows = unwrap_outcome(conn.query(&cx, &count_sql, &[Value::Text("Bob".into())]).await);
+        let rows = unwrap_outcome(
+            conn.query(&cx, &count_sql, &[Value::Text("Bob".into())])
+                .await,
+        );
         assert_eq!(rows.len(), 1);
         let count: i64 = rows[0].get_as(0).expect("COUNT(*) as i64");
         assert_eq!(count, 0);
@@ -229,9 +238,15 @@ fn mysql_unique_violation_maps_to_constraint() {
 
         let _ = conn.execute(&cx, &drop_sql, &[]).await;
         unwrap_outcome(conn.execute(&cx, &create_sql, &[]).await);
-        unwrap_outcome(conn.execute(&cx, &insert_sql, &[Value::Text("dup".into())]).await);
+        unwrap_outcome(
+            conn.execute(&cx, &insert_sql, &[Value::Text("dup".into())])
+                .await,
+        );
 
-        match conn.execute(&cx, &insert_sql, &[Value::Text("dup".into())]).await {
+        match conn
+            .execute(&cx, &insert_sql, &[Value::Text("dup".into())])
+            .await
+        {
             Outcome::Err(Error::Query(q)) => assert_eq!(q.kind, QueryErrorKind::Constraint),
             Outcome::Err(e) => panic!("expected constraint violation, got error: {e}"),
             Outcome::Ok(n) => panic!("expected error, got ok rows_affected={n}"),
