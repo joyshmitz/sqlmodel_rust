@@ -6,11 +6,11 @@
 use std::future::Future;
 use std::io::{self, Read as StdRead, Write as StdWrite};
 use std::net::TcpStream as StdTcpStream;
-#[cfg(feature = "console")]
 use std::sync::Arc;
 
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
 use asupersync::net::TcpStream;
+use asupersync::sync::Mutex;
 use asupersync::{Cx, Outcome};
 
 use sqlmodel_core::connection::{Connection, IsolationLevel, PreparedStatement, TransactionOps};
@@ -62,6 +62,7 @@ pub struct MySqlAsyncConnection {
 }
 
 /// Connection stream wrapper for sync/async compatibility.
+#[allow(dead_code)]
 enum ConnectionStream {
     /// Standard sync TCP stream (for initial connection)
     Sync(StdTcpStream),
@@ -92,18 +93,17 @@ impl MySqlAsyncConnection {
     pub async fn connect(_cx: &Cx, config: MySqlConfig) -> Outcome<Self, Error> {
         // Use async TCP connect
         let addr = config.socket_addr();
-        let stream = match TcpStream::connect_timeout(
-            addr.parse().map_err(|e| {
-                Error::Connection(ConnectionError {
+        let socket_addr = match addr.parse() {
+            Ok(a) => a,
+            Err(e) => {
+                return Outcome::Err(Error::Connection(ConnectionError {
                     kind: ConnectionErrorKind::Connect,
                     message: format!("Invalid socket address: {}", e),
                     source: None,
-                })
-            })?,
-            config.connect_timeout,
-        )
-        .await
-        {
+                }));
+            }
+        };
+        let stream = match TcpStream::connect_timeout(socket_addr, config.connect_timeout).await {
             Ok(s) => s,
             Err(e) => {
                 let kind = if e.kind() == io::ErrorKind::ConnectionRefused {
@@ -640,63 +640,69 @@ impl MySqlAsyncConnection {
     }
 
     /// Handle authentication result asynchronously.
+    /// Uses a loop to handle auth switches without recursion.
     async fn handle_auth_result_async(&mut self) -> Outcome<(), Error> {
-        let (payload, _) = match self.read_packet_async().await {
-            Outcome::Ok(p) => p,
-            Outcome::Err(e) => return Outcome::Err(e),
-            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-            Outcome::Panicked(p) => return Outcome::Panicked(p),
-        };
+        // Loop to handle potential auth switches without recursion
+        loop {
+            let (payload, _) = match self.read_packet_async().await {
+                Outcome::Ok(p) => p,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
 
-        if payload.is_empty() {
-            return Outcome::Err(protocol_error("Empty authentication response"));
-        }
+            if payload.is_empty() {
+                return Outcome::Err(protocol_error("Empty authentication response"));
+            }
 
-        match PacketType::from_first_byte(payload[0], payload.len() as u32) {
-            PacketType::Ok => {
-                let mut reader = PacketReader::new(&payload);
-                if let Some(ok) = reader.parse_ok_packet() {
-                    self.status_flags = ok.status_flags;
-                    self.affected_rows = ok.affected_rows;
+            match PacketType::from_first_byte(payload[0], payload.len() as u32) {
+                PacketType::Ok => {
+                    let mut reader = PacketReader::new(&payload);
+                    if let Some(ok) = reader.parse_ok_packet() {
+                        self.status_flags = ok.status_flags;
+                        self.affected_rows = ok.affected_rows;
+                    }
+                    return Outcome::Ok(());
                 }
-                Outcome::Ok(())
+                PacketType::Error => {
+                    let mut reader = PacketReader::new(&payload);
+                    let err = match reader.parse_err_packet() {
+                        Some(e) => e,
+                        None => return Outcome::Err(protocol_error("Invalid error packet")),
+                    };
+                    return Outcome::Err(auth_error(format!(
+                        "Authentication failed: {} ({})",
+                        err.error_message, err.error_code
+                    )));
+                }
+                PacketType::Eof => {
+                    // Auth switch request - handle inline to avoid recursion
+                    let data = &payload[1..];
+                    let mut reader = PacketReader::new(data);
+
+                    let plugin = match reader.read_null_string() {
+                        Some(p) => p,
+                        None => {
+                            return Outcome::Err(protocol_error(
+                                "Missing plugin name in auth switch",
+                            ))
+                        }
+                    };
+
+                    let auth_data = reader.read_rest();
+                    let response = self.compute_auth_response(&plugin, auth_data);
+
+                    if let Outcome::Err(e) = self.write_packet_async(&response).await {
+                        return Outcome::Err(e);
+                    }
+                    // Continue loop to read next auth result
+                }
+                _ => {
+                    // Handle additional auth data
+                    return self.handle_additional_auth_async(&payload).await;
+                }
             }
-            PacketType::Error => {
-                let mut reader = PacketReader::new(&payload);
-                let err = match reader.parse_err_packet() {
-                    Some(e) => e,
-                    None => return Outcome::Err(protocol_error("Invalid error packet")),
-                };
-                Outcome::Err(auth_error(format!(
-                    "Authentication failed: {} ({})",
-                    err.error_message, err.error_code
-                )))
-            }
-            PacketType::Eof => {
-                // Auth switch request
-                self.handle_auth_switch_async(&payload[1..]).await
-            }
-            _ => self.handle_additional_auth_async(&payload).await,
         }
-    }
-
-    /// Handle auth switch request asynchronously.
-    async fn handle_auth_switch_async(&mut self, data: &[u8]) -> Outcome<(), Error> {
-        let mut reader = PacketReader::new(data);
-
-        let plugin = match reader.read_null_string() {
-            Some(p) => p,
-            None => return Outcome::Err(protocol_error("Missing plugin name in auth switch")),
-        };
-
-        let auth_data = reader.read_rest();
-        let response = self.compute_auth_response(&plugin, auth_data);
-
-        if let Outcome::Err(e) = self.write_packet_async(&response).await {
-            return Outcome::Err(e);
-        }
-
-        self.handle_auth_result_async().await
     }
 
     /// Handle additional auth data asynchronously.
@@ -983,6 +989,25 @@ impl MySqlAsyncConnection {
         Row::new(column_names, values)
     }
 
+    /// Execute a statement asynchronously and return affected rows.
+    ///
+    /// This is similar to `query_async` but returns the number of affected rows
+    /// instead of the result set. Useful for INSERT, UPDATE, DELETE statements.
+    pub async fn execute_async(
+        &mut self,
+        cx: &Cx,
+        sql: &str,
+        params: &[Value],
+    ) -> Outcome<u64, Error> {
+        // Execute the query
+        match self.query_async(cx, sql, params).await {
+            Outcome::Ok(_) => Outcome::Ok(self.affected_rows),
+            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Cancelled(c) => Outcome::Cancelled(c),
+            Outcome::Panicked(p) => Outcome::Panicked(p),
+        }
+    }
+
     /// Ping the server asynchronously.
     pub async fn ping_async(&mut self, _cx: &Cx) -> Outcome<(), Error> {
         self.sequence_id = 0;
@@ -1034,9 +1059,9 @@ impl Connection for MySqlAsyncConnection {
 
     fn query(
         &self,
-        cx: &Cx,
-        sql: &str,
-        params: &[Value],
+        _cx: &Cx,
+        _sql: &str,
+        _params: &[Value],
     ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
         // Note: This requires &mut self, but trait uses &self
         // We need interior mutability or a different approach
@@ -1052,9 +1077,9 @@ impl Connection for MySqlAsyncConnection {
 
     fn query_one(
         &self,
-        cx: &Cx,
-        sql: &str,
-        params: &[Value],
+        _cx: &Cx,
+        _sql: &str,
+        _params: &[Value],
     ) -> impl Future<Output = Outcome<Option<Row>, Error>> + Send {
         async move {
             Outcome::Err(connection_error(
@@ -1065,9 +1090,9 @@ impl Connection for MySqlAsyncConnection {
 
     fn execute(
         &self,
-        cx: &Cx,
-        sql: &str,
-        params: &[Value],
+        _cx: &Cx,
+        _sql: &str,
+        _params: &[Value],
     ) -> impl Future<Output = Outcome<u64, Error>> + Send {
         async move {
             Outcome::Err(connection_error(
@@ -1078,9 +1103,9 @@ impl Connection for MySqlAsyncConnection {
 
     fn insert(
         &self,
-        cx: &Cx,
-        sql: &str,
-        params: &[Value],
+        _cx: &Cx,
+        _sql: &str,
+        _params: &[Value],
     ) -> impl Future<Output = Outcome<i64, Error>> + Send {
         async move {
             Outcome::Err(connection_error(
@@ -1091,8 +1116,8 @@ impl Connection for MySqlAsyncConnection {
 
     fn batch(
         &self,
-        cx: &Cx,
-        statements: &[(String, Vec<Value>)],
+        _cx: &Cx,
+        _statements: &[(String, Vec<Value>)],
     ) -> impl Future<Output = Outcome<Vec<u64>, Error>> + Send {
         async move {
             Outcome::Err(connection_error(
@@ -1101,7 +1126,7 @@ impl Connection for MySqlAsyncConnection {
         }
     }
 
-    fn begin(&self, cx: &Cx) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
+    fn begin(&self, _cx: &Cx) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
         async move {
             Outcome::Err(connection_error(
                 "Begin requires mutable access - use transaction methods directly",
@@ -1111,8 +1136,8 @@ impl Connection for MySqlAsyncConnection {
 
     fn begin_with(
         &self,
-        cx: &Cx,
-        isolation: IsolationLevel,
+        _cx: &Cx,
+        _isolation: IsolationLevel,
     ) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
         async move {
             Outcome::Err(connection_error(
@@ -1123,8 +1148,8 @@ impl Connection for MySqlAsyncConnection {
 
     fn prepare(
         &self,
-        cx: &Cx,
-        sql: &str,
+        _cx: &Cx,
+        _sql: &str,
     ) -> impl Future<Output = Outcome<PreparedStatement, Error>> + Send {
         async move {
             Outcome::Err(connection_error(
@@ -1135,9 +1160,9 @@ impl Connection for MySqlAsyncConnection {
 
     fn query_prepared(
         &self,
-        cx: &Cx,
-        stmt: &PreparedStatement,
-        params: &[Value],
+        _cx: &Cx,
+        _stmt: &PreparedStatement,
+        _params: &[Value],
     ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
         async move {
             Outcome::Err(connection_error(
@@ -1148,9 +1173,9 @@ impl Connection for MySqlAsyncConnection {
 
     fn execute_prepared(
         &self,
-        cx: &Cx,
-        stmt: &PreparedStatement,
-        params: &[Value],
+        _cx: &Cx,
+        _stmt: &PreparedStatement,
+        _params: &[Value],
     ) -> impl Future<Output = Outcome<u64, Error>> + Send {
         async move {
             Outcome::Err(connection_error(
@@ -1159,7 +1184,7 @@ impl Connection for MySqlAsyncConnection {
         }
     }
 
-    fn ping(&self, cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
+    fn ping(&self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
         async move {
             Outcome::Err(connection_error(
                 "Ping requires mutable access - use ping_async directly",
@@ -1174,6 +1199,7 @@ impl Connection for MySqlAsyncConnection {
 
 /// MySQL transaction (placeholder).
 pub struct MySqlTransaction<'conn> {
+    #[allow(dead_code)]
     conn: &'conn mut MySqlAsyncConnection,
 }
 
@@ -1315,6 +1341,340 @@ fn query_error_msg(msg: impl Into<String>) -> Error {
         position: None,
         source: None,
     })
+}
+
+// === Shared connection wrapper ===
+
+/// A thread-safe, shared MySQL connection with interior mutability.
+///
+/// This wrapper allows the `Connection` trait to be implemented properly
+/// by wrapping the raw `MySqlAsyncConnection` in an async mutex.
+///
+/// # Example
+///
+/// ```ignore
+/// let conn = MySqlAsyncConnection::connect(&cx, config).await?;
+/// let shared = SharedMySqlConnection::new(conn);
+///
+/// // Now you can use &shared with the Connection trait
+/// let rows = shared.query(&cx, "SELECT * FROM users", &[]).await?;
+/// ```
+pub struct SharedMySqlConnection {
+    inner: Arc<Mutex<MySqlAsyncConnection>>,
+}
+
+impl SharedMySqlConnection {
+    /// Create a new shared connection from a raw connection.
+    pub fn new(conn: MySqlAsyncConnection) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(conn)),
+        }
+    }
+
+    /// Create a new shared connection by connecting to the server.
+    pub async fn connect(cx: &Cx, config: MySqlConfig) -> Outcome<Self, Error> {
+        match MySqlAsyncConnection::connect(cx, config).await {
+            Outcome::Ok(conn) => Outcome::Ok(Self::new(conn)),
+            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Cancelled(c) => Outcome::Cancelled(c),
+            Outcome::Panicked(p) => Outcome::Panicked(p),
+        }
+    }
+
+    /// Get the inner Arc for cloning.
+    pub fn inner(&self) -> &Arc<Mutex<MySqlAsyncConnection>> {
+        &self.inner
+    }
+}
+
+impl Clone for SharedMySqlConnection {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl std::fmt::Debug for SharedMySqlConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedMySqlConnection")
+            .field("inner", &"Arc<Mutex<MySqlAsyncConnection>>")
+            .finish()
+    }
+}
+
+/// Transaction type for SharedMySqlConnection.
+pub struct SharedMySqlTransaction<'conn> {
+    #[allow(dead_code)]
+    conn: &'conn SharedMySqlConnection,
+}
+
+impl Connection for SharedMySqlConnection {
+    type Tx<'conn> = SharedMySqlTransaction<'conn> where Self: 'conn;
+
+    fn query(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[Value],
+    ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        async move {
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            guard.query_async(cx, &sql, &params).await
+        }
+    }
+
+    fn query_one(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[Value],
+    ) -> impl Future<Output = Outcome<Option<Row>, Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        async move {
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            let rows = match guard.query_async(cx, &sql, &params).await {
+                Outcome::Ok(r) => r,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(c) => return Outcome::Cancelled(c),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+            Outcome::Ok(rows.into_iter().next())
+        }
+    }
+
+    fn execute(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[Value],
+    ) -> impl Future<Output = Outcome<u64, Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        async move {
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            guard.execute_async(cx, &sql, &params).await
+        }
+    }
+
+    fn insert(
+        &self,
+        cx: &Cx,
+        sql: &str,
+        params: &[Value],
+    ) -> impl Future<Output = Outcome<i64, Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        async move {
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            match guard.execute_async(cx, &sql, &params).await {
+                Outcome::Ok(_) => Outcome::Ok(guard.last_insert_id() as i64),
+                Outcome::Err(e) => Outcome::Err(e),
+                Outcome::Cancelled(c) => Outcome::Cancelled(c),
+                Outcome::Panicked(p) => Outcome::Panicked(p),
+            }
+        }
+    }
+
+    fn batch(
+        &self,
+        cx: &Cx,
+        statements: &[(String, Vec<Value>)],
+    ) -> impl Future<Output = Outcome<Vec<u64>, Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        let statements = statements.to_vec();
+        async move {
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            let mut results = Vec::with_capacity(statements.len());
+            for (sql, params) in &statements {
+                match guard.execute_async(cx, sql, params).await {
+                    Outcome::Ok(n) => results.push(n),
+                    Outcome::Err(e) => return Outcome::Err(e),
+                    Outcome::Cancelled(c) => return Outcome::Cancelled(c),
+                    Outcome::Panicked(p) => return Outcome::Panicked(p),
+                }
+            }
+            Outcome::Ok(results)
+        }
+    }
+
+    fn begin(&self, _cx: &Cx) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
+        async move {
+            Outcome::Err(connection_error(
+                "Transactions not yet implemented for SharedMySqlConnection",
+            ))
+        }
+    }
+
+    fn begin_with(
+        &self,
+        _cx: &Cx,
+        _isolation: IsolationLevel,
+    ) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
+        async move {
+            Outcome::Err(connection_error(
+                "Transactions not yet implemented for SharedMySqlConnection",
+            ))
+        }
+    }
+
+    fn prepare(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+    ) -> impl Future<Output = Outcome<PreparedStatement, Error>> + Send {
+        async move {
+            Outcome::Err(connection_error(
+                "Prepared statements not yet implemented for MySQL async",
+            ))
+        }
+    }
+
+    fn query_prepared(
+        &self,
+        _cx: &Cx,
+        _stmt: &PreparedStatement,
+        _params: &[Value],
+    ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
+        async move {
+            Outcome::Err(connection_error(
+                "Prepared query not yet implemented for MySQL async",
+            ))
+        }
+    }
+
+    fn execute_prepared(
+        &self,
+        _cx: &Cx,
+        _stmt: &PreparedStatement,
+        _params: &[Value],
+    ) -> impl Future<Output = Outcome<u64, Error>> + Send {
+        async move {
+            Outcome::Err(connection_error(
+                "Prepared execute not yet implemented for MySQL async",
+            ))
+        }
+    }
+
+    fn ping(&self, cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
+        let inner = Arc::clone(&self.inner);
+        async move {
+            let mut guard = match inner.lock(cx).await {
+                Ok(g) => g,
+                Err(_) => return Outcome::Err(connection_error("Failed to acquire connection lock")),
+            };
+            guard.ping_async(cx).await
+        }
+    }
+
+    fn close(self, cx: &Cx) -> impl Future<Output = Result<(), Error>> + Send {
+        async move {
+            // Try to get exclusive access - if we have the only Arc, we can close
+            match Arc::try_unwrap(self.inner) {
+                Ok(mutex) => {
+                    let conn = mutex.into_inner();
+                    conn.close_async(cx).await
+                }
+                Err(_) => {
+                    // Other references exist, can't close
+                    Err(connection_error(
+                        "Cannot close: other references to connection exist",
+                    ))
+                }
+            }
+        }
+    }
+}
+
+impl<'conn> TransactionOps for SharedMySqlTransaction<'conn> {
+    fn query(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _params: &[Value],
+    ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
+        async move { Outcome::Err(connection_error("Shared transaction query not yet implemented")) }
+    }
+
+    fn query_one(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _params: &[Value],
+    ) -> impl Future<Output = Outcome<Option<Row>, Error>> + Send {
+        async move { Outcome::Err(connection_error("Shared transaction query_one not yet implemented")) }
+    }
+
+    fn execute(
+        &self,
+        _cx: &Cx,
+        _sql: &str,
+        _params: &[Value],
+    ) -> impl Future<Output = Outcome<u64, Error>> + Send {
+        async move { Outcome::Err(connection_error("Shared transaction execute not yet implemented")) }
+    }
+
+    fn savepoint(
+        &self,
+        _cx: &Cx,
+        _name: &str,
+    ) -> impl Future<Output = Outcome<(), Error>> + Send {
+        async move { Outcome::Err(connection_error("Shared transaction savepoint not yet implemented")) }
+    }
+
+    fn rollback_to(
+        &self,
+        _cx: &Cx,
+        _name: &str,
+    ) -> impl Future<Output = Outcome<(), Error>> + Send {
+        async move {
+            Outcome::Err(connection_error(
+                "Shared transaction rollback_to not yet implemented",
+            ))
+        }
+    }
+
+    fn release(
+        &self,
+        _cx: &Cx,
+        _name: &str,
+    ) -> impl Future<Output = Outcome<(), Error>> + Send {
+        async move {
+            Outcome::Err(connection_error(
+                "Shared transaction release not yet implemented",
+            ))
+        }
+    }
+
+    fn commit(self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
+        async move { Outcome::Err(connection_error("Shared transaction commit not yet implemented")) }
+    }
+
+    fn rollback(self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
+        async move { Outcome::Err(connection_error("Shared transaction rollback not yet implemented")) }
+    }
 }
 
 #[cfg(test)]
