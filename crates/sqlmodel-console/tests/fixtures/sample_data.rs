@@ -3,53 +3,60 @@
 #![allow(dead_code)] // These fixtures may not all be used yet
 
 use sqlmodel_console::renderables::{ErrorPanel, ErrorSeverity};
-use sqlmodel_schema::introspect::{ColumnInfo, ForeignKeyInfo, IndexInfo, TableInfo};
+use sqlmodel_schema::introspect::{
+    ColumnInfo, ForeignKeyInfo, IndexInfo, ParsedSqlType, TableInfo,
+};
+
+/// Helper to create a column with parsed type.
+fn col(
+    name: &str,
+    sql_type: &str,
+    nullable: bool,
+    default: Option<&str>,
+    pk: bool,
+    auto: bool,
+) -> ColumnInfo {
+    ColumnInfo {
+        name: name.to_string(),
+        sql_type: sql_type.to_string(),
+        parsed_type: ParsedSqlType::parse(sql_type),
+        nullable,
+        default: default.map(String::from),
+        primary_key: pk,
+        auto_increment: auto,
+        comment: None,
+    }
+}
 
 /// Sample user table schema.
 pub fn user_table_info() -> TableInfo {
     TableInfo {
         name: "users".to_string(),
         columns: vec![
-            ColumnInfo {
-                name: "id".to_string(),
-                sql_type: "INTEGER".to_string(),
-                nullable: false,
-                default: None,
-                primary_key: true,
-                auto_increment: true,
-            },
-            ColumnInfo {
-                name: "name".to_string(),
-                sql_type: "TEXT".to_string(),
-                nullable: false,
-                default: None,
-                primary_key: false,
-                auto_increment: false,
-            },
-            ColumnInfo {
-                name: "email".to_string(),
-                sql_type: "TEXT".to_string(),
-                nullable: false,
-                default: None,
-                primary_key: false,
-                auto_increment: false,
-            },
-            ColumnInfo {
-                name: "created_at".to_string(),
-                sql_type: "TIMESTAMP".to_string(),
-                nullable: false,
-                default: Some("NOW()".to_string()),
-                primary_key: false,
-                auto_increment: false,
-            },
+            col("id", "INTEGER", false, None, true, true),
+            col("name", "TEXT", false, None, false, false),
+            col("email", "TEXT", false, None, false, false),
+            col(
+                "created_at",
+                "TIMESTAMP",
+                false,
+                Some("NOW()"),
+                false,
+                false,
+            ),
         ],
         primary_key: vec!["id".to_string()],
         foreign_keys: Vec::new(),
+        unique_constraints: Vec::new(),
+        check_constraints: Vec::new(),
         indexes: vec![IndexInfo {
             name: "idx_users_email".to_string(),
             columns: vec!["email".to_string()],
             unique: true,
+            index_type: None,
+            primary: false,
         }],
+        comment: None,
     }
 }
 
@@ -58,38 +65,10 @@ pub fn posts_table_info() -> TableInfo {
     TableInfo {
         name: "posts".to_string(),
         columns: vec![
-            ColumnInfo {
-                name: "id".to_string(),
-                sql_type: "INTEGER".to_string(),
-                nullable: false,
-                default: None,
-                primary_key: true,
-                auto_increment: true,
-            },
-            ColumnInfo {
-                name: "user_id".to_string(),
-                sql_type: "INTEGER".to_string(),
-                nullable: false,
-                default: None,
-                primary_key: false,
-                auto_increment: false,
-            },
-            ColumnInfo {
-                name: "title".to_string(),
-                sql_type: "TEXT".to_string(),
-                nullable: false,
-                default: None,
-                primary_key: false,
-                auto_increment: false,
-            },
-            ColumnInfo {
-                name: "content".to_string(),
-                sql_type: "TEXT".to_string(),
-                nullable: true,
-                default: None,
-                primary_key: false,
-                auto_increment: false,
-            },
+            col("id", "INTEGER", false, None, true, true),
+            col("user_id", "INTEGER", false, None, false, false),
+            col("title", "TEXT", false, None, false, false),
+            col("content", "TEXT", true, None, false, false),
         ],
         primary_key: vec!["id".to_string()],
         foreign_keys: vec![ForeignKeyInfo {
@@ -100,11 +79,16 @@ pub fn posts_table_info() -> TableInfo {
             on_delete: Some("CASCADE".to_string()),
             on_update: None,
         }],
+        unique_constraints: Vec::new(),
+        check_constraints: Vec::new(),
         indexes: vec![IndexInfo {
             name: "idx_posts_user".to_string(),
             columns: vec!["user_id".to_string()],
             unique: false,
+            index_type: None,
+            primary: false,
         }],
+        comment: None,
     }
 }
 
