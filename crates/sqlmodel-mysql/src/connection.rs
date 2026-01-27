@@ -3,9 +3,30 @@
 //! This module implements the MySQL wire protocol connection,
 //! including connection establishment, authentication, and state management.
 //!
-//! Note: The Connection trait implementation is pending. Currently provides
-//! synchronous methods (query_sync, execute_sync, insert_sync) with parameter
-//! binding support.
+//! # Current Status
+//!
+//! **Synchronous implementation complete.** The async `Connection` trait from
+//! `sqlmodel_core` is not yet implemented. Current API uses `_sync` suffix methods.
+//!
+//! # Migration Path to Async
+//!
+//! To implement the `Connection` trait, these changes are needed:
+//!
+//! 1. Replace `std::net::TcpStream` with `asupersync::net::TcpStream`
+//! 2. Convert `read_packet`/`write_packet` to async with `.await`
+//! 3. Add `&Cx` context parameter to all async methods
+//! 4. Return `Outcome<T, E>` instead of `Result<T, E>`
+//! 5. Add cancellation checks via `cx.checkpoint()?`
+//!
+//! See `crates/sqlmodel-mysql/README.md` for the full roadmap.
+//!
+//! # Synchronous API
+//!
+//! ```rust,ignore
+//! let mut conn = MySqlConnection::connect(config)?;
+//! let rows = conn.query_sync("SELECT * FROM users WHERE id = ?", &[Value::Int(1)])?;
+//! conn.close()?;
+//! ```
 
 // MySQL protocol uses well-defined packet sizes that fit in u32 (max 16MB)
 #![allow(clippy::cast_possible_truncation)]
