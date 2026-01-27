@@ -695,7 +695,11 @@ impl Expr {
             Expr::Binary { left, op, right } => {
                 let left_sql = left.build_with_dialect(dialect, params, offset);
                 let right_sql = right.build_with_dialect(dialect, params, offset);
-                format!("{left_sql} {} {right_sql}", op.as_str())
+                if *op == BinaryOp::Concat && dialect == Dialect::Mysql {
+                    format!("CONCAT({left_sql}, {right_sql})")
+                } else {
+                    format!("{left_sql} {} {right_sql}", op.as_str())
+                }
             }
 
             Expr::Unary { op, expr } => {

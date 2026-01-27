@@ -7,9 +7,14 @@
 //! Maximum packet payload is 2^24 - 1 (16MB - 1). Larger payloads
 //! are split into multiple packets.
 
+pub mod prepared;
 pub mod reader;
 pub mod writer;
 
+pub use prepared::{
+    PreparedStatement, StmtPrepareOk, build_stmt_close_packet, build_stmt_execute_packet,
+    build_stmt_prepare_packet, build_stmt_reset_packet, parse_stmt_prepare_ok,
+};
 pub use reader::PacketReader;
 pub use writer::PacketWriter;
 
