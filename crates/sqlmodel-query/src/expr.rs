@@ -40,6 +40,14 @@ impl Dialect {
     pub const fn supports_ilike(self) -> bool {
         matches!(self, Dialect::Postgres)
     }
+
+    /// Quote an identifier for this dialect.
+    pub fn quote_identifier(self, name: &str) -> String {
+        match self {
+            Dialect::Postgres | Dialect::Sqlite => format!("\"{}\"", name),
+            Dialect::Mysql => format!("`{}`", name),
+        }
+    }
 }
 
 /// A SQL expression that can be used in WHERE, HAVING, etc.
@@ -679,9 +687,13 @@ impl Expr {
         match self {
             Expr::Column { table, name } => {
                 if let Some(t) = table {
-                    format!("\"{t}\".\"{name}\"")
+                    format!(
+                        "{}.{}",
+                        dialect.quote_identifier(t),
+                        dialect.quote_identifier(name)
+                    )
                 } else {
-                    format!("\"{name}\"")
+                    dialect.quote_identifier(name)
                 }
             }
 
