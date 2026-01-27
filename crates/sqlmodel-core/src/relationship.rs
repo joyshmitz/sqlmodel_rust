@@ -600,6 +600,12 @@ impl<T: Model + fmt::Debug> fmt::Debug for Lazy<T> {
             .field("state", &state)
             .field("fk_value", &self.fk_value)
             .field("loaded", &self.get())
+            .field(
+                "load_attempted",
+                &self
+                    .load_attempted
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
             .finish()
     }
 }

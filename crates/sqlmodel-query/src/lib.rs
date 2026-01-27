@@ -15,6 +15,7 @@ pub use builder::{
     UpdateBuilder,
 };
 pub use clause::{Limit, Offset, OrderBy, Where};
+pub use eager::{EagerLoader, IncludePath};
 pub use expr::{BinaryOp, Expr, UnaryOp};
 pub use join::{Join, JoinType};
 pub use select::Select;
