@@ -308,11 +308,52 @@ These features are intentionally NOT being ported:
 
 ## Conclusion
 
-The Rust SQLModel implementation is **~80% feature complete** compared to Python SQLModel. The core ORM functionality (Model derive, query building, CRUD operations, transactions, connection pooling) is fully implemented and production-ready.
+The Rust SQLModel implementation is **~86% feature complete** compared to Python SQLModel. The core ORM functionality (Model derive, query building, CRUD operations, transactions, connection pooling) is fully implemented and production-ready.
 
-The main gaps are:
-1. Validation derive macro (TODO)
-2. Some advanced field options (on_delete, sql_type override)
-3. PostgreSQL driver (skeleton only)
+### Fully Production-Ready
 
-Relationship handling is intentionally different - Rust uses explicit JOINs rather than magic lazy-loading, which provides better performance predictability.
+1. **All 3 database drivers** - PostgreSQL, MySQL, SQLite fully functional
+2. **Complete query builder** - SELECT, INSERT, UPDATE, DELETE with all operators
+3. **Full transaction support** - Isolation levels, savepoints, auto-rollback
+4. **Connection pooling** - All configuration options, health checks, statistics
+5. **TLS/SSL** - Implemented for MySQL and PostgreSQL via rustls
+6. **Prepared statements** - MySQL binary protocol, PostgreSQL named statements
+
+### Remaining Gaps
+
+1. **Validation derive macro** (TODO) - Attributes defined but not implemented
+2. **Some field options** - on_delete action, decimal precision/scale
+3. **Advanced type inference** - DateTime/UUID need explicit sql_type
+
+### Explicitly Excluded Features
+
+Relationship handling is intentionally different - Rust uses explicit JOINs rather than magic lazy-loading, which provides better performance predictability. See PLAN_TO_PORT_SQLMODEL_TO_RUST.md for the complete list of 15 excluded features.
+
+---
+
+## Appendix: Expression System Details
+
+The Rust implementation includes a complete type-safe expression system:
+
+### Supported Expression Types
+- `Expr::Column` - Column references with optional table qualifier
+- `Expr::Literal` - Type-safe literal values
+- `Expr::Binary` - All binary operators (=, <>, <, <=, >, >=, AND, OR, +, -, *, /, %, &, |, ^, ||)
+- `Expr::Unary` - NOT, -, ~
+- `Expr::Function` - Aggregate functions (COUNT, SUM, AVG, MIN, MAX) and custom functions
+- `Expr::Case` - CASE WHEN ... THEN ... ELSE ... END
+- `Expr::In` - IN / NOT IN lists
+- `Expr::Between` - BETWEEN / NOT BETWEEN
+- `Expr::IsNull` - IS NULL / IS NOT NULL
+- `Expr::Like` - LIKE / ILIKE with dialect fallbacks
+- `Expr::Subquery` - Subquery expressions
+- `Expr::Raw` - Raw SQL escape hatch
+
+### Multi-Dialect Support
+- **PostgreSQL** - `$1, $2, ...` placeholders, double-quote identifiers, ILIKE support
+- **SQLite** - `?1, ?2, ...` placeholders, double-quote identifiers
+- **MySQL** - `?, ?, ...` placeholders, backtick identifiers, CONCAT() function
+
+---
+
+*Last verified: 2026-01-27*
