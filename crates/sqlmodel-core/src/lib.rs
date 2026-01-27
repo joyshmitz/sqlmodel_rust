@@ -26,7 +26,7 @@ pub use connection::{
 pub use error::{Error, FieldValidationError, Result, ValidationError, ValidationErrorKind};
 pub use field::{Column, Field, FieldInfo, ReferentialAction};
 pub use model::Model;
-pub use relationship::{LinkTableInfo, RelationshipInfo, RelationshipKind};
+pub use relationship::{LinkTableInfo, Related, RelationshipInfo, RelationshipKind};
 pub use row::Row;
 pub use types::{SqlType, TypeInfo};
 pub use value::Value;
