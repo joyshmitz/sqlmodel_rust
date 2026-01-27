@@ -5,9 +5,11 @@
 //! builder, session/UoW, eager/lazy loaders) to generate correct SQL and load
 //! related objects without runtime reflection.
 
-use crate::{Model, Value};
+use crate::{Error, Model, Value};
+use asupersync::{Cx, Outcome};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
+use std::future::Future;
 use std::sync::OnceLock;
 
 /// The type of relationship between two models.
@@ -154,6 +156,16 @@ impl Default for RelationshipInfo {
     fn default() -> Self {
         Self::new("", "", RelationshipKind::default())
     }
+}
+
+/// Minimal session interface needed to load lazy relationships.
+///
+/// This trait lives in `sqlmodel-core` to avoid circular dependencies: the
+/// concrete `Session` type is defined in `sqlmodel-session` (which depends on
+/// `sqlmodel-core`). `sqlmodel-session` provides the blanket impl.
+pub trait LazyLoader<M: Model> {
+    /// Load an object by primary key.
+    fn get(&mut self, cx: &Cx, pk: Value) -> impl Future<Output = Outcome<Option<M>, Error>> + Send;
 }
 
 /// A related single object (many-to-one or one-to-one).
@@ -520,6 +532,35 @@ impl<T: Model> Lazy<T> {
         }
     }
 
+    /// Load the related object via the provided loader (cached after first success).
+    ///
+    /// - If the FK is NULL, this caches `None` and returns `Ok(None)`.
+    /// - If the loader errors/cancels/panics, this does **not** mark the
+    ///   relationship as loaded, allowing retries.
+    pub async fn load<L>(&mut self, cx: &Cx, loader: &mut L) -> Outcome<Option<&T>, Error>
+    where
+        L: LazyLoader<T> + ?Sized,
+    {
+        if self.is_loaded() {
+            return Outcome::Ok(self.get());
+        }
+
+        let Some(fk) = self.fk_value.clone() else {
+            let _ = self.set_loaded(None);
+            return Outcome::Ok(None);
+        };
+
+        match loader.get(cx, fk).await {
+            Outcome::Ok(obj) => {
+                let _ = self.set_loaded(obj);
+                Outcome::Ok(self.get())
+            }
+            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Cancelled(r) => Outcome::Cancelled(r),
+            Outcome::Panicked(p) => Outcome::Panicked(p),
+        }
+    }
+
     /// Get the loaded object (None if not loaded or FK is null).
     #[must_use]
     pub fn get(&self) -> Option<&T> {
@@ -548,9 +589,14 @@ impl<T: Model> Lazy<T> {
     ///
     /// Returns `Ok(())` if successfully set, `Err` if already loaded.
     pub fn set_loaded(&self, obj: Option<T>) -> Result<(), Option<T>> {
-        self.load_attempted
-            .store(true, std::sync::atomic::Ordering::Release);
-        self.loaded.set(obj)
+        match self.loaded.set(obj) {
+            Ok(()) => {
+                self.load_attempted
+                    .store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            }
+            Err(v) => Err(v),
+        }
     }
 
     /// Reset the lazy relationship to unloaded state.
@@ -639,6 +685,7 @@ where
 mod tests {
     use super::*;
     use crate::{FieldInfo, Result, Row};
+    use asupersync::runtime::RuntimeBuilder;
     use serde::{Deserialize, Serialize};
 
     #[test]
@@ -1031,6 +1078,120 @@ mod tests {
         assert!(lazy.set_loaded(None).is_ok());
         assert!(lazy.is_loaded());
         assert!(lazy.set_loaded(None).is_err());
+    }
+
+    #[test]
+    fn test_lazy_load_fetches_from_loader_and_caches() {
+        #[derive(Default)]
+        struct Loader {
+            calls: usize,
+        }
+
+        impl LazyLoader<Team> for Loader {
+            fn get(
+                &mut self,
+                _cx: &Cx,
+                pk: Value,
+            ) -> impl Future<Output = Outcome<Option<Team>, Error>> + Send {
+                self.calls += 1;
+                let team = match pk {
+                    Value::BigInt(1) => Some(Team {
+                        id: Some(1),
+                        name: "Avengers".to_string(),
+                    }),
+                    _ => None,
+                };
+                async move { Outcome::Ok(team) }
+            }
+        }
+
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        rt.block_on(async {
+            let mut lazy = Lazy::<Team>::from_fk(1_i64);
+            let mut loader = Loader::default();
+
+            let loaded = lazy.load(&cx, &mut loader).await;
+            assert!(matches!(loaded, Outcome::Ok(Some(_))));
+            assert!(lazy.is_loaded());
+            assert_eq!(loader.calls, 1);
+
+            // Cached: no second call to the loader
+            let loaded2 = lazy.load(&cx, &mut loader).await;
+            assert!(matches!(loaded2, Outcome::Ok(Some(_))));
+            assert_eq!(loader.calls, 1);
+        });
+    }
+
+    #[test]
+    fn test_lazy_load_empty_returns_none_without_calling_loader() {
+        #[derive(Default)]
+        struct Loader {
+            calls: usize,
+        }
+
+        impl LazyLoader<Team> for Loader {
+            fn get(
+                &mut self,
+                _cx: &Cx,
+                _pk: Value,
+            ) -> impl Future<Output = Outcome<Option<Team>, Error>> + Send {
+                self.calls += 1;
+                async { Outcome::Ok(None) }
+            }
+        }
+
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        rt.block_on(async {
+            let mut lazy = Lazy::<Team>::empty();
+            let mut loader = Loader::default();
+
+            let loaded = lazy.load(&cx, &mut loader).await;
+            assert!(matches!(loaded, Outcome::Ok(None)));
+            assert!(lazy.is_loaded());
+            assert_eq!(loader.calls, 0);
+        });
+    }
+
+    #[test]
+    fn test_lazy_load_error_does_not_mark_loaded() {
+        #[derive(Default)]
+        struct Loader {
+            calls: usize,
+        }
+
+        impl LazyLoader<Team> for Loader {
+            fn get(
+                &mut self,
+                _cx: &Cx,
+                _pk: Value,
+            ) -> impl Future<Output = Outcome<Option<Team>, Error>> + Send {
+                self.calls += 1;
+                async { Outcome::Err(Error::Custom("boom".to_string())) }
+            }
+        }
+
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        rt.block_on(async {
+            let mut lazy = Lazy::<Team>::from_fk(1_i64);
+            let mut loader = Loader::default();
+
+            let loaded = lazy.load(&cx, &mut loader).await;
+            assert!(matches!(loaded, Outcome::Err(_)));
+            assert!(!lazy.is_loaded());
+            assert_eq!(loader.calls, 1);
+        });
     }
 
     #[test]

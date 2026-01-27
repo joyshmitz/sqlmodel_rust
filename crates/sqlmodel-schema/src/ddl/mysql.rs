@@ -3,9 +3,9 @@
 //! MySQL has comprehensive ALTER TABLE support for most schema operations.
 
 use super::{
-    format_column_def, format_fk_constraint, generate_add_column, generate_create_index,
-    generate_create_table, generate_drop_index, generate_drop_table, generate_rename_column,
-    generate_rename_table, quote_identifier, DdlGenerator,
+    format_fk_constraint, generate_add_column, generate_create_index, generate_create_table,
+    generate_drop_index, generate_drop_table, generate_rename_column, generate_rename_table,
+    quote_identifier, DdlGenerator,
 };
 use crate::diff::SchemaOperation;
 use crate::introspect::Dialect;
