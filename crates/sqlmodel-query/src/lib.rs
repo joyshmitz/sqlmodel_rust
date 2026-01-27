@@ -5,6 +5,7 @@
 
 pub mod builder;
 pub mod clause;
+pub mod eager;
 pub mod expr;
 pub mod join;
 pub mod select;

@@ -1094,6 +1094,7 @@ dependencies = [
  "serde",
  "sqlmodel-core",
  "sqlmodel-macros",
+ "tracing",
 ]
 
 [[package]]
