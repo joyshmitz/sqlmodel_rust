@@ -214,15 +214,17 @@ impl SetOperation {
 
 /// Create a UNION of multiple queries.
 ///
+/// Returns `None` if the iterator is empty.
+///
 /// # Example
 ///
 /// ```ignore
 /// let query = union([
 ///     ("SELECT * FROM users WHERE role = 'admin'", vec![]),
 ///     ("SELECT * FROM users WHERE role = 'manager'", vec![]),
-/// ]);
+/// ]).expect("at least one query required");
 /// ```
-pub fn union<I, S>(queries: I) -> SetOperation
+pub fn union<I, S>(queries: I) -> Option<SetOperation>
 where
     I: IntoIterator<Item = (S, Vec<Value>)>,
     S: Into<String>,
@@ -232,6 +234,8 @@ where
 
 /// Create a UNION ALL of multiple queries.
 ///
+/// Returns `None` if the iterator is empty.
+///
 /// # Example
 ///
 /// ```ignore
@@ -239,9 +243,9 @@ where
 ///     ("SELECT id FROM table1", vec![]),
 ///     ("SELECT id FROM table2", vec![]),
 ///     ("SELECT id FROM table3", vec![]),
-/// ]);
+/// ]).expect("at least one query required");
 /// ```
-pub fn union_all<I, S>(queries: I) -> SetOperation
+pub fn union_all<I, S>(queries: I) -> Option<SetOperation>
 where
     I: IntoIterator<Item = (S, Vec<Value>)>,
     S: Into<String>,
@@ -250,7 +254,9 @@ where
 }
 
 /// Create an INTERSECT of multiple queries.
-pub fn intersect<I, S>(queries: I) -> SetOperation
+///
+/// Returns `None` if the iterator is empty.
+pub fn intersect<I, S>(queries: I) -> Option<SetOperation>
 where
     I: IntoIterator<Item = (S, Vec<Value>)>,
     S: Into<String>,
@@ -259,7 +265,9 @@ where
 }
 
 /// Create an INTERSECT ALL of multiple queries.
-pub fn intersect_all<I, S>(queries: I) -> SetOperation
+///
+/// Returns `None` if the iterator is empty.
+pub fn intersect_all<I, S>(queries: I) -> Option<SetOperation>
 where
     I: IntoIterator<Item = (S, Vec<Value>)>,
     S: Into<String>,
@@ -268,7 +276,9 @@ where
 }
 
 /// Create an EXCEPT of multiple queries.
-pub fn except<I, S>(queries: I) -> SetOperation
+///
+/// Returns `None` if the iterator is empty.
+pub fn except<I, S>(queries: I) -> Option<SetOperation>
 where
     I: IntoIterator<Item = (S, Vec<Value>)>,
     S: Into<String>,
@@ -277,7 +287,9 @@ where
 }
 
 /// Create an EXCEPT ALL of multiple queries.
-pub fn except_all<I, S>(queries: I) -> SetOperation
+///
+/// Returns `None` if the iterator is empty.
+pub fn except_all<I, S>(queries: I) -> Option<SetOperation>
 where
     I: IntoIterator<Item = (S, Vec<Value>)>,
     S: Into<String>,
@@ -285,17 +297,15 @@ where
     combine_queries(SetOpType::ExceptAll, queries)
 }
 
-fn combine_queries<I, S>(op: SetOpType, queries: I) -> SetOperation
+fn combine_queries<I, S>(op: SetOpType, queries: I) -> Option<SetOperation>
 where
     I: IntoIterator<Item = (S, Vec<Value>)>,
     S: Into<String>,
 {
     let mut iter = queries.into_iter();
 
-    // Get the first query
-    let (first_sql, first_params) = iter
-        .next()
-        .expect("set operation requires at least one query");
+    // Get the first query, return None if empty
+    let (first_sql, first_params) = iter.next()?;
 
     let mut result = SetOperation::new(first_sql, first_params);
 
@@ -304,7 +314,7 @@ where
         result = result.add_op(op, sql, params);
     }
 
-    result
+    Some(result)
 }
 
 // ==================== Tests ====================
@@ -364,7 +374,8 @@ mod tests {
             ("SELECT * FROM admins", vec![]),
             ("SELECT * FROM managers", vec![]),
             ("SELECT * FROM employees", vec![]),
-        ]);
+        ])
+        .expect("non-empty iterator");
 
         let (sql, _) = query.build();
         assert!(sql.contains("UNION"));
@@ -380,11 +391,18 @@ mod tests {
             ("SELECT 1", vec![]),
             ("SELECT 2", vec![]),
             ("SELECT 3", vec![]),
-        ]);
+        ])
+        .expect("non-empty iterator");
 
         let (sql, _) = query.build();
         // Should have two UNION ALL operations
         assert_eq!(sql.matches("UNION ALL").count(), 2);
+    }
+
+    #[test]
+    fn test_union_empty_returns_none() {
+        let empty: Vec<(&str, Vec<Value>)> = vec![];
+        assert!(union(empty).is_none());
     }
 
     #[test]
@@ -420,7 +438,9 @@ mod tests {
 
     #[test]
     fn test_intersect_all() {
-        let query = intersect_all([("SELECT id FROM t1", vec![]), ("SELECT id FROM t2", vec![])]);
+        let query =
+            intersect_all([("SELECT id FROM t1", vec![]), ("SELECT id FROM t2", vec![])])
+                .expect("non-empty iterator");
 
         let (sql, _) = query.build();
         assert!(sql.contains("INTERSECT ALL"));
@@ -438,7 +458,8 @@ mod tests {
 
     #[test]
     fn test_except_all() {
-        let query = except_all([("SELECT id FROM t1", vec![]), ("SELECT id FROM t2", vec![])]);
+        let query = except_all([("SELECT id FROM t1", vec![]), ("SELECT id FROM t2", vec![])])
+            .expect("non-empty iterator");
 
         let (sql, _) = query.build();
         assert!(sql.contains("EXCEPT ALL"));
