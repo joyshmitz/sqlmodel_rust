@@ -530,6 +530,8 @@ impl<T: Model> RelatedMany<T> {
     /// The object should already exist in the database. This method
     /// records the relationship to be persisted when flush() is called.
     ///
+    /// Duplicate links to the same object are ignored (only one INSERT will occur).
+    ///
     /// # Example
     ///
     /// ```ignore
@@ -538,8 +540,21 @@ impl<T: Model> RelatedMany<T> {
     /// ```
     pub fn link(&self, obj: &T) {
         let pk = obj.primary_key_value();
-        if let Ok(mut pending) = self.pending_links.lock() {
-            pending.push(pk);
+        match self.pending_links.lock() {
+            Ok(mut pending) => {
+                // Prevent duplicates - only add if not already pending
+                if !pending.contains(&pk) {
+                    pending.push(pk);
+                }
+            }
+            Err(poisoned) => {
+                // Mutex was poisoned - recover by taking the lock anyway
+                // This is safe because we're just adding to a Vec
+                let mut pending = poisoned.into_inner();
+                if !pending.contains(&pk) {
+                    pending.push(pk);
+                }
+            }
         }
     }
 
@@ -547,6 +562,8 @@ impl<T: Model> RelatedMany<T> {
     ///
     /// This method records the relationship removal to be persisted
     /// when flush() is called.
+    ///
+    /// Duplicate unlinks to the same object are ignored (only one DELETE will occur).
     ///
     /// # Example
     ///
@@ -556,8 +573,21 @@ impl<T: Model> RelatedMany<T> {
     /// ```
     pub fn unlink(&self, obj: &T) {
         let pk = obj.primary_key_value();
-        if let Ok(mut pending) = self.pending_unlinks.lock() {
-            pending.push(pk);
+        match self.pending_unlinks.lock() {
+            Ok(mut pending) => {
+                // Prevent duplicates - only add if not already pending
+                if !pending.contains(&pk) {
+                    pending.push(pk);
+                }
+            }
+            Err(poisoned) => {
+                // Mutex was poisoned - recover by taking the lock anyway
+                // This is safe because we're just adding to a Vec
+                let mut pending = poisoned.into_inner();
+                if !pending.contains(&pk) {
+                    pending.push(pk);
+                }
+            }
         }
     }
 

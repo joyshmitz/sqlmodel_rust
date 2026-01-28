@@ -505,6 +505,16 @@ impl FlushPlan {
             return Outcome::Ok(0);
         };
 
+        // Skip if no primary key columns - cannot safely DELETE without WHERE clause
+        if pk_columns.is_empty() {
+            tracing::warn!(
+                table = table,
+                count = ops.len(),
+                "Skipping DELETE batch for table without primary key - cannot identify rows"
+            );
+            return Outcome::Ok(0);
+        }
+
         tracing::debug!(table = table, count = ops.len(), "Executing delete batch");
 
         // For simple single-column PK, use IN clause
@@ -592,6 +602,15 @@ impl FlushPlan {
         else {
             return Outcome::Ok(());
         };
+
+        // Skip if no primary key columns/values - cannot safely UPDATE without WHERE clause
+        if pk_columns.is_empty() || pk_values.is_empty() {
+            tracing::warn!(
+                table = *table,
+                "Skipping UPDATE for row without primary key - cannot identify row"
+            );
+            return Outcome::Ok(());
+        }
 
         if set_columns.is_empty() {
             return Outcome::Ok(());

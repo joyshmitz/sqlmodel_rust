@@ -383,9 +383,16 @@ impl<C: Connection> Session<C> {
     pub fn add<M: Model + Clone + Send + Sync + Serialize + 'static>(&mut self, obj: &M) {
         let key = ObjectKey::from_model(obj);
 
-        // If already tracked, update the object
+        // If already tracked, update the object and its values
         if let Some(tracked) = self.identity_map.get_mut(&key) {
             tracked.object = Box::new(obj.clone());
+
+            // Update stored values to match the new object state
+            let row_data = obj.to_row();
+            tracked.column_names = row_data.iter().map(|(name, _)| *name).collect();
+            tracked.values = row_data.into_iter().map(|(_, v)| v).collect();
+            tracked.pk_values = obj.primary_key_value();
+
             if tracked.state == ObjectState::Deleted {
                 // Un-delete: restore to persistent or new
                 tracked.state = if tracked.original_state.is_some() {
@@ -446,6 +453,42 @@ impl<C: Connection> Session<C> {
         }
     }
 
+    /// Mark an object as dirty (modified) so it will be UPDATEd on flush.
+    ///
+    /// This updates the stored values from the object and schedules an UPDATE.
+    /// Only works for objects that are already tracked as Persistent.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut hero = session.get::<Hero>(1).await?.unwrap();
+    /// hero.name = "New Name".to_string();
+    /// session.mark_dirty(&hero);  // Schedule for UPDATE
+    /// session.flush(cx).await?;   // Execute the UPDATE
+    /// ```
+    pub fn mark_dirty<M: Model + Clone + Send + Sync + Serialize + 'static>(&mut self, obj: &M) {
+        let key = ObjectKey::from_model(obj);
+
+        if let Some(tracked) = self.identity_map.get_mut(&key) {
+            // Only mark persistent objects as dirty
+            if tracked.state != ObjectState::Persistent {
+                return;
+            }
+
+            // Update the stored object and values
+            tracked.object = Box::new(obj.clone());
+            let row_data = obj.to_row();
+            tracked.column_names = row_data.iter().map(|(name, _)| *name).collect();
+            tracked.values = row_data.into_iter().map(|(_, v)| v).collect();
+            tracked.pk_values = obj.primary_key_value();
+
+            // Add to pending dirty if not already there
+            if !self.pending_dirty.contains(&key) {
+                self.pending_dirty.push(key);
+            }
+        }
+    }
+
     /// Get an object by primary key.
     ///
     /// First checks the identity map, then queries the database if not found.
@@ -494,13 +537,13 @@ impl<C: Connection> Session<C> {
             Err(e) => return Outcome::Err(e),
         };
 
-        // Add to identity map with full tracking data
-        let serialized = serde_json::to_vec(&obj).ok();
-
         // Extract column data from the model while we have the concrete type
         let row_data = obj.to_row();
         let column_names: Vec<&'static str> = row_data.iter().map(|(name, _)| *name).collect();
         let values: Vec<Value> = row_data.into_iter().map(|(_, v)| v).collect();
+
+        // Serialize values for dirty checking (must match format used in flush)
+        let serialized = serde_json::to_vec(&values).ok();
 
         // Extract primary key info
         let pk_columns: Vec<&'static str> = M::PRIMARY_KEY.to_vec();
@@ -588,6 +631,15 @@ impl<C: Connection> Session<C> {
         let deletes: Vec<ObjectKey> = std::mem::take(&mut self.pending_delete);
         for key in &deletes {
             if let Some(tracked) = self.identity_map.get(key) {
+                // Skip objects without primary keys - cannot safely DELETE without WHERE clause
+                if tracked.pk_columns.is_empty() || tracked.pk_values.is_empty() {
+                    tracing::warn!(
+                        table = tracked.table_name,
+                        "Skipping DELETE for object without primary key - cannot identify row"
+                    );
+                    continue;
+                }
+
                 // Build WHERE clause from primary key columns and values
                 let where_parts: Vec<String> = tracked
                     .pk_columns
@@ -661,6 +713,15 @@ impl<C: Connection> Session<C> {
         let dirty: Vec<ObjectKey> = std::mem::take(&mut self.pending_dirty);
         for key in &dirty {
             if let Some(tracked) = self.identity_map.get_mut(key) {
+                // Skip objects without primary keys - cannot safely UPDATE without WHERE clause
+                if tracked.pk_columns.is_empty() || tracked.pk_values.is_empty() {
+                    tracing::warn!(
+                        table = tracked.table_name,
+                        "Skipping UPDATE for object without primary key - cannot identify row"
+                    );
+                    continue;
+                }
+
                 // Check if actually dirty by comparing serialized state
                 let current_state = serde_json::to_vec(&tracked.values).unwrap_or_default();
                 let is_dirty = tracked.original_state.as_ref() != Some(&current_state);
@@ -954,7 +1015,6 @@ impl<C: Connection> Session<C> {
                     let pk_hash = hash_values(&pk_values);
 
                     // Add to session identity map
-                    let serialized = serde_json::to_vec(&obj).ok();
                     let key = ObjectKey::from_pk::<T>(&pk_values);
 
                     // Extract column data from the model while we have the concrete type
@@ -962,6 +1022,9 @@ impl<C: Connection> Session<C> {
                     let column_names: Vec<&'static str> =
                         row_data.iter().map(|(name, _)| *name).collect();
                     let values: Vec<Value> = row_data.into_iter().map(|(_, v)| v).collect();
+
+                    // Serialize values for dirty checking (must match format used in flush)
+                    let serialized = serde_json::to_vec(&values).ok();
 
                     let tracked = TrackedObject {
                         object: Box::new(obj.clone()),
