@@ -8,7 +8,7 @@
 
 **SQL databases in Rust, designed to be intuitive and type-safe.**
 
-[![CI](https://github.com/sqlmodel/sqlmodel-rust/actions/workflows/ci.yml/badge.svg)](https://github.com/sqlmodel/sqlmodel-rust/actions/workflows/ci.yml)
+[![CI](https://github.com/Dicklesworthstone/sqlmodel_rust/actions/workflows/ci.yml/badge.svg)](https://github.com/Dicklesworthstone/sqlmodel_rust/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/License-MIT%20OR%20Apache--2.0-blue.svg)](LICENSE-MIT)
 [![Rust: Nightly](https://img.shields.io/badge/Rust-nightly-orange.svg)](https://www.rust-lang.org/)
 
