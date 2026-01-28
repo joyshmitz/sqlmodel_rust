@@ -394,12 +394,19 @@ impl<C: Connection> Session<C> {
             tracked.pk_values = obj.primary_key_value();
 
             if tracked.state == ObjectState::Deleted {
-                // Un-delete: restore to persistent or new
-                tracked.state = if tracked.original_state.is_some() {
-                    ObjectState::Persistent
+                // Un-delete: remove from pending_delete and restore state
+                self.pending_delete.retain(|k| k != &key);
+
+                if tracked.original_state.is_some() {
+                    // Was previously persisted - restore to Persistent (will need UPDATE if changed)
+                    tracked.state = ObjectState::Persistent;
                 } else {
-                    ObjectState::New
-                };
+                    // Was never persisted - restore to New and schedule for INSERT
+                    tracked.state = ObjectState::New;
+                    if !self.pending_new.contains(&key) {
+                        self.pending_new.push(key);
+                    }
+                }
             }
             return;
         }
@@ -629,8 +636,14 @@ impl<C: Connection> Session<C> {
 
         // 1. Execute DELETEs first (to respect FK constraints)
         let deletes: Vec<ObjectKey> = std::mem::take(&mut self.pending_delete);
+        let mut actually_deleted: Vec<ObjectKey> = Vec::new();
         for key in &deletes {
             if let Some(tracked) = self.identity_map.get(key) {
+                // Skip if object was un-deleted (state changed from Deleted)
+                if tracked.state != ObjectState::Deleted {
+                    continue;
+                }
+
                 // Skip objects without primary keys - cannot safely DELETE without WHERE clause
                 if tracked.pk_columns.is_empty() || tracked.pk_values.is_empty() {
                     tracing::warn!(
@@ -655,7 +668,9 @@ impl<C: Connection> Session<C> {
                 );
 
                 match self.connection.execute(cx, &sql, &tracked.pk_values).await {
-                    Outcome::Ok(_) => {}
+                    Outcome::Ok(_) => {
+                        actually_deleted.push(*key);
+                    }
                     Outcome::Err(e) => {
                         self.pending_delete = deletes;
                         return Outcome::Err(e);
@@ -666,8 +681,8 @@ impl<C: Connection> Session<C> {
             }
         }
 
-        // Remove deleted objects from identity map
-        for key in &deletes {
+        // Remove only actually deleted objects from identity map
+        for key in &actually_deleted {
             self.identity_map.remove(key);
         }
 
@@ -713,6 +728,11 @@ impl<C: Connection> Session<C> {
         let dirty: Vec<ObjectKey> = std::mem::take(&mut self.pending_dirty);
         for key in &dirty {
             if let Some(tracked) = self.identity_map.get_mut(key) {
+                // Only UPDATE persistent objects
+                if tracked.state != ObjectState::Persistent {
+                    continue;
+                }
+
                 // Skip objects without primary keys - cannot safely UPDATE without WHERE clause
                 if tracked.pk_columns.is_empty() || tracked.pk_values.is_empty() {
                     tracing::warn!(

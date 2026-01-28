@@ -563,6 +563,15 @@ impl FlushPlan {
                     ..
                 } = op
                 {
+                    // Skip if pk_values is empty - would cause parameter mismatch
+                    if pk_values.is_empty() {
+                        tracing::warn!(
+                            table = table,
+                            "Skipping DELETE for row with empty primary key values"
+                        );
+                        continue;
+                    }
+
                     let where_clause: String = pk_columns
                         .iter()
                         .enumerate()
