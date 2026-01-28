@@ -59,6 +59,9 @@ asupersync = { path = "../asupersync" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Validation
+regex = "1"
+
 # Logging
 tracing = "0.1"
 
