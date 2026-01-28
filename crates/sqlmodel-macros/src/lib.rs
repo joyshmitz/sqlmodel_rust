@@ -266,6 +266,26 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
         };
 
         let computed = field.computed;
+        let exclude = field.exclude;
+
+        // Schema metadata tokens
+        let title_token = if let Some(ref title) = field.title {
+            quote::quote! { Some(#title) }
+        } else {
+            quote::quote! { None }
+        };
+
+        let description_token = if let Some(ref desc) = field.description {
+            quote::quote! { Some(#desc) }
+        } else {
+            quote::quote! { None }
+        };
+
+        let schema_extra_token = if let Some(ref extra) = field.schema_extra {
+            quote::quote! { Some(#extra) }
+        } else {
+            quote::quote! { None }
+        };
 
         // Decimal precision (max_digits -> precision, decimal_places -> scale)
         let precision_token = if let Some(p) = field.max_digits {
@@ -298,6 +318,10 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
                 .validation_alias_opt(#validation_alias_token)
                 .serialization_alias_opt(#serialization_alias_token)
                 .computed(#computed)
+                .exclude(#exclude)
+                .title_opt(#title_token)
+                .description_opt(#description_token)
+                .schema_extra_opt(#schema_extra_token)
         });
     }
 

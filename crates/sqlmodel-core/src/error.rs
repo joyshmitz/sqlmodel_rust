@@ -214,6 +214,14 @@ pub enum ValidationErrorKind {
     Custom,
     /// Model-level validation failed
     Model,
+    /// Value is not a multiple of the specified divisor
+    MultipleOf,
+    /// Collection has fewer items than minimum
+    MinItems,
+    /// Collection has more items than maximum
+    MaxItems,
+    /// Collection contains duplicate items
+    UniqueItems,
 }
 
 impl ValidationError {
@@ -266,6 +274,55 @@ impl ValidationError {
             field,
             ValidationErrorKind::Max,
             format!("must be at most {max}, got {actual}"),
+        );
+    }
+
+    /// Add a multiple_of error.
+    ///
+    /// Used when a numeric value is not a multiple of the specified divisor.
+    pub fn add_multiple_of(
+        &mut self,
+        field: impl Into<String>,
+        divisor: impl std::fmt::Display,
+        actual: impl std::fmt::Display,
+    ) {
+        self.add(
+            field,
+            ValidationErrorKind::MultipleOf,
+            format!("must be a multiple of {divisor}, got {actual}"),
+        );
+    }
+
+    /// Add a min_items error for collections.
+    ///
+    /// Used when a collection has fewer items than the minimum required.
+    pub fn add_min_items(&mut self, field: impl Into<String>, min: usize, actual: usize) {
+        self.add(
+            field,
+            ValidationErrorKind::MinItems,
+            format!("must have at least {min} items, got {actual}"),
+        );
+    }
+
+    /// Add a max_items error for collections.
+    ///
+    /// Used when a collection has more items than the maximum allowed.
+    pub fn add_max_items(&mut self, field: impl Into<String>, max: usize, actual: usize) {
+        self.add(
+            field,
+            ValidationErrorKind::MaxItems,
+            format!("must have at most {max} items, got {actual}"),
+        );
+    }
+
+    /// Add a unique_items error for collections.
+    ///
+    /// Used when a collection contains duplicate items.
+    pub fn add_unique_items(&mut self, field: impl Into<String>, duplicate_count: usize) {
+        self.add(
+            field,
+            ValidationErrorKind::UniqueItems,
+            format!("must have unique items, found {duplicate_count} duplicate(s)"),
         );
     }
 

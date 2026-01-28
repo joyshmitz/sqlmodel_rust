@@ -98,6 +98,18 @@ pub struct FieldInfo {
     /// Computed fields are excluded from database operations but included
     /// in serialization (model_dump) unless exclude_computed_fields is set.
     pub computed: bool,
+    /// Whether to exclude this field from serialization (model_dump).
+    /// When true, the field will never appear in serialized output.
+    pub exclude: bool,
+    /// Schema title for JSON Schema generation.
+    /// Used as the "title" property in the generated JSON Schema.
+    pub title: Option<&'static str>,
+    /// Schema description for JSON Schema generation.
+    /// Used as the "description" property in the generated JSON Schema.
+    pub description: Option<&'static str>,
+    /// Extra JSON Schema properties (as JSON string, merged into schema).
+    /// The string should be valid JSON that will be merged into the field's schema.
+    pub schema_extra: Option<&'static str>,
 }
 
 impl FieldInfo {
@@ -123,6 +135,10 @@ impl FieldInfo {
             validation_alias: None,
             serialization_alias: None,
             computed: false,
+            exclude: false,
+            title: None,
+            description: None,
+            schema_extra: None,
         }
     }
 
@@ -377,6 +393,70 @@ impl FieldInfo {
     /// Use this for fields whose value is derived from other fields at access time.
     pub const fn computed(mut self, value: bool) -> Self {
         self.computed = value;
+        self
+    }
+
+    /// Mark this field as excluded from serialization (model_dump).
+    ///
+    /// Excluded fields will never appear in serialized output, regardless
+    /// of other serialization settings. This is useful for sensitive data
+    /// like passwords or internal fields.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// #[derive(Model)]
+    /// struct User {
+    ///     id: i32,
+    ///     #[sqlmodel(exclude)]
+    ///     password_hash: String,  // Never serialized
+    /// }
+    /// ```
+    pub const fn exclude(mut self, value: bool) -> Self {
+        self.exclude = value;
+        self
+    }
+
+    /// Set the schema title for JSON Schema generation.
+    ///
+    /// The title appears as the "title" property in the field's JSON Schema.
+    pub const fn title(mut self, value: &'static str) -> Self {
+        self.title = Some(value);
+        self
+    }
+
+    /// Set the schema title from optional.
+    pub const fn title_opt(mut self, value: Option<&'static str>) -> Self {
+        self.title = value;
+        self
+    }
+
+    /// Set the schema description for JSON Schema generation.
+    ///
+    /// The description appears as the "description" property in the field's JSON Schema.
+    pub const fn description(mut self, value: &'static str) -> Self {
+        self.description = Some(value);
+        self
+    }
+
+    /// Set the schema description from optional.
+    pub const fn description_opt(mut self, value: Option<&'static str>) -> Self {
+        self.description = value;
+        self
+    }
+
+    /// Set extra JSON Schema properties (as JSON string).
+    ///
+    /// The string should be valid JSON that will be merged into the field's schema.
+    /// For example: `{"examples": ["John Doe"], "minLength": 1}`
+    pub const fn schema_extra(mut self, value: &'static str) -> Self {
+        self.schema_extra = Some(value);
+        self
+    }
+
+    /// Set schema_extra from optional.
+    pub const fn schema_extra_opt(mut self, value: Option<&'static str>) -> Self {
+        self.schema_extra = value;
         self
     }
 
@@ -806,5 +886,74 @@ mod tests {
             .validation_alias("user_name")
             .serialization_alias("userName");
         assert!(field5.has_alias());
+    }
+
+    #[test]
+    fn test_field_info_exclude() {
+        // Default: not excluded
+        let field1 = FieldInfo::new("name", "name", SqlType::Text);
+        assert!(!field1.exclude);
+
+        // Excluded field
+        let field2 = FieldInfo::new("password", "password", SqlType::Text).exclude(true);
+        assert!(field2.exclude);
+
+        // Exclude can be explicitly set to false
+        let field3 = FieldInfo::new("email", "email", SqlType::Text).exclude(false);
+        assert!(!field3.exclude);
+    }
+
+    #[test]
+    fn test_field_info_exclude_combined_with_other_attrs() {
+        // Exclude can be combined with other attributes
+        let field = FieldInfo::new("secret", "secret", SqlType::Text)
+            .exclude(true)
+            .nullable(true)
+            .alias("hidden_value");
+
+        assert!(field.exclude);
+        assert!(field.nullable);
+        assert_eq!(field.alias, Some("hidden_value"));
+    }
+
+    #[test]
+    fn test_field_info_title() {
+        let field1 = FieldInfo::new("name", "name", SqlType::Text);
+        assert_eq!(field1.title, None);
+
+        let field2 = FieldInfo::new("name", "name", SqlType::Text).title("User Name");
+        assert_eq!(field2.title, Some("User Name"));
+    }
+
+    #[test]
+    fn test_field_info_description() {
+        let field1 = FieldInfo::new("name", "name", SqlType::Text);
+        assert_eq!(field1.description, None);
+
+        let field2 =
+            FieldInfo::new("name", "name", SqlType::Text).description("The full name of the user");
+        assert_eq!(field2.description, Some("The full name of the user"));
+    }
+
+    #[test]
+    fn test_field_info_schema_extra() {
+        let field1 = FieldInfo::new("name", "name", SqlType::Text);
+        assert_eq!(field1.schema_extra, None);
+
+        let field2 =
+            FieldInfo::new("name", "name", SqlType::Text).schema_extra(r#"{"examples": ["John"]}"#);
+        assert_eq!(field2.schema_extra, Some(r#"{"examples": ["John"]}"#));
+    }
+
+    #[test]
+    fn test_field_info_all_schema_metadata() {
+        let field = FieldInfo::new("name", "name", SqlType::Text)
+            .title("User Name")
+            .description("The full name of the user")
+            .schema_extra(r#"{"examples": ["John Doe"]}"#);
+
+        assert_eq!(field.title, Some("User Name"));
+        assert_eq!(field.description, Some("The full name of the user"));
+        assert_eq!(field.schema_extra, Some(r#"{"examples": ["John Doe"]}"#));
     }
 }

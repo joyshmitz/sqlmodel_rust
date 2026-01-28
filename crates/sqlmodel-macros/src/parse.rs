@@ -108,6 +108,14 @@ pub struct FieldDef {
     /// Number of digits after decimal point for Decimal/Numeric types (scale).
     /// Maps to DECIMAL(max_digits, decimal_places) in SQL.
     pub decimal_places: Option<u8>,
+    /// Exclude this field from serialization (model_dump).
+    pub exclude: bool,
+    /// Schema title for JSON Schema generation.
+    pub title: Option<String>,
+    /// Schema description for JSON Schema generation.
+    pub description: Option<String>,
+    /// Extra JSON Schema properties (merged into schema).
+    pub schema_extra: Option<String>,
 }
 
 /// Parsed relationship attribute from `#[sqlmodel(relationship(...))]`.
@@ -662,6 +670,10 @@ fn parse_field(field: &Field) -> Result<FieldDef> {
         computed: attrs.computed,
         max_digits: attrs.max_digits,
         decimal_places: attrs.decimal_places,
+        exclude: attrs.exclude,
+        title: attrs.title,
+        description: attrs.description,
+        schema_extra: attrs.schema_extra,
     })
 }
 
@@ -691,6 +703,14 @@ struct FieldAttrs {
     max_digits: Option<u8>,
     /// Number of digits after decimal point for Decimal/Numeric types (scale).
     decimal_places: Option<u8>,
+    /// Exclude this field from serialization.
+    exclude: bool,
+    /// Schema title for JSON Schema generation.
+    title: Option<String>,
+    /// Schema description for JSON Schema generation.
+    description: Option<String>,
+    /// Extra JSON Schema properties (merged into schema).
+    schema_extra: Option<String>,
 }
 
 /// Detect the relationship kind from a field's Rust type.
@@ -886,6 +906,38 @@ fn parse_field_attrs(
                 }
             } else if path.is_ident("computed") {
                 result.computed = true;
+            } else if path.is_ident("exclude") {
+                result.exclude = true;
+            } else if path.is_ident("title") {
+                let value: Lit = meta.value()?.parse()?;
+                if let Lit::Str(lit_str) = value {
+                    result.title = Some(lit_str.value());
+                } else {
+                    return Err(Error::new_spanned(
+                        value,
+                        "expected string literal for title",
+                    ));
+                }
+            } else if path.is_ident("description") {
+                let value: Lit = meta.value()?.parse()?;
+                if let Lit::Str(lit_str) = value {
+                    result.description = Some(lit_str.value());
+                } else {
+                    return Err(Error::new_spanned(
+                        value,
+                        "expected string literal for description",
+                    ));
+                }
+            } else if path.is_ident("schema_extra") {
+                let value: Lit = meta.value()?.parse()?;
+                if let Lit::Str(lit_str) = value {
+                    result.schema_extra = Some(lit_str.value());
+                } else {
+                    return Err(Error::new_spanned(
+                        value,
+                        "expected string literal for schema_extra",
+                    ));
+                }
             } else if path.is_ident("max_digits") {
                 let value: Lit = meta.value()?.parse()?;
                 if let Lit::Int(lit_int) = value {
@@ -1986,6 +2038,144 @@ mod tests {
         let def = parse_model(&input).unwrap();
         let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
         assert_eq!(name_field.alias, Some("user-name_v2".to_string()));
+    }
+
+    // =========================================================================
+    // Field Schema Metadata Tests (title, description, schema_extra)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_field_title() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(title = "User Name")]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(name_field.title, Some("User Name".to_string()));
+    }
+
+    #[test]
+    fn test_parse_field_description() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(description = "The full name of the user")]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(
+            name_field.description,
+            Some("The full name of the user".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_field_schema_extra() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(schema_extra = r#"{"examples": ["John Doe"]}"#)]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(
+            name_field.schema_extra,
+            Some(r#"{"examples": ["John Doe"]}"#.to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_all_schema_metadata_combined() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(
+                    title = "User Name",
+                    description = "The full name of the user",
+                    schema_extra = r#"{"examples": ["John Doe"], "minLength": 1}"#
+                )]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(name_field.title, Some("User Name".to_string()));
+        assert_eq!(
+            name_field.description,
+            Some("The full name of the user".to_string())
+        );
+        assert_eq!(
+            name_field.schema_extra,
+            Some(r#"{"examples": ["John Doe"], "minLength": 1}"#.to_string())
+        );
+    }
+
+    // =========================================================================
+    // Field Exclude Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_exclude_attribute() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(exclude)]
+                password_hash: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let password_field = def
+            .fields
+            .iter()
+            .find(|f| f.name == "password_hash")
+            .unwrap();
+        assert!(password_field.exclude);
+
+        let id_field = def.fields.iter().find(|f| f.name == "id").unwrap();
+        assert!(!id_field.exclude);
+    }
+
+    #[test]
+    fn test_exclude_combined_with_other_attrs() {
+        // exclude can be combined with other attributes
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(exclude, alias = "pwd")]
+                password: String,
+                #[sqlmodel(exclude, column = "internal_notes")]
+                notes: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        let password_field = def.fields.iter().find(|f| f.name == "password").unwrap();
+        assert!(password_field.exclude);
+        assert_eq!(password_field.alias, Some("pwd".to_string()));
+
+        let notes_field = def.fields.iter().find(|f| f.name == "notes").unwrap();
+        assert!(notes_field.exclude);
+        assert_eq!(notes_field.column_name, "internal_notes");
     }
 
     // =========================================================================

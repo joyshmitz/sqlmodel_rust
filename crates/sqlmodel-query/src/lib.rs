@@ -20,7 +20,7 @@ pub use clause::{Limit, Offset, OrderBy, Where};
 pub use cte::{Cte, CteRef, WithQuery};
 pub use eager::{EagerLoader, IncludePath};
 pub use expr::{
-    BinaryOp, Expr, UnaryOp, WindowBuilder, WindowFrame, WindowFrameBound, WindowFrameType,
+    BinaryOp, Dialect, Expr, UnaryOp, WindowBuilder, WindowFrame, WindowFrameBound, WindowFrameType,
 };
 pub use join::{Join, JoinType};
 pub use select::Select;

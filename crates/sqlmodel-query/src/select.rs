@@ -470,6 +470,99 @@ impl<M: Model> Select<M> {
         (sql, params)
     }
 
+    /// Convert this SELECT query to an EXISTS expression.
+    ///
+    /// Creates an `Expr::Exists` that can be used in WHERE clauses of other queries.
+    /// For performance, the SELECT is automatically optimized to `SELECT 1` when
+    /// generating the EXISTS subquery.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find customers who have at least one order
+    /// let has_orders = Select::<Order>::new()
+    ///     .filter(Expr::raw("orders.customer_id = customers.id"))
+    ///     .into_exists();
+    ///
+    /// let customers = Select::<Customer>::new()
+    ///     .filter(has_orders)
+    ///     .all(cx, &conn)
+    ///     .await?;
+    ///
+    /// // Generates: SELECT * FROM customers WHERE EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = customers.id)
+    /// ```
+    pub fn into_exists(self) -> Expr {
+        // Build the SELECT 1 version for optimal EXISTS
+        let (sql, params) = self.build_exists_subquery();
+        Expr::exists(sql, params)
+    }
+
+    /// Convert this SELECT query to a NOT EXISTS expression.
+    ///
+    /// Creates an `Expr::Exists` (negated) that can be used in WHERE clauses.
+    /// For performance, the SELECT is automatically optimized to `SELECT 1`.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Find customers with no orders
+    /// let has_no_orders = Select::<Order>::new()
+    ///     .filter(Expr::raw("orders.customer_id = customers.id"))
+    ///     .into_not_exists();
+    ///
+    /// let customers = Select::<Customer>::new()
+    ///     .filter(has_no_orders)
+    ///     .all(cx, &conn)
+    ///     .await?;
+    ///
+    /// // Generates: SELECT * FROM customers WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = customers.id)
+    /// ```
+    pub fn into_not_exists(self) -> Expr {
+        let (sql, params) = self.build_exists_subquery();
+        Expr::not_exists(sql, params)
+    }
+
+    /// Build an optimized EXISTS subquery (SELECT 1 instead of SELECT *).
+    fn build_exists_subquery(&self) -> (String, Vec<Value>) {
+        let mut sql = String::new();
+        let mut params = Vec::new();
+
+        // SELECT 1 for optimal EXISTS performance
+        sql.push_str("SELECT 1 FROM ");
+        sql.push_str(M::TABLE_NAME);
+
+        // JOINs (if any)
+        for join in &self.joins {
+            sql.push_str(&join.build(&mut params, 0));
+        }
+
+        // WHERE
+        if let Some(where_clause) = &self.where_clause {
+            let (where_sql, where_params) = where_clause.build_with_offset(params.len());
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_sql);
+            params.extend(where_params);
+        }
+
+        // GROUP BY (rare in EXISTS but supported)
+        if !self.group_by.is_empty() {
+            sql.push_str(" GROUP BY ");
+            sql.push_str(&self.group_by.join(", "));
+        }
+
+        // HAVING (rare in EXISTS but supported)
+        if let Some(having) = &self.having {
+            let (having_sql, having_params) = having.build_with_offset(params.len());
+            sql.push_str(" HAVING ");
+            sql.push_str(&having_sql);
+            params.extend(having_params);
+        }
+
+        // Note: ORDER BY, LIMIT, OFFSET are omitted in EXISTS subquery as they have no effect
+
+        (sql, params)
+    }
+
     /// Execute the query and return all matching rows as models.
     pub async fn all<C: Connection>(
         self,
@@ -1021,5 +1114,115 @@ mod tests {
         let (sql, _, _) = query.build_eager();
 
         assert!(sql.starts_with("SELECT DISTINCT"));
+    }
+
+    // ==================== EXISTS Tests ====================
+
+    #[test]
+    fn test_select_into_exists() {
+        // Convert a SELECT query into an EXISTS expression
+        let exists_expr = Select::<Hero>::new()
+            .filter(Expr::raw("orders.customer_id = customers.id"))
+            .into_exists();
+
+        let mut params = Vec::new();
+        let sql = exists_expr.build(&mut params, 0);
+
+        // Should generate EXISTS (SELECT 1 FROM heroes WHERE ...)
+        assert_eq!(
+            sql,
+            "EXISTS (SELECT 1 FROM heroes WHERE orders.customer_id = customers.id)"
+        );
+    }
+
+    #[test]
+    fn test_select_into_not_exists() {
+        // Convert a SELECT query into a NOT EXISTS expression
+        let not_exists_expr = Select::<Hero>::new()
+            .filter(Expr::raw("orders.customer_id = customers.id"))
+            .into_not_exists();
+
+        let mut params = Vec::new();
+        let sql = not_exists_expr.build(&mut params, 0);
+
+        assert_eq!(
+            sql,
+            "NOT EXISTS (SELECT 1 FROM heroes WHERE orders.customer_id = customers.id)"
+        );
+    }
+
+    #[test]
+    fn test_select_into_exists_with_params() {
+        // EXISTS subquery with bound parameters
+        let exists_expr = Select::<Hero>::new()
+            .filter(Expr::col("status").eq("active"))
+            .into_exists();
+
+        let mut params = Vec::new();
+        let sql = exists_expr.build(&mut params, 0);
+
+        assert_eq!(sql, "EXISTS (SELECT 1 FROM heroes WHERE \"status\" = $1)");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0], Value::Text("active".to_string()));
+    }
+
+    #[test]
+    fn test_select_into_exists_with_join() {
+        // EXISTS subquery with JOIN
+        let exists_expr = Select::<Hero>::new()
+            .join(Join::inner(
+                "teams",
+                Expr::qualified("heroes", "team_id").eq(Expr::qualified("teams", "id")),
+            ))
+            .filter(Expr::col("active").eq(true))
+            .into_exists();
+
+        let mut params = Vec::new();
+        let sql = exists_expr.build(&mut params, 0);
+
+        assert!(sql.starts_with("EXISTS (SELECT 1 FROM heroes"));
+        assert!(sql.contains("INNER JOIN teams ON"));
+        assert!(sql.contains("WHERE"));
+    }
+
+    #[test]
+    fn test_select_into_exists_omits_order_by_limit() {
+        // ORDER BY, LIMIT, OFFSET should be omitted from EXISTS subquery
+        // as they have no effect and add unnecessary overhead
+        let exists_expr = Select::<Hero>::new()
+            .filter(Expr::col("active").eq(true))
+            .order_by(OrderBy::asc(Expr::col("name")))
+            .limit(10)
+            .offset(5)
+            .into_exists();
+
+        let mut params = Vec::new();
+        let sql = exists_expr.build(&mut params, 0);
+
+        // Should NOT contain ORDER BY, LIMIT, OFFSET
+        assert!(!sql.contains("ORDER BY"));
+        assert!(!sql.contains("LIMIT"));
+        assert!(!sql.contains("OFFSET"));
+        assert_eq!(sql, "EXISTS (SELECT 1 FROM heroes WHERE \"active\" = $1)");
+    }
+
+    #[test]
+    fn test_exists_in_outer_query() {
+        // Use EXISTS expression in a WHERE clause of another query
+        let has_heroes = Select::<Hero>::new()
+            .filter(Expr::raw("heroes.team_id = teams.id"))
+            .into_exists();
+
+        // Note: We'd need a Team model to properly test this,
+        // but we can test the expr combination manually
+        let outer_expr = Expr::col("active").eq(true).and(has_heroes);
+
+        let mut params = Vec::new();
+        let sql = outer_expr.build(&mut params, 0);
+
+        assert_eq!(
+            sql,
+            "\"active\" = $1 AND EXISTS (SELECT 1 FROM heroes WHERE heroes.team_id = teams.id)"
+        );
     }
 }

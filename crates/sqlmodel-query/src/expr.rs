@@ -137,6 +137,18 @@ pub enum Expr {
     /// Subquery (stores the SQL string)
     Subquery(String),
 
+    /// EXISTS (subquery) / NOT EXISTS (subquery)
+    ///
+    /// Used for subquery existence checks in WHERE clauses.
+    Exists {
+        /// The subquery SQL string
+        subquery: String,
+        /// Parameters for the subquery
+        params: Vec<Value>,
+        /// Whether this is NOT EXISTS
+        negated: bool,
+    },
+
     /// Raw SQL fragment (escape hatch)
     Raw(String),
 
@@ -1209,6 +1221,52 @@ impl Expr {
         Expr::Subquery(sql.into())
     }
 
+    // ==================== EXISTS Expressions ====================
+
+    /// Create an EXISTS subquery expression.
+    ///
+    /// # Arguments
+    /// * `subquery_sql` - The SELECT subquery SQL (without outer parentheses)
+    /// * `params` - Parameters for the subquery
+    ///
+    /// # Example
+    /// ```ignore
+    /// // EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = customers.id)
+    /// Expr::exists(
+    ///     "SELECT 1 FROM orders WHERE orders.customer_id = customers.id",
+    ///     vec![]
+    /// )
+    /// ```
+    pub fn exists(subquery_sql: impl Into<String>, params: Vec<Value>) -> Self {
+        Expr::Exists {
+            subquery: subquery_sql.into(),
+            params,
+            negated: false,
+        }
+    }
+
+    /// Create a NOT EXISTS subquery expression.
+    ///
+    /// # Arguments
+    /// * `subquery_sql` - The SELECT subquery SQL (without outer parentheses)
+    /// * `params` - Parameters for the subquery
+    ///
+    /// # Example
+    /// ```ignore
+    /// // NOT EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = customers.id)
+    /// Expr::not_exists(
+    ///     "SELECT 1 FROM orders WHERE orders.customer_id = customers.id",
+    ///     vec![]
+    /// )
+    /// ```
+    pub fn not_exists(subquery_sql: impl Into<String>, params: Vec<Value>) -> Self {
+        Expr::Exists {
+            subquery: subquery_sql.into(),
+            params,
+            negated: true,
+        }
+    }
+
     // ==================== SQL Generation ====================
 
     /// Build SQL string and collect parameters (default PostgreSQL dialect).
@@ -1364,6 +1422,31 @@ impl Expr {
             }
 
             Expr::Subquery(sql) => format!("({sql})"),
+
+            Expr::Exists {
+                subquery,
+                params: subquery_params,
+                negated,
+            } => {
+                // Add subquery parameters to the main params list
+                // Note: The subquery SQL should use placeholders starting from 1,
+                // and we'll adjust them based on the current offset
+                let start_idx = offset + params.len();
+                params.extend(subquery_params.iter().cloned());
+
+                // Simple approach: if there are params, we need to adjust placeholder indices
+                // in the subquery SQL. For now, we assume the subquery uses PostgreSQL-style $N
+                // placeholders and adjust them.
+                let adjusted_subquery = if subquery_params.is_empty() {
+                    subquery.clone()
+                } else {
+                    // Rewrite $1, $2, etc. to $start_idx+1, $start_idx+2, etc.
+                    adjust_placeholder_indices(subquery, start_idx, dialect)
+                };
+
+                let not_str = if *negated { "NOT " } else { "" };
+                format!("{not_str}EXISTS ({adjusted_subquery})")
+            }
 
             Expr::Raw(sql) => sql.clone(),
 
@@ -1649,6 +1732,81 @@ impl From<f64> for Expr {
 impl From<f32> for Expr {
     fn from(n: f32) -> Self {
         Expr::Literal(Value::Float(n))
+    }
+}
+
+// ==================== Helper Functions ====================
+
+/// Adjust placeholder indices in a SQL string.
+///
+/// Rewrites $1, $2, etc. to $offset+1, $offset+2, etc. for PostgreSQL,
+/// or ?1, ?2, etc. for SQLite. MySQL always uses ? so no adjustment needed.
+fn adjust_placeholder_indices(sql: &str, offset: usize, dialect: Dialect) -> String {
+    if offset == 0 {
+        return sql.to_string();
+    }
+
+    match dialect {
+        Dialect::Postgres => {
+            // Rewrite $N to $(N+offset)
+            let mut result = String::with_capacity(sql.len() + 20);
+            let mut chars = sql.chars().peekable();
+
+            while let Some(c) = chars.next() {
+                if c == '$' {
+                    // Collect digits after $
+                    let mut num_str = String::new();
+                    while let Some(&d) = chars.peek() {
+                        if d.is_ascii_digit() {
+                            num_str.push(chars.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Ok(n) = num_str.parse::<usize>() {
+                        result.push_str(&format!("${}", n + offset));
+                    } else {
+                        result.push('$');
+                        result.push_str(&num_str);
+                    }
+                } else {
+                    result.push(c);
+                }
+            }
+            result
+        }
+        Dialect::Sqlite => {
+            // Rewrite ?N to ?(N+offset)
+            let mut result = String::with_capacity(sql.len() + 20);
+            let mut chars = sql.chars().peekable();
+
+            while let Some(c) = chars.next() {
+                if c == '?' {
+                    // Collect digits after ?
+                    let mut num_str = String::new();
+                    while let Some(&d) = chars.peek() {
+                        if d.is_ascii_digit() {
+                            num_str.push(chars.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+                    if let Ok(n) = num_str.parse::<usize>() {
+                        result.push_str(&format!("?{}", n + offset));
+                    } else {
+                        result.push('?');
+                        result.push_str(&num_str);
+                    }
+                } else {
+                    result.push(c);
+                }
+            }
+            result
+        }
+        Dialect::Mysql => {
+            // MySQL uses ? without indices, so no adjustment needed
+            sql.to_string()
+        }
     }
 }
 
@@ -2485,5 +2643,167 @@ mod tests {
             sql,
             "SUM(\"amount\") OVER (ORDER BY \"group_rank\" ASC GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING)"
         );
+    }
+
+    // ==================== EXISTS Tests ====================
+
+    #[test]
+    fn test_exists_basic() {
+        // EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = customers.id)
+        let expr = Expr::exists(
+            "SELECT 1 FROM orders WHERE orders.customer_id = customers.id",
+            vec![],
+        );
+        let mut params = Vec::new();
+        let sql = expr.build(&mut params, 0);
+        assert_eq!(
+            sql,
+            "EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = customers.id)"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_not_exists() {
+        // NOT EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = customers.id)
+        let expr = Expr::not_exists(
+            "SELECT 1 FROM orders WHERE orders.customer_id = customers.id",
+            vec![],
+        );
+        let mut params = Vec::new();
+        let sql = expr.build(&mut params, 0);
+        assert_eq!(
+            sql,
+            "NOT EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = customers.id)"
+        );
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_exists_with_params() {
+        // EXISTS (SELECT 1 FROM orders WHERE status = $1)
+        let expr = Expr::exists(
+            "SELECT 1 FROM orders WHERE status = $1",
+            vec![Value::Text("active".to_string())],
+        );
+        let mut params = Vec::new();
+        let sql = expr.build(&mut params, 0);
+        assert_eq!(sql, "EXISTS (SELECT 1 FROM orders WHERE status = $1)");
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0], Value::Text("active".to_string()));
+    }
+
+    #[test]
+    fn test_exists_with_params_offset() {
+        // When there's an offset, placeholder indices should be adjusted
+        let expr = Expr::exists(
+            "SELECT 1 FROM orders WHERE status = $1 AND type = $2",
+            vec![
+                Value::Text("active".to_string()),
+                Value::Text("online".to_string()),
+            ],
+        );
+        let mut params = Vec::new();
+        // Simulate offset of 3 (meaning params $1-$3 are already used by outer query)
+        let sql = expr.build(&mut params, 3);
+        assert_eq!(
+            sql,
+            "EXISTS (SELECT 1 FROM orders WHERE status = $4 AND type = $5)"
+        );
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_exists_in_where_clause() {
+        // Combining EXISTS with AND
+        let exists_expr = Expr::exists("SELECT 1 FROM orders o WHERE o.customer_id = c.id", vec![]);
+        let expr = Expr::col("active").eq(true).and(exists_expr);
+        let mut params = Vec::new();
+        let sql = expr.build(&mut params, 0);
+        assert_eq!(
+            sql,
+            "\"active\" = $1 AND EXISTS (SELECT 1 FROM orders o WHERE o.customer_id = c.id)"
+        );
+        assert_eq!(params[0], Value::Bool(true));
+    }
+
+    #[test]
+    fn test_exists_sqlite_dialect() {
+        let expr = Expr::exists(
+            "SELECT 1 FROM orders WHERE status = ?1",
+            vec![Value::Text("active".to_string())],
+        );
+        let mut params = Vec::new();
+        let sql = expr.build_with_dialect(Dialect::Sqlite, &mut params, 0);
+        assert_eq!(sql, "EXISTS (SELECT 1 FROM orders WHERE status = ?1)");
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_exists_sqlite_with_offset() {
+        let expr = Expr::exists(
+            "SELECT 1 FROM orders WHERE status = ?1",
+            vec![Value::Text("active".to_string())],
+        );
+        let mut params = Vec::new();
+        let sql = expr.build_with_dialect(Dialect::Sqlite, &mut params, 2);
+        assert_eq!(sql, "EXISTS (SELECT 1 FROM orders WHERE status = ?3)");
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_exists_mysql_dialect() {
+        // MySQL uses positional ? without numbers, so offset doesn't change the SQL
+        let expr = Expr::exists(
+            "SELECT 1 FROM orders WHERE status = ?",
+            vec![Value::Text("active".to_string())],
+        );
+        let mut params = Vec::new();
+        let sql = expr.build_with_dialect(Dialect::Mysql, &mut params, 0);
+        assert_eq!(sql, "EXISTS (SELECT 1 FROM orders WHERE status = ?)");
+        assert_eq!(params.len(), 1);
+    }
+
+    #[test]
+    fn test_not_exists_with_offset() {
+        let expr = Expr::not_exists(
+            "SELECT 1 FROM orders WHERE status = $1",
+            vec![Value::Text("pending".to_string())],
+        );
+        let mut params = Vec::new();
+        let sql = expr.build(&mut params, 5);
+        assert_eq!(sql, "NOT EXISTS (SELECT 1 FROM orders WHERE status = $6)");
+        assert_eq!(params.len(), 1);
+    }
+
+    // ==================== Placeholder Adjustment Tests ====================
+
+    #[test]
+    fn test_adjust_placeholder_indices_postgres() {
+        let sql = "SELECT * FROM t WHERE a = $1 AND b = $2";
+        let adjusted = super::adjust_placeholder_indices(sql, 3, Dialect::Postgres);
+        assert_eq!(adjusted, "SELECT * FROM t WHERE a = $4 AND b = $5");
+    }
+
+    #[test]
+    fn test_adjust_placeholder_indices_sqlite() {
+        let sql = "SELECT * FROM t WHERE a = ?1 AND b = ?2";
+        let adjusted = super::adjust_placeholder_indices(sql, 3, Dialect::Sqlite);
+        assert_eq!(adjusted, "SELECT * FROM t WHERE a = ?4 AND b = ?5");
+    }
+
+    #[test]
+    fn test_adjust_placeholder_indices_zero_offset() {
+        let sql = "SELECT * FROM t WHERE a = $1";
+        let adjusted = super::adjust_placeholder_indices(sql, 0, Dialect::Postgres);
+        assert_eq!(adjusted, sql);
+    }
+
+    #[test]
+    fn test_adjust_placeholder_indices_mysql() {
+        // MySQL uses ? without indices, so no adjustment
+        let sql = "SELECT * FROM t WHERE a = ? AND b = ?";
+        let adjusted = super::adjust_placeholder_indices(sql, 3, Dialect::Mysql);
+        assert_eq!(adjusted, sql);
     }
 }

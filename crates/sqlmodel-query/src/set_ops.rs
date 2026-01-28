@@ -438,9 +438,8 @@ mod tests {
 
     #[test]
     fn test_intersect_all() {
-        let query =
-            intersect_all([("SELECT id FROM t1", vec![]), ("SELECT id FROM t2", vec![])])
-                .expect("non-empty iterator");
+        let query = intersect_all([("SELECT id FROM t1", vec![]), ("SELECT id FROM t2", vec![])])
+            .expect("non-empty iterator");
 
         let (sql, _) = query.build();
         assert!(sql.contains("INTERSECT ALL"));

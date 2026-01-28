@@ -63,6 +63,14 @@ pub struct ValidateFieldDef {
     pub required: bool,
     /// Custom validation function name.
     pub custom: Option<String>,
+    /// Value must be a multiple of this number.
+    pub multiple_of: Option<f64>,
+    /// Minimum number of items in a collection.
+    pub min_items: Option<usize>,
+    /// Maximum number of items in a collection.
+    pub max_items: Option<usize>,
+    /// Whether items in a collection must be unique.
+    pub unique_items: bool,
 }
 
 /// Parse a `DeriveInput` into a `ValidateDef`.
@@ -226,6 +234,10 @@ fn parse_validate_field(field: &Field) -> Result<ValidateFieldDef> {
     let mut pattern = None;
     let mut required = false;
     let mut custom = None;
+    let mut multiple_of = None;
+    let mut min_items = None;
+    let mut max_items = None;
+    let mut unique_items = false;
 
     // Parse #[validate(...)] attributes
     for attr in &field.attrs {
@@ -284,6 +296,21 @@ fn parse_validate_field(field: &Field) -> Result<ValidateFieldDef> {
             } else if path.is_ident("url") {
                 // URL validation pattern (simplified)
                 pattern = Some(r"^https?://[^\s/$.?#].[^\s]*$".to_string());
+            } else if path.is_ident("multiple_of") {
+                let value: Lit = meta.value()?.parse()?;
+                let divisor = parse_numeric_lit(&value)?;
+                if divisor == 0.0 {
+                    return Err(Error::new_spanned(value, "multiple_of cannot be zero"));
+                }
+                multiple_of = Some(divisor);
+            } else if path.is_ident("min_items") {
+                let value: Lit = meta.value()?.parse()?;
+                min_items = Some(parse_usize_lit(&value)?);
+            } else if path.is_ident("max_items") {
+                let value: Lit = meta.value()?.parse()?;
+                max_items = Some(parse_usize_lit(&value)?);
+            } else if path.is_ident("unique_items") {
+                unique_items = true;
             } else {
                 let attr_name = path.to_token_stream().to_string();
                 return Err(Error::new_spanned(
@@ -291,7 +318,7 @@ fn parse_validate_field(field: &Field) -> Result<ValidateFieldDef> {
                     format!(
                         "unknown validate attribute `{attr_name}`. \
                          Valid attributes are: min, max, min_length, max_length, pattern, \
-                         required, custom, email, url"
+                         required, custom, email, url, multiple_of, min_items, max_items, unique_items"
                     ),
                 ));
             }
@@ -321,6 +348,10 @@ fn parse_validate_field(field: &Field) -> Result<ValidateFieldDef> {
         pattern,
         required,
         custom,
+        multiple_of,
+        min_items,
+        max_items,
+        unique_items,
     })
 }
 
@@ -471,6 +502,10 @@ fn has_validation(field: &ValidateFieldDef) -> bool {
         || field.pattern.is_some()
         || field.required
         || field.custom.is_some()
+        || field.multiple_of.is_some()
+        || field.min_items.is_some()
+        || field.max_items.is_some()
+        || field.unique_items
 }
 
 /// Generate validation code for a single field.
@@ -523,6 +558,33 @@ fn generate_field_validation(field: &ValidateFieldDef) -> TokenStream {
             checks.push(quote! {
                 if (self.#field_name as f64) > #max {
                     errors.add_max(#field_name_str, #max, self.#field_name);
+                }
+            });
+        }
+    }
+
+    // Multiple of check (value % divisor must equal 0)
+    if let Some(divisor) = field.multiple_of {
+        if is_optional {
+            checks.push(quote! {
+                if let Some(ref value) = self.#field_name {
+                    let value_f64 = *value as f64;
+                    let remainder = value_f64 % #divisor;
+                    // Account for floating point imprecision
+                    if remainder.abs() > 1e-9 && (#divisor - remainder.abs()).abs() > 1e-9 {
+                        errors.add_multiple_of(#field_name_str, #divisor, *value);
+                    }
+                }
+            });
+        } else {
+            checks.push(quote! {
+                {
+                    let value_f64 = self.#field_name as f64;
+                    let remainder = value_f64 % #divisor;
+                    // Account for floating point imprecision
+                    if remainder.abs() > 1e-9 && (#divisor - remainder.abs()).abs() > 1e-9 {
+                        errors.add_multiple_of(#field_name_str, #divisor, self.#field_name);
+                    }
                 }
             });
         }
@@ -614,6 +676,77 @@ fn generate_field_validation(field: &ValidateFieldDef) -> TokenStream {
         }
     }
 
+    // Min items check (for collections)
+    if let Some(min_items) = field.min_items {
+        if is_optional {
+            checks.push(quote! {
+                if let Some(ref value) = self.#field_name {
+                    let len = value.len();
+                    if len < #min_items {
+                        errors.add_min_items(#field_name_str, #min_items, len);
+                    }
+                }
+            });
+        } else {
+            checks.push(quote! {
+                {
+                    let len = self.#field_name.len();
+                    if len < #min_items {
+                        errors.add_min_items(#field_name_str, #min_items, len);
+                    }
+                }
+            });
+        }
+    }
+
+    // Max items check (for collections)
+    if let Some(max_items) = field.max_items {
+        if is_optional {
+            checks.push(quote! {
+                if let Some(ref value) = self.#field_name {
+                    let len = value.len();
+                    if len > #max_items {
+                        errors.add_max_items(#field_name_str, #max_items, len);
+                    }
+                }
+            });
+        } else {
+            checks.push(quote! {
+                {
+                    let len = self.#field_name.len();
+                    if len > #max_items {
+                        errors.add_max_items(#field_name_str, #max_items, len);
+                    }
+                }
+            });
+        }
+    }
+
+    // Unique items check (for collections with Eq + Hash items)
+    if field.unique_items {
+        if is_optional {
+            checks.push(quote! {
+                if let Some(ref value) = self.#field_name {
+                    let len = value.len();
+                    let unique_len = value.iter().collect::<std::collections::HashSet<_>>().len();
+                    if len != unique_len {
+                        errors.add_unique_items(#field_name_str, len - unique_len);
+                    }
+                }
+            });
+        } else {
+            checks.push(quote! {
+                {
+                    let len = self.#field_name.len();
+                    let unique_len = self.#field_name.iter().collect::<std::collections::HashSet<_>>().len();
+                    if len != unique_len {
+                        errors.add_unique_items(#field_name_str, len - unique_len);
+                    }
+                }
+            });
+        }
+    }
+
     quote! {
         #(#checks)*
     }
@@ -645,6 +778,7 @@ mod tests {
             pattern: None,
             required: false,
             custom: None,
+            multiple_of: None,
         };
         assert!(has_validation(&field));
 
@@ -658,6 +792,7 @@ mod tests {
             pattern: None,
             required: false,
             custom: None,
+            multiple_of: None,
         };
         assert!(!has_validation(&field));
     }
@@ -769,5 +904,100 @@ mod tests {
         assert_eq!(def.fields.len(), 2);
         assert!(def.fields[0].min_length.is_some());
         assert!(def.fields[1].min_length.is_some());
+    }
+
+    // ========================================================================
+    // Multiple Of Validation Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_multiple_of_integer() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Product {
+                #[validate(multiple_of = 5)]
+                quantity: i32,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert_eq!(def.fields[0].multiple_of, Some(5.0));
+    }
+
+    #[test]
+    fn test_parse_multiple_of_float() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Product {
+                #[validate(multiple_of = 0.01)]
+                price: f64,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert_eq!(def.fields[0].multiple_of, Some(0.01));
+    }
+
+    #[test]
+    fn test_parse_multiple_of_combined_with_min_max() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Product {
+                #[validate(min = 0, max = 100, multiple_of = 5)]
+                quantity: i32,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert_eq!(def.fields[0].min, Some(0.0));
+        assert_eq!(def.fields[0].max, Some(100.0));
+        assert_eq!(def.fields[0].multiple_of, Some(5.0));
+    }
+
+    #[test]
+    fn test_parse_multiple_of_zero_fails() {
+        // multiple_of = 0 should be rejected
+        let input: syn::DeriveInput = parse_quote! {
+            struct Invalid {
+                #[validate(multiple_of = 0)]
+                value: i32,
+            }
+        };
+
+        let result = parse_validate(&input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("cannot be zero"));
+    }
+
+    #[test]
+    fn test_has_validation_includes_multiple_of() {
+        let field_with_multiple_of = ValidateFieldDef {
+            name: syn::Ident::new("test", proc_macro2::Span::call_site()),
+            ty: syn::parse_quote!(i32),
+            min: None,
+            max: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            required: false,
+            custom: None,
+            multiple_of: Some(5.0),
+        };
+        assert!(has_validation(&field_with_multiple_of));
+
+        let field_without_validation = ValidateFieldDef {
+            name: syn::Ident::new("test", proc_macro2::Span::call_site()),
+            ty: syn::parse_quote!(i32),
+            min: None,
+            max: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            required: false,
+            custom: None,
+            multiple_of: None,
+        };
+        assert!(!has_validation(&field_without_validation));
     }
 }

@@ -886,7 +886,10 @@ impl<C: Connection> Session<C> {
     /// let changed = session.modified_attributes(&user);
     /// assert!(changed.contains(&"name"));
     /// ```
-    pub fn modified_attributes<M: Model + Serialize + 'static>(&self, obj: &M) -> Vec<&'static str> {
+    pub fn modified_attributes<M: Model + Serialize + 'static>(
+        &self,
+        obj: &M,
+    ) -> Vec<&'static str> {
         let key = ObjectKey::from_model(obj);
 
         let Some(tracked) = self.identity_map.get(&key) else {
@@ -2019,9 +2022,7 @@ impl<C: Connection> Session<C> {
                 tracked.pk_values.clone_from(&pk_values);
 
                 // If persistent, mark as dirty for UPDATE
-                if tracked.state == ObjectState::Persistent
-                    && !self.pending_dirty.contains(&key)
-                {
+                if tracked.state == ObjectState::Persistent && !self.pending_dirty.contains(&key) {
                     self.pending_dirty.push(key);
                 }
 
@@ -2035,7 +2036,9 @@ impl<C: Connection> Session<C> {
         // 2. If load=true, try to fetch from database
         if load {
             // Check if we have a valid primary key (not null/default)
-            let has_valid_pk = pk_values.iter().all(|v| !matches!(v, Value::Null | Value::Default));
+            let has_valid_pk = pk_values
+                .iter()
+                .all(|v| !matches!(v, Value::Null | Value::Default));
 
             if has_valid_pk {
                 tracing::debug!("Loading from database");
