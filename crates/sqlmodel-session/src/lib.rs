@@ -79,6 +79,46 @@ impl Default for SessionConfig {
     }
 }
 
+/// Options for `Session::get_with_options()`.
+#[derive(Debug, Clone, Default)]
+pub struct GetOptions {
+    /// If true, use SELECT ... FOR UPDATE to lock the row.
+    pub with_for_update: bool,
+    /// If true, use SKIP LOCKED with FOR UPDATE (requires `with_for_update`).
+    pub skip_locked: bool,
+    /// If true, use NOWAIT with FOR UPDATE (requires `with_for_update`).
+    pub nowait: bool,
+}
+
+impl GetOptions {
+    /// Create new default options.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set the `with_for_update` option (builder pattern).
+    #[must_use]
+    pub fn with_for_update(mut self, value: bool) -> Self {
+        self.with_for_update = value;
+        self
+    }
+
+    /// Set the `skip_locked` option (builder pattern).
+    #[must_use]
+    pub fn skip_locked(mut self, value: bool) -> Self {
+        self.skip_locked = value;
+        self
+    }
+
+    /// Set the `nowait` option (builder pattern).
+    #[must_use]
+    pub fn nowait(mut self, value: bool) -> Self {
+        self.nowait = value;
+        self
+    }
+}
+
 // ============================================================================
 // Object Key and State
 // ============================================================================
@@ -574,6 +614,140 @@ impl<C: Connection> Session<C> {
             column_names,
             values,
             pk_columns,
+            pk_values: obj_pk_values,
+        };
+
+        self.identity_map.insert(key, tracked);
+
+        Outcome::Ok(Some(obj))
+    }
+
+    /// Get an object by composite primary key.
+    ///
+    /// First checks the identity map, then queries the database if not found.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Composite PK lookup
+    /// let item = session.get_by_pk::<OrderItem>(&[
+    ///     Value::BigInt(order_id),
+    ///     Value::BigInt(product_id),
+    /// ]).await?;
+    /// ```
+    pub async fn get_by_pk<
+        M: Model + Clone + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
+    >(
+        &mut self,
+        cx: &Cx,
+        pk_values: &[Value],
+    ) -> Outcome<Option<M>, Error> {
+        self.get_with_options::<M>(cx, pk_values, &GetOptions::default())
+            .await
+    }
+
+    /// Get an object by primary key with options.
+    ///
+    /// This is the most flexible form of `get()` supporting:
+    /// - Composite primary keys via `&[Value]`
+    /// - `with_for_update` for row locking
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let options = GetOptions::default().with_for_update(true);
+    /// let user = session.get_with_options::<User>(&[Value::BigInt(1)], &options).await?;
+    /// ```
+    pub async fn get_with_options<
+        M: Model + Clone + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
+    >(
+        &mut self,
+        cx: &Cx,
+        pk_values: &[Value],
+        options: &GetOptions,
+    ) -> Outcome<Option<M>, Error> {
+        let key = ObjectKey::from_pk::<M>(pk_values);
+
+        // Check identity map first (unless with_for_update which needs fresh DB state)
+        if !options.with_for_update {
+            if let Some(tracked) = self.identity_map.get(&key) {
+                if tracked.state != ObjectState::Deleted && tracked.state != ObjectState::Detached {
+                    if let Some(obj) = tracked.object.downcast_ref::<M>() {
+                        return Outcome::Ok(Some(obj.clone()));
+                    }
+                }
+            }
+        }
+
+        // Build WHERE clause for composite PK
+        let pk_columns = M::PRIMARY_KEY;
+        if pk_columns.len() != pk_values.len() {
+            return Outcome::Err(Error::Other(format!(
+                "Primary key mismatch: expected {} values, got {}",
+                pk_columns.len(),
+                pk_values.len()
+            )));
+        }
+
+        let where_parts: Vec<String> = pk_columns
+            .iter()
+            .enumerate()
+            .map(|(i, col)| format!("\"{}\" = ${}", col, i + 1))
+            .collect();
+
+        let mut sql = format!(
+            "SELECT * FROM \"{}\" WHERE {} LIMIT 1",
+            M::TABLE_NAME,
+            where_parts.join(" AND ")
+        );
+
+        // Add FOR UPDATE if requested
+        if options.with_for_update {
+            sql.push_str(" FOR UPDATE");
+            if options.skip_locked {
+                sql.push_str(" SKIP LOCKED");
+            } else if options.nowait {
+                sql.push_str(" NOWAIT");
+            }
+        }
+
+        let rows = match self.connection.query(cx, &sql, pk_values).await {
+            Outcome::Ok(rows) => rows,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        if rows.is_empty() {
+            return Outcome::Ok(None);
+        }
+
+        // Convert row to model
+        let obj = match M::from_row(&rows[0]) {
+            Ok(obj) => obj,
+            Err(e) => return Outcome::Err(e),
+        };
+
+        // Extract column data from the model while we have the concrete type
+        let row_data = obj.to_row();
+        let column_names: Vec<&'static str> = row_data.iter().map(|(name, _)| *name).collect();
+        let values: Vec<Value> = row_data.into_iter().map(|(_, v)| v).collect();
+
+        // Serialize values for dirty checking
+        let serialized = serde_json::to_vec(&values).ok();
+
+        // Extract primary key info
+        let pk_cols: Vec<&'static str> = M::PRIMARY_KEY.to_vec();
+        let obj_pk_values = obj.primary_key_value();
+
+        let tracked = TrackedObject {
+            object: Box::new(obj.clone()),
+            original_state: serialized,
+            state: ObjectState::Persistent,
+            table_name: M::TABLE_NAME,
+            column_names,
+            values,
+            pk_columns: pk_cols,
             pk_values: obj_pk_values,
         };
 
