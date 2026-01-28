@@ -328,11 +328,28 @@ fn value_to_json(value: Value) -> serde_json::Value {
             let encoded = base64::engine::general_purpose::STANDARD.encode(&b);
             serde_json::Value::String(encoded)
         }
-        Value::Date(d) => serde_json::Value::String(d),
-        Value::Time(t) => serde_json::Value::String(t),
-        Value::Timestamp(ts) => serde_json::Value::String(ts),
-        Value::TimestampTz(ts) => serde_json::Value::String(ts),
-        Value::Uuid(u) => serde_json::Value::String(u),
+        // Date is i32 (days since epoch) - convert to number
+        Value::Date(d) => serde_json::Value::Number(d.into()),
+        // Time is i64 (microseconds since midnight)
+        Value::Time(t) => serde_json::Value::Number(t.into()),
+        // Timestamp is i64 (microseconds since epoch)
+        Value::Timestamp(ts) => serde_json::Value::Number(ts.into()),
+        // TimestampTz is i64 (microseconds since epoch, UTC)
+        Value::TimestampTz(ts) => serde_json::Value::Number(ts.into()),
+        // UUID is [u8; 16] - format as hex string
+        Value::Uuid(u) => {
+            let hex: String = u.iter().map(|b| format!("{b:02x}")).collect();
+            // Format as UUID: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+            let formatted = format!(
+                "{}-{}-{}-{}-{}",
+                &hex[0..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..32]
+            );
+            serde_json::Value::String(formatted)
+        }
         Value::Json(j) => j,
         Value::Array(arr) => {
             serde_json::Value::Array(arr.into_iter().map(value_to_json).collect())
