@@ -1735,6 +1735,40 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_relationship_with_passive_deletes_invalid_string() {
+        let input: DeriveInput = parse_quote! {
+            struct Parent {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(relationship(model = "children", passive_deletes = "invalid"))]
+                children: RelatedMany<Child>,
+            }
+        };
+
+        let result = parse_model(&input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("expected 'all', 'true', or 'false'"));
+    }
+
+    #[test]
+    fn test_parse_relationship_with_passive_deletes_integer_fails() {
+        let input: DeriveInput = parse_quote! {
+            struct Parent {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(relationship(model = "children", passive_deletes = 1))]
+                children: RelatedMany<Child>,
+            }
+        };
+
+        let result = parse_model(&input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("expected boolean or 'all' string"));
+    }
+
+    #[test]
     fn test_parse_relationship_with_link_table() {
         let input: DeriveInput = parse_quote! {
             struct Hero {
