@@ -810,6 +810,128 @@ impl<C: Connection> Session<C> {
     }
 
     // ========================================================================
+    // Dirty Checking
+    // ========================================================================
+
+    /// Check if an object has pending changes.
+    ///
+    /// Returns `true` if:
+    /// - Object is new (pending INSERT)
+    /// - Object has been modified since load (pending UPDATE)
+    /// - Object is marked for deletion (pending DELETE)
+    ///
+    /// Returns `false` if:
+    /// - Object is not tracked
+    /// - Object is clean (unchanged since load)
+    /// - Object is detached or expired
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let user = session.get::<User>(1).await?.unwrap();
+    /// assert!(!session.is_modified(&user));  // Fresh from DB
+    ///
+    /// // Modify and re-check
+    /// let mut user_mut = user.clone();
+    /// user_mut.name = "New Name".to_string();
+    /// session.mark_dirty(&user_mut);
+    /// assert!(session.is_modified(&user_mut));  // Now dirty
+    /// ```
+    pub fn is_modified<M: Model + Serialize + 'static>(&self, obj: &M) -> bool {
+        let key = ObjectKey::from_model(obj);
+
+        let Some(tracked) = self.identity_map.get(&key) else {
+            return false;
+        };
+
+        match tracked.state {
+            // New objects are always "modified" (pending INSERT)
+            ObjectState::New => true,
+
+            // Deleted objects are "modified" (pending DELETE)
+            ObjectState::Deleted => true,
+
+            // Detached/expired objects aren't modified in session context
+            ObjectState::Detached | ObjectState::Expired => false,
+
+            // For persistent objects, compare current values to original
+            ObjectState::Persistent => {
+                // Check if explicitly marked dirty
+                if self.pending_dirty.contains(&key) {
+                    return true;
+                }
+
+                // Compare serialized values
+                let current_state = serde_json::to_vec(&tracked.values).unwrap_or_default();
+                tracked.original_state.as_ref() != Some(&current_state)
+            }
+        }
+    }
+
+    /// Get the list of modified attribute names for an object.
+    ///
+    /// Returns the column names that have changed since the object was loaded.
+    /// Returns an empty vector if:
+    /// - Object is not tracked
+    /// - Object is new (all fields are "modified")
+    /// - Object is clean (no changes)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let mut user = session.get::<User>(1).await?.unwrap();
+    /// user.name = "New Name".to_string();
+    /// session.mark_dirty(&user);
+    ///
+    /// let changed = session.modified_attributes(&user);
+    /// assert!(changed.contains(&"name"));
+    /// ```
+    pub fn modified_attributes<M: Model + Serialize + 'static>(&self, obj: &M) -> Vec<&'static str> {
+        let key = ObjectKey::from_model(obj);
+
+        let Some(tracked) = self.identity_map.get(&key) else {
+            return Vec::new();
+        };
+
+        // Only meaningful for persistent objects
+        if tracked.state != ObjectState::Persistent {
+            return Vec::new();
+        }
+
+        // Need original state for comparison
+        let Some(original_bytes) = &tracked.original_state else {
+            return Vec::new();
+        };
+
+        // Deserialize original values
+        let Ok(original_values): Result<Vec<Value>, _> = serde_json::from_slice(original_bytes)
+        else {
+            return Vec::new();
+        };
+
+        // Compare each column
+        let mut modified = Vec::new();
+        for (i, col) in tracked.column_names.iter().enumerate() {
+            let current = tracked.values.get(i);
+            let original = original_values.get(i);
+
+            if current != original {
+                modified.push(*col);
+            }
+        }
+
+        modified
+    }
+
+    /// Get the state of a tracked object.
+    ///
+    /// Returns `None` if the object is not tracked by this session.
+    pub fn object_state<M: Model + 'static>(&self, obj: &M) -> Option<ObjectState> {
+        let key = ObjectKey::from_model(obj);
+        self.identity_map.get(&key).map(|t| t.state)
+    }
+
+    // ========================================================================
     // Transaction Management
     // ========================================================================
 
@@ -2133,7 +2255,10 @@ mod tests {
         }
 
         fn to_row(&self) -> Vec<(&'static str, Value)> {
-            vec![]
+            vec![
+                ("id", self.id.map_or(Value::Null, Value::BigInt)),
+                ("name", Value::Text(self.name.clone())),
+            ]
         }
 
         fn from_row(row: &Row) -> sqlmodel_core::Result<Self> {
@@ -2773,5 +2898,256 @@ mod tests {
 
         // Should not have queried DB for null PK
         assert_eq!(state.lock().expect("lock poisoned").query_calls, 0);
+    }
+
+    // ==================== is_modified Tests ====================
+
+    #[test]
+    fn test_is_modified_new_object_returns_true() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        let team = Team {
+            id: Some(100),
+            name: "New Team".to_string(),
+        };
+
+        // Add as new - should be modified
+        session.add(&team);
+        assert!(session.is_modified(&team));
+    }
+
+    #[test]
+    fn test_is_modified_untracked_returns_false() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let session = Session::<MockConnection>::new(conn);
+
+        let team = Team {
+            id: Some(100),
+            name: "Not Tracked".to_string(),
+        };
+
+        // Not tracked - should not be modified
+        assert!(!session.is_modified(&team));
+    }
+
+    #[test]
+    fn test_is_modified_after_load_returns_false() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        rt.block_on(async {
+            // Load from DB
+            let team = unwrap_outcome(session.get::<Team>(&cx, 1_i64).await).unwrap();
+
+            // Fresh from DB - should not be modified
+            assert!(!session.is_modified(&team));
+        });
+    }
+
+    #[test]
+    fn test_is_modified_after_mark_dirty_returns_true() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        rt.block_on(async {
+            // Load from DB
+            let team = unwrap_outcome(session.get::<Team>(&cx, 1_i64).await).unwrap();
+            assert!(!session.is_modified(&team));
+
+            // Modify and mark dirty
+            let mut modified_team = team.clone();
+            modified_team.name = "Modified Name".to_string();
+            session.mark_dirty(&modified_team);
+
+            // Should now be modified
+            assert!(session.is_modified(&modified_team));
+        });
+    }
+
+    #[test]
+    fn test_is_modified_deleted_returns_true() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        rt.block_on(async {
+            // Load from DB
+            let team = unwrap_outcome(session.get::<Team>(&cx, 1_i64).await).unwrap();
+            assert!(!session.is_modified(&team));
+
+            // Delete
+            session.delete(&team);
+
+            // Should be modified (pending delete)
+            assert!(session.is_modified(&team));
+        });
+    }
+
+    #[test]
+    fn test_is_modified_detached_returns_false() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        rt.block_on(async {
+            // Load from DB
+            let team = unwrap_outcome(session.get::<Team>(&cx, 1_i64).await).unwrap();
+
+            // Detach
+            session.expunge(&team);
+
+            // Detached objects aren't modified in session context
+            assert!(!session.is_modified(&team));
+        });
+    }
+
+    #[test]
+    fn test_object_state_returns_correct_state() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        // Untracked object
+        let untracked = Team {
+            id: Some(999),
+            name: "Untracked".to_string(),
+        };
+        assert_eq!(session.object_state(&untracked), None);
+
+        // New object
+        let new_team = Team {
+            id: Some(100),
+            name: "New".to_string(),
+        };
+        session.add(&new_team);
+        assert_eq!(session.object_state(&new_team), Some(ObjectState::New));
+
+        rt.block_on(async {
+            // Persistent object
+            let persistent = unwrap_outcome(session.get::<Team>(&cx, 1_i64).await).unwrap();
+            assert_eq!(
+                session.object_state(&persistent),
+                Some(ObjectState::Persistent)
+            );
+
+            // Deleted object
+            session.delete(&persistent);
+            assert_eq!(
+                session.object_state(&persistent),
+                Some(ObjectState::Deleted)
+            );
+        });
+    }
+
+    #[test]
+    fn test_modified_attributes_returns_changed_columns() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        rt.block_on(async {
+            // Load from DB
+            let team = unwrap_outcome(session.get::<Team>(&cx, 1_i64).await).unwrap();
+
+            // No modifications yet
+            let modified = session.modified_attributes(&team);
+            assert!(modified.is_empty());
+
+            // Modify and mark dirty
+            let mut modified_team = team.clone();
+            modified_team.name = "Changed Name".to_string();
+            session.mark_dirty(&modified_team);
+
+            // Should show 'name' as modified
+            let modified = session.modified_attributes(&modified_team);
+            assert!(modified.contains(&"name"));
+        });
+    }
+
+    #[test]
+    fn test_modified_attributes_untracked_returns_empty() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let session = Session::<MockConnection>::new(conn);
+
+        let team = Team {
+            id: Some(100),
+            name: "Not Tracked".to_string(),
+        };
+
+        let modified = session.modified_attributes(&team);
+        assert!(modified.is_empty());
+    }
+
+    #[test]
+    fn test_modified_attributes_new_returns_empty() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        let team = Team {
+            id: Some(100),
+            name: "New".to_string(),
+        };
+        session.add(&team);
+
+        // New objects don't have original values to compare
+        let modified = session.modified_attributes(&team);
+        assert!(modified.is_empty());
     }
 }
