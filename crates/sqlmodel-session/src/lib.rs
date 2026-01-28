@@ -40,7 +40,7 @@ pub use change_tracker::{ChangeTracker, ObjectSnapshot};
 pub use flush::{
     FlushOrderer, FlushPlan, FlushResult, LinkTableOp, PendingOp, execute_link_table_ops,
 };
-pub use n1_detection::{CallSite, N1QueryTracker, N1Stats};
+pub use n1_detection::{CallSite, N1DetectionScope, N1QueryTracker, N1Stats};
 
 use asupersync::{Cx, Outcome};
 use serde::{Deserialize, Serialize};

@@ -63,6 +63,10 @@ pub struct FieldInfo {
     /// Explicit SQL type override string (e.g., "VARCHAR(255)", "DECIMAL(10,2)")
     /// When set, this takes precedence over `sql_type` in DDL generation.
     pub sql_type_override: Option<&'static str>,
+    /// Precision for DECIMAL/NUMERIC types (total digits)
+    pub precision: Option<u8>,
+    /// Scale for DECIMAL/NUMERIC types (digits after decimal point)
+    pub scale: Option<u8>,
     /// Whether this field is nullable
     pub nullable: bool,
     /// Whether this is a primary key
@@ -91,6 +95,8 @@ impl FieldInfo {
             column_name,
             sql_type,
             sql_type_override: None,
+            precision: None,
+            scale: None,
             nullable: false,
             primary_key: false,
             auto_increment: false,
@@ -125,13 +131,90 @@ impl FieldInfo {
         self
     }
 
+    /// Set precision for DECIMAL/NUMERIC types.
+    ///
+    /// Precision is the total number of digits (before and after decimal point).
+    /// Typical range: 1-38, depends on database.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // DECIMAL(10, 2) - 10 total digits, 2 after decimal
+    /// FieldInfo::new("price", "price", SqlType::Decimal { precision: 10, scale: 2 })
+    ///     .precision(10)
+    ///     .scale(2)
+    /// ```
+    pub const fn precision(mut self, value: u8) -> Self {
+        self.precision = Some(value);
+        self
+    }
+
+    /// Set precision from optional.
+    pub const fn precision_opt(mut self, value: Option<u8>) -> Self {
+        self.precision = value;
+        self
+    }
+
+    /// Set scale for DECIMAL/NUMERIC types.
+    ///
+    /// Scale is the number of digits after the decimal point.
+    /// Must be less than or equal to precision.
+    pub const fn scale(mut self, value: u8) -> Self {
+        self.scale = Some(value);
+        self
+    }
+
+    /// Set scale from optional.
+    pub const fn scale_opt(mut self, value: Option<u8>) -> Self {
+        self.scale = value;
+        self
+    }
+
+    /// Set both precision and scale for DECIMAL/NUMERIC types.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // DECIMAL(10, 2) for currency
+    /// FieldInfo::new("price", "price", SqlType::Decimal { precision: 10, scale: 2 })
+    ///     .decimal_precision(10, 2)
+    /// ```
+    pub const fn decimal_precision(mut self, precision: u8, scale: u8) -> Self {
+        self.precision = Some(precision);
+        self.scale = Some(scale);
+        self
+    }
+
     /// Get the effective SQL type name for DDL generation.
     ///
-    /// Returns `sql_type_override` if set, otherwise falls back to `sql_type.sql_name()`.
+    /// Priority:
+    /// 1. `sql_type_override` if set
+    /// 2. For DECIMAL/NUMERIC: uses `precision` and `scale` fields if set
+    /// 3. Falls back to `sql_type.sql_name()`
     #[must_use]
     pub fn effective_sql_type(&self) -> String {
-        self.sql_type_override
-            .map_or_else(|| self.sql_type.sql_name(), str::to_string)
+        // sql_type_override takes highest precedence
+        if let Some(override_str) = self.sql_type_override {
+            return override_str.to_string();
+        }
+
+        // For Decimal/Numeric types, use precision/scale fields if available
+        match self.sql_type {
+            SqlType::Decimal { .. } | SqlType::Numeric { .. } => {
+                if let (Some(p), Some(s)) = (self.precision, self.scale) {
+                    let type_name = match self.sql_type {
+                        SqlType::Decimal { .. } => "DECIMAL",
+                        SqlType::Numeric { .. } => "NUMERIC",
+                        _ => unreachable!(),
+                    };
+                    return format!("{}({}, {})", type_name, p, s);
+                }
+            }
+            _ => {}
+        }
+
+        // Fall back to sql_type's own name generation
+        self.sql_type.sql_name()
     }
 
     /// Set nullable flag.
