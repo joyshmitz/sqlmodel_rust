@@ -366,6 +366,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "name",
@@ -383,6 +386,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "age",
@@ -400,6 +406,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: Some("idx_heroes_age"),
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "team_id",
@@ -417,6 +426,9 @@ mod tests {
                     on_delete: Some(ReferentialAction::Cascade),
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
             ];
             FIELDS
@@ -530,6 +542,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 }];
                 FIELDS
             }

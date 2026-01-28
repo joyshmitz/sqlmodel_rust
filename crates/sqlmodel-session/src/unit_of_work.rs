@@ -132,7 +132,7 @@ impl std::error::Error for UowError {}
 
 impl From<UowError> for Error {
     fn from(e: UowError) -> Self {
-        Error::Other(e.to_string())
+        Error::Custom(e.to_string())
     }
 }
 
@@ -523,7 +523,7 @@ mod tests {
         }
     }
 
-    fn make_key<T: Model>(pk: i64) -> ObjectKey {
+    fn make_key<T: Model + 'static>(pk: i64) -> ObjectKey {
         ObjectKey::from_pk::<T>(&[Value::BigInt(pk)])
     }
 

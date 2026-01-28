@@ -682,7 +682,7 @@ impl<C: Connection> Session<C> {
         // Build WHERE clause for composite PK
         let pk_columns = M::PRIMARY_KEY;
         if pk_columns.len() != pk_values.len() {
-            return Outcome::Err(Error::Other(format!(
+            return Outcome::Err(Error::Custom(format!(
                 "Primary key mismatch: expected {} values, got {}",
                 pk_columns.len(),
                 pk_values.len()

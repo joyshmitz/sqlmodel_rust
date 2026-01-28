@@ -69,6 +69,8 @@ pub struct FieldDef {
     pub validation_alias: Option<String>,
     /// Alias used only during serialization (output-only).
     pub serialization_alias: Option<String>,
+    /// Whether this is a computed field (not stored in database).
+    pub computed: bool,
 }
 
 /// Parsed relationship attribute from `#[sqlmodel(relationship(...))]`.
@@ -141,11 +143,11 @@ impl ModelDef {
     }
 
     /// Returns fields that should be read from the database (SELECT).
-    /// Excludes skipped fields and relationship fields (they're not DB columns).
+    /// Excludes skipped fields, relationship fields, and computed fields (they're not DB columns).
     pub fn select_fields(&self) -> Vec<&FieldDef> {
         self.fields
             .iter()
-            .filter(|f| !f.skip && f.relationship.is_none())
+            .filter(|f| !f.skip && !f.computed && f.relationship.is_none())
             .collect()
     }
 
@@ -155,6 +157,11 @@ impl ModelDef {
             .iter()
             .filter(|f| f.relationship.is_some())
             .collect()
+    }
+
+    /// Returns fields that are computed (not stored in database).
+    pub fn computed_fields(&self) -> Vec<&FieldDef> {
+        self.fields.iter().filter(|f| f.computed).collect()
     }
 }
 
@@ -510,6 +517,7 @@ fn parse_field(field: &Field) -> Result<FieldDef> {
         alias: attrs.alias,
         validation_alias: attrs.validation_alias,
         serialization_alias: attrs.serialization_alias,
+        computed: attrs.computed,
     })
 }
 
@@ -534,6 +542,7 @@ struct FieldAttrs {
     alias: Option<String>,
     validation_alias: Option<String>,
     serialization_alias: Option<String>,
+    computed: bool,
 }
 
 /// Detect the relationship kind from a field's Rust type.
@@ -727,6 +736,8 @@ fn parse_field_attrs(
                         "expected string literal for serialization_alias",
                     ));
                 }
+            } else if path.is_ident("computed") {
+                result.computed = true;
             } else {
                 // Unknown attribute
                 let attr_name = path.to_token_stream().to_string();
@@ -737,7 +748,7 @@ fn parse_field_attrs(
                          Valid attributes are: primary_key, auto_increment, column, nullable, \
                          unique, foreign_key, on_delete, on_update, default, sql_type, index, \
                          skip, skip_insert, skip_update, relationship, alias, validation_alias, \
-                         serialization_alias"
+                         serialization_alias, computed"
                     ),
                 ));
             }
@@ -1573,5 +1584,205 @@ mod tests {
         assert!(rel.lazy);
         assert!(rel.cascade_delete);
         assert_eq!(rel.kind, RelationshipKindAttr::ManyToOne);
+    }
+
+    // ========================================================================
+    // Field alias attribute tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_field_alias() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(alias = "userName")]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(name_field.alias, Some("userName".to_string()));
+        assert!(name_field.validation_alias.is_none());
+        assert!(name_field.serialization_alias.is_none());
+    }
+
+    #[test]
+    fn test_parse_field_validation_alias() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(validation_alias = "user_name")]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert!(name_field.alias.is_none());
+        assert_eq!(name_field.validation_alias, Some("user_name".to_string()));
+        assert!(name_field.serialization_alias.is_none());
+    }
+
+    #[test]
+    fn test_parse_field_serialization_alias() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(serialization_alias = "user-name")]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert!(name_field.alias.is_none());
+        assert!(name_field.validation_alias.is_none());
+        assert_eq!(name_field.serialization_alias, Some("user-name".to_string()));
+    }
+
+    #[test]
+    fn test_parse_field_all_aliases() {
+        // Test that all three aliases can be specified together
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(alias = "nm", validation_alias = "input_name", serialization_alias = "outputName")]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(name_field.alias, Some("nm".to_string()));
+        assert_eq!(name_field.validation_alias, Some("input_name".to_string()));
+        assert_eq!(name_field.serialization_alias, Some("outputName".to_string()));
+    }
+
+    #[test]
+    fn test_field_def_output_name() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(serialization_alias = "userName")]
+                name: String,
+                email: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        // Field with serialization_alias should use it for output
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(name_field.output_name(), "userName");
+
+        // Field without any alias should use field name
+        let email_field = def.fields.iter().find(|f| f.name == "email").unwrap();
+        assert_eq!(email_field.output_name(), "email");
+    }
+
+    #[test]
+    fn test_field_def_output_name_alias_fallback() {
+        // When only alias is set, it should be used for output
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(alias = "nm")]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(name_field.output_name(), "nm");
+    }
+
+    #[test]
+    fn test_field_def_input_names() {
+        // No aliases - only field name
+        let input1: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                name: String,
+            }
+        };
+        let def1 = parse_model(&input1).unwrap();
+        let field1 = def1.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(field1.input_names(), vec!["name"]);
+
+        // With validation_alias - accepts both
+        let input2: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(validation_alias = "user_name")]
+                name: String,
+            }
+        };
+        let def2 = parse_model(&input2).unwrap();
+        let field2 = def2.fields.iter().find(|f| f.name == "name").unwrap();
+        let names2 = field2.input_names();
+        assert!(names2.contains(&"name"));
+        assert!(names2.contains(&"user_name"));
+
+        // With alias - accepts both
+        let input3: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(alias = "nm")]
+                name: String,
+            }
+        };
+        let def3 = parse_model(&input3).unwrap();
+        let field3 = def3.fields.iter().find(|f| f.name == "name").unwrap();
+        let names3 = field3.input_names();
+        assert!(names3.contains(&"name"));
+        assert!(names3.contains(&"nm"));
+    }
+
+    #[test]
+    fn test_field_def_has_alias() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(alias = "nm")]
+                name: String,
+                email: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert!(name_field.has_alias());
+
+        let email_field = def.fields.iter().find(|f| f.name == "email").unwrap();
+        assert!(!email_field.has_alias());
+    }
+
+    #[test]
+    fn test_parse_alias_with_special_characters() {
+        // Aliases can contain hyphens, underscores, etc.
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(alias = "user-name_v2")]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(name_field.alias, Some("user-name_v2".to_string()));
     }
 }

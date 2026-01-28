@@ -94,6 +94,10 @@ pub struct FieldInfo {
     /// Alias used only during serialization (output-only).
     /// Overrides `alias` when outputting the field name.
     pub serialization_alias: Option<&'static str>,
+    /// Whether this is a computed field (not stored in database).
+    /// Computed fields are excluded from database operations but included
+    /// in serialization (model_dump) unless exclude_computed_fields is set.
+    pub computed: bool,
 }
 
 impl FieldInfo {
@@ -118,6 +122,7 @@ impl FieldInfo {
             alias: None,
             validation_alias: None,
             serialization_alias: None,
+            computed: false,
         }
     }
 
@@ -359,6 +364,19 @@ impl FieldInfo {
     /// Set serialization alias from optional.
     pub const fn serialization_alias_opt(mut self, name: Option<&'static str>) -> Self {
         self.serialization_alias = name;
+        self
+    }
+
+    /// Mark this field as computed (not stored in database).
+    ///
+    /// Computed fields are:
+    /// - Excluded from database operations (INSERT, UPDATE, SELECT)
+    /// - Initialized with Default::default() when loading from database
+    /// - Included in serialization (model_dump) unless exclude_computed_fields is set
+    ///
+    /// Use this for fields whose value is derived from other fields at access time.
+    pub const fn computed(mut self, value: bool) -> Self {
+        self.computed = value;
         self
     }
 
@@ -647,5 +665,144 @@ mod tests {
         )
         .scale_opt(None);
         assert_eq!(field2.scale, None);
+    }
+
+    // ========================================================================
+    // Field alias tests
+    // ========================================================================
+
+    #[test]
+    fn test_field_info_alias() {
+        let field = FieldInfo::new("name", "name", SqlType::Text).alias("userName");
+        assert_eq!(field.alias, Some("userName"));
+        assert!(field.validation_alias.is_none());
+        assert!(field.serialization_alias.is_none());
+    }
+
+    #[test]
+    fn test_field_info_validation_alias() {
+        let field = FieldInfo::new("name", "name", SqlType::Text).validation_alias("user_name");
+        assert!(field.alias.is_none());
+        assert_eq!(field.validation_alias, Some("user_name"));
+        assert!(field.serialization_alias.is_none());
+    }
+
+    #[test]
+    fn test_field_info_serialization_alias() {
+        let field = FieldInfo::new("name", "name", SqlType::Text).serialization_alias("user-name");
+        assert!(field.alias.is_none());
+        assert!(field.validation_alias.is_none());
+        assert_eq!(field.serialization_alias, Some("user-name"));
+    }
+
+    #[test]
+    fn test_field_info_all_aliases() {
+        let field = FieldInfo::new("name", "name", SqlType::Text)
+            .alias("nm")
+            .validation_alias("input_name")
+            .serialization_alias("outputName");
+
+        assert_eq!(field.alias, Some("nm"));
+        assert_eq!(field.validation_alias, Some("input_name"));
+        assert_eq!(field.serialization_alias, Some("outputName"));
+    }
+
+    #[test]
+    fn test_field_info_alias_opt() {
+        let field1 = FieldInfo::new("name", "name", SqlType::Text).alias_opt(Some("userName"));
+        assert_eq!(field1.alias, Some("userName"));
+
+        let field2 = FieldInfo::new("name", "name", SqlType::Text).alias_opt(None);
+        assert!(field2.alias.is_none());
+    }
+
+    #[test]
+    fn test_field_info_validation_alias_opt() {
+        let field1 =
+            FieldInfo::new("name", "name", SqlType::Text).validation_alias_opt(Some("user_name"));
+        assert_eq!(field1.validation_alias, Some("user_name"));
+
+        let field2 = FieldInfo::new("name", "name", SqlType::Text).validation_alias_opt(None);
+        assert!(field2.validation_alias.is_none());
+    }
+
+    #[test]
+    fn test_field_info_serialization_alias_opt() {
+        let field1 = FieldInfo::new("name", "name", SqlType::Text)
+            .serialization_alias_opt(Some("user-name"));
+        assert_eq!(field1.serialization_alias, Some("user-name"));
+
+        let field2 = FieldInfo::new("name", "name", SqlType::Text).serialization_alias_opt(None);
+        assert!(field2.serialization_alias.is_none());
+    }
+
+    #[test]
+    fn test_field_info_output_name() {
+        // No aliases - uses field name
+        let field1 = FieldInfo::new("name", "name", SqlType::Text);
+        assert_eq!(field1.output_name(), "name");
+
+        // Only alias - uses alias
+        let field2 = FieldInfo::new("name", "name", SqlType::Text).alias("nm");
+        assert_eq!(field2.output_name(), "nm");
+
+        // serialization_alias takes precedence
+        let field3 = FieldInfo::new("name", "name", SqlType::Text)
+            .alias("nm")
+            .serialization_alias("outputName");
+        assert_eq!(field3.output_name(), "outputName");
+
+        // Only serialization_alias
+        let field4 = FieldInfo::new("name", "name", SqlType::Text).serialization_alias("userName");
+        assert_eq!(field4.output_name(), "userName");
+    }
+
+    #[test]
+    fn test_field_info_matches_input_name() {
+        // No aliases - only matches field name
+        let field1 = FieldInfo::new("name", "name", SqlType::Text);
+        assert!(field1.matches_input_name("name"));
+        assert!(!field1.matches_input_name("userName"));
+
+        // With alias - matches both
+        let field2 = FieldInfo::new("name", "name", SqlType::Text).alias("nm");
+        assert!(field2.matches_input_name("name"));
+        assert!(field2.matches_input_name("nm"));
+        assert!(!field2.matches_input_name("userName"));
+
+        // With validation_alias - matches both
+        let field3 = FieldInfo::new("name", "name", SqlType::Text).validation_alias("user_name");
+        assert!(field3.matches_input_name("name"));
+        assert!(field3.matches_input_name("user_name"));
+        assert!(!field3.matches_input_name("userName"));
+
+        // With both - matches all three
+        let field4 = FieldInfo::new("name", "name", SqlType::Text)
+            .alias("nm")
+            .validation_alias("user_name");
+        assert!(field4.matches_input_name("name"));
+        assert!(field4.matches_input_name("nm"));
+        assert!(field4.matches_input_name("user_name"));
+    }
+
+    #[test]
+    fn test_field_info_has_alias() {
+        let field1 = FieldInfo::new("name", "name", SqlType::Text);
+        assert!(!field1.has_alias());
+
+        let field2 = FieldInfo::new("name", "name", SqlType::Text).alias("nm");
+        assert!(field2.has_alias());
+
+        let field3 = FieldInfo::new("name", "name", SqlType::Text).validation_alias("user_name");
+        assert!(field3.has_alias());
+
+        let field4 = FieldInfo::new("name", "name", SqlType::Text).serialization_alias("userName");
+        assert!(field4.has_alias());
+
+        let field5 = FieldInfo::new("name", "name", SqlType::Text)
+            .alias("nm")
+            .validation_alias("user_name")
+            .serialization_alias("userName");
+        assert!(field5.has_alias());
     }
 }

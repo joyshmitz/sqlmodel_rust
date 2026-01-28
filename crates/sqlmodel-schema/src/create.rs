@@ -178,6 +178,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "name",
@@ -195,6 +198,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "age",
@@ -212,6 +218,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "team_id",
@@ -229,6 +238,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
             ];
             FIELDS
@@ -361,6 +373,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "is_active",
@@ -378,6 +393,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
             ];
             FIELDS
@@ -432,6 +450,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "post_id",
@@ -449,6 +470,9 @@ mod tests {
                     on_delete: Some(ReferentialAction::Cascade),
                     on_update: Some(ReferentialAction::NoAction),
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
             ];
             FIELDS
@@ -549,6 +573,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "price",
@@ -566,6 +593,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "sku",
@@ -583,6 +613,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
             ];
             FIELDS

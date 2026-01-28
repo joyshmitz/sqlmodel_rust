@@ -261,6 +261,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "name",
@@ -278,6 +281,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "age",
@@ -295,6 +301,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
             ];
             &FIELDS
