@@ -727,6 +727,9 @@ mod tests {
                 on_delete: None,
                 on_update: None,
                 index: None,
+                alias: None,
+                validation_alias: None,
+                serialization_alias: None,
             }];
             &FIELDS
         }
@@ -770,6 +773,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
                 FieldInfo {
                     name: "team_id",
@@ -787,6 +793,9 @@ mod tests {
                     on_delete: None,
                     on_update: None,
                     index: None,
+                    alias: None,
+                    validation_alias: None,
+                    serialization_alias: None,
                 },
             ];
             &FIELDS

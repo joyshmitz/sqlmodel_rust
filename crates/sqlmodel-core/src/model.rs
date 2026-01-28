@@ -84,6 +84,118 @@ pub trait SoftDelete: Model {
     fn is_deleted(&self) -> bool;
 }
 
+/// Lifecycle event hooks for model instances.
+///
+/// Models can implement this trait to receive callbacks at various points
+/// in the persistence lifecycle: before/after insert, update, and delete.
+///
+/// All methods have default no-op implementations, so you only need to
+/// override the ones you care about.
+///
+/// # Example
+///
+/// ```ignore
+/// use sqlmodel_core::{Model, ModelEvents, Result};
+///
+/// #[derive(Model)]
+/// struct User {
+///     id: Option<i64>,
+///     name: String,
+///     created_at: Option<i64>,
+///     updated_at: Option<i64>,
+/// }
+///
+/// impl ModelEvents for User {
+///     fn before_insert(&mut self) -> Result<()> {
+///         let now = std::time::SystemTime::now()
+///             .duration_since(std::time::UNIX_EPOCH)
+///             .unwrap()
+///             .as_secs() as i64;
+///         self.created_at = Some(now);
+///         self.updated_at = Some(now);
+///         Ok(())
+///     }
+///
+///     fn before_update(&mut self) -> Result<()> {
+///         let now = std::time::SystemTime::now()
+///             .duration_since(std::time::UNIX_EPOCH)
+///             .unwrap()
+///             .as_secs() as i64;
+///         self.updated_at = Some(now);
+///         Ok(())
+///     }
+/// }
+/// ```
+pub trait ModelEvents: Model {
+    /// Called before a new instance is inserted into the database.
+    ///
+    /// Use this to set default values, validate data, or perform
+    /// any pre-insert logic. Return an error to abort the insert.
+    #[allow(unused_variables, clippy::result_large_err)]
+    fn before_insert(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called after an instance has been successfully inserted.
+    ///
+    /// The instance now has its auto-generated ID (if applicable).
+    /// Use this for post-insert notifications or logging.
+    #[allow(unused_variables, clippy::result_large_err)]
+    fn after_insert(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called before an existing instance is updated in the database.
+    ///
+    /// Use this to update timestamps, validate changes, or perform
+    /// any pre-update logic. Return an error to abort the update.
+    #[allow(unused_variables, clippy::result_large_err)]
+    fn before_update(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called after an instance has been successfully updated.
+    ///
+    /// Use this for post-update notifications or logging.
+    #[allow(unused_variables, clippy::result_large_err)]
+    fn after_update(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called before an instance is deleted from the database.
+    ///
+    /// Use this for cleanup, validation, or any pre-delete logic.
+    /// Return an error to abort the delete.
+    #[allow(unused_variables, clippy::result_large_err)]
+    fn before_delete(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called after an instance has been successfully deleted.
+    ///
+    /// Use this for post-delete notifications or logging.
+    #[allow(unused_variables, clippy::result_large_err)]
+    fn after_delete(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called after an instance has been loaded from the database.
+    ///
+    /// Use this to perform post-load initialization or validation.
+    #[allow(unused_variables, clippy::result_large_err)]
+    fn on_load(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Called after an instance has been refreshed from the database.
+    ///
+    /// Use this to handle any logic needed after a refresh operation.
+    #[allow(unused_variables, clippy::result_large_err)]
+    fn on_refresh(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -122,5 +234,161 @@ mod tests {
     #[test]
     fn test_default_relationships_is_empty() {
         assert!(TestModel::RELATIONSHIPS.is_empty());
+    }
+
+    // Test default ModelEvents implementation
+    impl ModelEvents for TestModel {}
+
+    #[test]
+    fn test_model_events_default_before_insert() {
+        let mut model = TestModel;
+        assert!(model.before_insert().is_ok());
+    }
+
+    #[test]
+    fn test_model_events_default_after_insert() {
+        let mut model = TestModel;
+        assert!(model.after_insert().is_ok());
+    }
+
+    #[test]
+    fn test_model_events_default_before_update() {
+        let mut model = TestModel;
+        assert!(model.before_update().is_ok());
+    }
+
+    #[test]
+    fn test_model_events_default_after_update() {
+        let mut model = TestModel;
+        assert!(model.after_update().is_ok());
+    }
+
+    #[test]
+    fn test_model_events_default_before_delete() {
+        let mut model = TestModel;
+        assert!(model.before_delete().is_ok());
+    }
+
+    #[test]
+    fn test_model_events_default_after_delete() {
+        let mut model = TestModel;
+        assert!(model.after_delete().is_ok());
+    }
+
+    #[test]
+    fn test_model_events_default_on_load() {
+        let mut model = TestModel;
+        assert!(model.on_load().is_ok());
+    }
+
+    #[test]
+    fn test_model_events_default_on_refresh() {
+        let mut model = TestModel;
+        assert!(model.on_refresh().is_ok());
+    }
+
+    // Test custom ModelEvents implementation that modifies state
+    #[derive(Debug)]
+    struct TimestampedModel {
+        id: Option<i64>,
+        created_at: i64,
+        updated_at: i64,
+    }
+
+    impl Model for TimestampedModel {
+        const TABLE_NAME: &'static str = "timestamped_models";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            static FIELDS: &[FieldInfo] =
+                &[FieldInfo::new("id", "id", SqlType::Integer).primary_key(true)];
+            FIELDS
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![("id", self.id.map(Value::from).unwrap_or(Value::Null))]
+        }
+
+        fn from_row(_row: &Row) -> Result<Self> {
+            Ok(Self {
+                id: Some(1),
+                created_at: 0,
+                updated_at: 0,
+            })
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            vec![self.id.map(Value::from).unwrap_or(Value::Null)]
+        }
+
+        fn is_new(&self) -> bool {
+            self.id.is_none()
+        }
+    }
+
+    impl ModelEvents for TimestampedModel {
+        fn before_insert(&mut self) -> Result<()> {
+            // Simulate setting created_at timestamp
+            self.created_at = 1000;
+            self.updated_at = 1000;
+            Ok(())
+        }
+
+        fn before_update(&mut self) -> Result<()> {
+            // Simulate updating updated_at timestamp
+            self.updated_at = 2000;
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_model_events_custom_before_insert_sets_timestamps() {
+        let mut model = TimestampedModel {
+            id: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        assert_eq!(model.created_at, 0);
+        assert_eq!(model.updated_at, 0);
+
+        model.before_insert().unwrap();
+
+        assert_eq!(model.created_at, 1000);
+        assert_eq!(model.updated_at, 1000);
+    }
+
+    #[test]
+    fn test_model_events_custom_before_update_sets_timestamp() {
+        let mut model = TimestampedModel {
+            id: Some(1),
+            created_at: 1000,
+            updated_at: 1000,
+        };
+
+        model.before_update().unwrap();
+
+        // created_at should remain unchanged
+        assert_eq!(model.created_at, 1000);
+        // updated_at should be updated
+        assert_eq!(model.updated_at, 2000);
+    }
+
+    #[test]
+    fn test_model_events_custom_defaults_still_work() {
+        // Ensure overriding some methods doesn't break the defaults
+        let mut model = TimestampedModel {
+            id: Some(1),
+            created_at: 0,
+            updated_at: 0,
+        };
+
+        // These use default implementations
+        assert!(model.after_insert().is_ok());
+        assert!(model.after_update().is_ok());
+        assert!(model.before_delete().is_ok());
+        assert!(model.after_delete().is_ok());
+        assert!(model.on_load().is_ok());
+        assert!(model.on_refresh().is_ok());
     }
 }

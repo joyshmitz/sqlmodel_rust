@@ -257,6 +257,8 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
             quote::quote! { None }
         };
 
+        let computed = field.computed;
+
         field_tokens.push(quote::quote! {
             sqlmodel_core::FieldInfo::new(stringify!(#field_ident), #column_name, #sql_type_token)
                 .sql_type_override_opt(#sql_type_override_token)
@@ -272,6 +274,7 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
                 .alias_opt(#alias_token)
                 .validation_alias_opt(#validation_alias_token)
                 .serialization_alias_opt(#serialization_alias_token)
+                .computed(#computed)
         });
     }
 
@@ -350,11 +353,22 @@ fn generate_from_row(model: &ModelDef) -> proc_macro2::TokenStream {
         })
         .collect();
 
+    // Handle computed fields with Default (they're not in the DB row)
+    let computed_fields: Vec<_> = model
+        .computed_fields()
+        .iter()
+        .map(|f| {
+            let field_name = &f.name;
+            quote::quote! { #field_name: Default::default() }
+        })
+        .collect();
+
     quote::quote! {
         Ok(#name {
             #(#field_extractions,)*
             #(#skipped_fields,)*
             #(#relationship_fields,)*
+            #(#computed_fields,)*
         })
     }
 }

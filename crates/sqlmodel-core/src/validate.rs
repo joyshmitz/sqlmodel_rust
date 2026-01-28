@@ -540,6 +540,247 @@ fn value_to_json(value: Value) -> serde_json::Value {
     }
 }
 
+// ============================================================================
+// Alias-Aware Validation and Serialization
+// ============================================================================
+
+use crate::Model;
+
+/// Apply validation aliases to JSON input.
+///
+/// This transforms input keys that match validation_alias or alias to their
+/// corresponding field names, enabling deserialization to work correctly.
+///
+/// # Arguments
+///
+/// * `json` - The JSON value to transform (modified in place)
+/// * `fields` - The field metadata containing alias information
+pub fn apply_validation_aliases(json: &mut serde_json::Value, fields: &[crate::FieldInfo]) {
+    if let serde_json::Value::Object(map) = json {
+        // Build a mapping from alias -> field_name
+        let mut alias_map: HashMap<&str, &str> = HashMap::new();
+        for field in fields {
+            // validation_alias takes precedence for input
+            if let Some(alias) = field.validation_alias {
+                alias_map.insert(alias, field.name);
+            }
+            // Regular alias also works for input
+            if let Some(alias) = field.alias {
+                alias_map.entry(alias).or_insert(field.name);
+            }
+        }
+
+        // Collect keys that need to be renamed
+        let renames: Vec<(String, &str)> = map
+            .keys()
+            .filter_map(|k| alias_map.get(k.as_str()).map(|v| (k.clone(), *v)))
+            .collect();
+
+        // Apply renames
+        for (old_key, new_key) in renames {
+            if let Some(value) = map.remove(&old_key) {
+                // Only insert if the target key doesn't already exist
+                map.entry(new_key.to_string()).or_insert(value);
+            }
+        }
+    }
+}
+
+/// Apply serialization aliases to JSON output.
+///
+/// This transforms output keys from field names to their serialization_alias
+/// or alias, enabling proper JSON output format.
+///
+/// # Arguments
+///
+/// * `json` - The JSON value to transform (modified in place)
+/// * `fields` - The field metadata containing alias information
+pub fn apply_serialization_aliases(json: &mut serde_json::Value, fields: &[crate::FieldInfo]) {
+    if let serde_json::Value::Object(map) = json {
+        // Build a mapping from field_name -> output_alias
+        let mut alias_map: HashMap<&str, &str> = HashMap::new();
+        for field in fields {
+            // serialization_alias takes precedence for output
+            if let Some(alias) = field.serialization_alias {
+                alias_map.insert(field.name, alias);
+            } else if let Some(alias) = field.alias {
+                // Regular alias is fallback for output
+                alias_map.insert(field.name, alias);
+            }
+        }
+
+        // Collect keys that need to be renamed
+        let renames: Vec<(String, &str)> = map
+            .keys()
+            .filter_map(|k| alias_map.get(k.as_str()).map(|v| (k.clone(), *v)))
+            .collect();
+
+        // Apply renames
+        for (old_key, new_key) in renames {
+            if let Some(value) = map.remove(&old_key) {
+                map.insert(new_key.to_string(), value);
+            }
+        }
+    }
+}
+
+/// Model-aware validation that supports field aliases.
+///
+/// Unlike the generic `ModelValidate`, this trait uses the `Model::fields()`
+/// metadata to transform aliased input keys to their actual field names
+/// before deserialization.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Model, Serialize, Deserialize)]
+/// struct User {
+///     #[sqlmodel(validation_alias = "userName")]
+///     name: String,
+/// }
+///
+/// // Input with alias key works
+/// let user = User::sql_model_validate(r#"{"userName": "Alice"}"#)?;
+/// assert_eq!(user.name, "Alice");
+/// ```
+pub trait SqlModelValidate: Model + DeserializeOwned + Sized {
+    /// Create and validate a model from input, applying validation aliases.
+    fn sql_model_validate(
+        input: impl Into<ValidateInput>,
+        options: ValidateOptions,
+    ) -> ValidateResult<Self> {
+        let input = input.into();
+
+        // Convert input to serde_json::Value
+        let mut json_value = match input {
+            ValidateInput::Dict(dict) => {
+                let map: serde_json::Map<String, serde_json::Value> = dict
+                    .into_iter()
+                    .map(|(k, v)| (k, value_to_json(v)))
+                    .collect();
+                serde_json::Value::Object(map)
+            }
+            ValidateInput::Json(json_str) => {
+                serde_json::from_str(&json_str).map_err(|e| {
+                    let mut err = ValidationError::new();
+                    err.add("_json", ValidationErrorKind::Custom, format!("Invalid JSON: {e}"));
+                    err
+                })?
+            }
+            ValidateInput::JsonValue(value) => value,
+        };
+
+        // Apply validation aliases before deserialization
+        apply_validation_aliases(&mut json_value, Self::fields());
+
+        // Apply update values if provided
+        if let Some(update) = options.update {
+            if let serde_json::Value::Object(ref mut map) = json_value {
+                for (key, value) in update {
+                    map.insert(key, value);
+                }
+            }
+        }
+
+        // Deserialize
+        serde_json::from_value(json_value).map_err(|e| {
+            let mut err = ValidationError::new();
+            err.add(
+                "_model",
+                ValidationErrorKind::Custom,
+                format!("Validation failed: {e}"),
+            );
+            err
+        })
+    }
+
+    /// Create and validate a model from JSON string with default options.
+    fn sql_model_validate_json(json: &str) -> ValidateResult<Self> {
+        Self::sql_model_validate(json, ValidateOptions::default())
+    }
+
+    /// Create and validate a model from a HashMap with default options.
+    fn sql_model_validate_dict(dict: HashMap<String, Value>) -> ValidateResult<Self> {
+        Self::sql_model_validate(dict, ValidateOptions::default())
+    }
+}
+
+/// Blanket implementation for all Model types that implement DeserializeOwned.
+impl<T: Model + DeserializeOwned> SqlModelValidate for T {}
+
+/// Model-aware dump that supports field aliases.
+///
+/// Unlike the generic `ModelDump`, this trait uses the `Model::fields()`
+/// metadata to transform field names to their serialization aliases
+/// in the output.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Model, Serialize, Deserialize)]
+/// struct User {
+///     #[sqlmodel(serialization_alias = "userName")]
+///     name: String,
+/// }
+///
+/// let user = User { name: "Alice".to_string() };
+/// let json = user.sql_model_dump(DumpOptions::default().by_alias())?;
+/// assert_eq!(json["userName"], "Alice");
+/// ```
+pub trait SqlModelDump: Model + serde::Serialize {
+    /// Serialize a model to a JSON value, optionally applying aliases.
+    fn sql_model_dump(&self, options: DumpOptions) -> DumpResult {
+        // First, serialize to JSON value
+        let mut value = serde_json::to_value(self)?;
+
+        // Apply serialization aliases if by_alias is set
+        if options.by_alias {
+            apply_serialization_aliases(&mut value, Self::fields());
+        }
+
+        // Apply other options
+        if let serde_json::Value::Object(ref mut map) = value {
+            // Apply include filter
+            if let Some(ref include) = options.include {
+                map.retain(|k, _| include.contains(k));
+            }
+
+            // Apply exclude filter
+            if let Some(ref exclude) = options.exclude {
+                map.retain(|k, _| !exclude.contains(k));
+            }
+
+            // Apply exclude_none filter
+            if options.exclude_none {
+                map.retain(|_, v| !v.is_null());
+            }
+        }
+
+        Ok(value)
+    }
+
+    /// Serialize a model to a JSON string with default options.
+    fn sql_model_dump_json(&self) -> std::result::Result<String, serde_json::Error> {
+        let value = self.sql_model_dump(DumpOptions::default())?;
+        serde_json::to_string(&value)
+    }
+
+    /// Serialize a model to a pretty-printed JSON string.
+    fn sql_model_dump_json_pretty(&self) -> std::result::Result<String, serde_json::Error> {
+        let value = self.sql_model_dump(DumpOptions::default())?;
+        serde_json::to_string_pretty(&value)
+    }
+
+    /// Serialize with aliases to a JSON string.
+    fn sql_model_dump_json_by_alias(&self) -> std::result::Result<String, serde_json::Error> {
+        let value = self.sql_model_dump(DumpOptions::default().by_alias())?;
+        serde_json::to_string(&value)
+    }
+}
+
+/// Blanket implementation for all Model types that implement Serialize.
+impl<T: Model + serde::Serialize> SqlModelDump for T {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -940,5 +1181,197 @@ mod tests {
         assert!(json.get("name").is_some());
         assert!(json.get("age").is_none());
         assert!(json.get("active").is_none());
+    }
+
+    // ========================================================================
+    // Alias Tests
+    // ========================================================================
+
+    use crate::{FieldInfo, Row, SqlType};
+
+    /// Test model with aliases for validation and serialization tests.
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct TestAliasedUser {
+        id: i64,
+        name: String,
+        email: String,
+    }
+
+    impl Model for TestAliasedUser {
+        const TABLE_NAME: &'static str = "users";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            static FIELDS: &[FieldInfo] = &[
+                FieldInfo::new("id", "id", SqlType::BigInt).primary_key(true),
+                FieldInfo::new("name", "name", SqlType::Text)
+                    .validation_alias("userName")
+                    .serialization_alias("displayName"),
+                FieldInfo::new("email", "email", SqlType::Text)
+                    .alias("emailAddress"), // Both input and output
+            ];
+            FIELDS
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![
+                ("id", Value::BigInt(self.id)),
+                ("name", Value::Text(self.name.clone())),
+                ("email", Value::Text(self.email.clone())),
+            ]
+        }
+
+        fn from_row(row: &Row) -> crate::Result<Self> {
+            Ok(Self {
+                id: row.get_named("id")?,
+                name: row.get_named("name")?,
+                email: row.get_named("email")?,
+            })
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            vec![Value::BigInt(self.id)]
+        }
+
+        fn is_new(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn test_apply_validation_aliases() {
+        let fields = TestAliasedUser::fields();
+
+        // Test with validation_alias
+        let mut json = serde_json::json!({
+            "id": 1,
+            "userName": "Alice",
+            "email": "alice@example.com"
+        });
+        apply_validation_aliases(&mut json, fields);
+
+        // userName should be renamed to name
+        assert_eq!(json["name"], "Alice");
+        assert!(json.get("userName").is_none());
+
+        // Test with regular alias
+        let mut json2 = serde_json::json!({
+            "id": 1,
+            "name": "Bob",
+            "emailAddress": "bob@example.com"
+        });
+        apply_validation_aliases(&mut json2, fields);
+
+        // emailAddress should be renamed to email
+        assert_eq!(json2["email"], "bob@example.com");
+        assert!(json2.get("emailAddress").is_none());
+    }
+
+    #[test]
+    fn test_apply_serialization_aliases() {
+        let fields = TestAliasedUser::fields();
+
+        let mut json = serde_json::json!({
+            "id": 1,
+            "name": "Alice",
+            "email": "alice@example.com"
+        });
+        apply_serialization_aliases(&mut json, fields);
+
+        // name should be renamed to displayName (serialization_alias)
+        assert_eq!(json["displayName"], "Alice");
+        assert!(json.get("name").is_none());
+
+        // email should be renamed to emailAddress (regular alias)
+        assert_eq!(json["emailAddress"], "alice@example.com");
+        assert!(json.get("email").is_none());
+    }
+
+    #[test]
+    fn test_sql_model_validate_with_validation_alias() {
+        // Use validation_alias in input
+        let json = r#"{"id": 1, "userName": "Alice", "email": "alice@example.com"}"#;
+        let user: TestAliasedUser = TestAliasedUser::sql_model_validate_json(json).unwrap();
+
+        assert_eq!(user.id, 1);
+        assert_eq!(user.name, "Alice");
+        assert_eq!(user.email, "alice@example.com");
+    }
+
+    #[test]
+    fn test_sql_model_validate_with_regular_alias() {
+        // Use regular alias in input
+        let json = r#"{"id": 1, "name": "Bob", "emailAddress": "bob@example.com"}"#;
+        let user: TestAliasedUser = TestAliasedUser::sql_model_validate_json(json).unwrap();
+
+        assert_eq!(user.id, 1);
+        assert_eq!(user.name, "Bob");
+        assert_eq!(user.email, "bob@example.com");
+    }
+
+    #[test]
+    fn test_sql_model_validate_with_field_name() {
+        // Use actual field name (should still work)
+        let json = r#"{"id": 1, "name": "Charlie", "email": "charlie@example.com"}"#;
+        let user: TestAliasedUser = TestAliasedUser::sql_model_validate_json(json).unwrap();
+
+        assert_eq!(user.id, 1);
+        assert_eq!(user.name, "Charlie");
+        assert_eq!(user.email, "charlie@example.com");
+    }
+
+    #[test]
+    fn test_sql_model_dump_by_alias() {
+        let user = TestAliasedUser {
+            id: 1,
+            name: "Alice".to_string(),
+            email: "alice@example.com".to_string(),
+        };
+
+        let json = user.sql_model_dump(DumpOptions::default().by_alias()).unwrap();
+
+        // name should be serialized as displayName
+        assert_eq!(json["displayName"], "Alice");
+        assert!(json.get("name").is_none());
+
+        // email should be serialized as emailAddress
+        assert_eq!(json["emailAddress"], "alice@example.com");
+        assert!(json.get("email").is_none());
+    }
+
+    #[test]
+    fn test_sql_model_dump_without_alias() {
+        let user = TestAliasedUser {
+            id: 1,
+            name: "Alice".to_string(),
+            email: "alice@example.com".to_string(),
+        };
+
+        // Without by_alias, use original field names
+        let json = user.sql_model_dump(DumpOptions::default()).unwrap();
+
+        assert_eq!(json["name"], "Alice");
+        assert_eq!(json["email"], "alice@example.com");
+        assert!(json.get("displayName").is_none());
+        assert!(json.get("emailAddress").is_none());
+    }
+
+    #[test]
+    fn test_alias_does_not_overwrite_existing() {
+        let fields = TestAliasedUser::fields();
+
+        // If both alias and field name are present, field name wins
+        let mut json = serde_json::json!({
+            "id": 1,
+            "name": "FieldName",
+            "userName": "AliasName",
+            "email": "test@example.com"
+        });
+        apply_validation_aliases(&mut json, fields);
+
+        // Original "name" field should be preserved
+        assert_eq!(json["name"], "FieldName");
+        // userName should be removed (but couldn't insert because "name" exists)
+        assert!(json.get("userName").is_none());
     }
 }

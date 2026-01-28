@@ -40,7 +40,7 @@ use std::sync::{Arc, RwLock, Weak};
 /// Hash a slice of values for use as a primary key identifier.
 fn hash_pk_values(values: &[Value]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hasher;
 
     let mut hasher = DefaultHasher::new();
     for v in values {
@@ -134,11 +134,12 @@ fn hash_single_value(v: &Value, hasher: &mut impl std::hash::Hasher) {
 
 /// A type-erased entry in the identity map.
 ///
-/// This wrapper holds an `Arc<RwLock<dyn Any>>` which can be downcast
-/// to the concrete model type.
+/// This wrapper holds a type-erased `Arc<RwLock<M>>` which can be downcast
+/// to recover the concrete model type.
 struct IdentityEntry {
-    /// The actual object wrapped in Arc<RwLock<>>.
-    object: Arc<RwLock<Box<dyn Any + Send + Sync>>>,
+    /// Type-erased Arc. Actually stores `Arc<RwLock<M>>` for some M.
+    /// We type-erase the Arc itself so we can return clones of the same Arc.
+    arc: Box<dyn Any + Send + Sync>,
     /// The primary key values for this entry.
     pk_values: Vec<Value>,
 }
@@ -177,32 +178,22 @@ impl IdentityMap {
         let type_id = TypeId::of::<M>();
         let key = (type_id, pk_hash);
 
-        // Check if already exists
+        // Check if already exists - return clone of the existing Arc
         if let Some(entry) = self.entries.get(&key) {
-            // Return existing reference (downcast)
-            let guard = entry.object.read().expect("lock poisoned");
-            if let Some(existing) = guard.downcast_ref::<M>() {
-                // Clone the Arc by creating a new one pointing to the same data
-                // We need to re-wrap since we store Box<dyn Any>
-                drop(guard);
-
-                // Create a properly typed Arc from the existing entry
-                // This is safe because we verified the type via downcast_ref
-                let typed_arc = Arc::new(RwLock::new(existing.clone()));
-                return typed_arc;
+            if let Some(existing_arc) = entry.arc.downcast_ref::<Arc<RwLock<M>>>() {
+                // Return clone of the same Arc (not a new Arc with cloned value)
+                return Arc::clone(existing_arc);
             }
         }
 
-        // Insert new entry
-        let arc = Arc::new(RwLock::new(model));
-        let type_erased: Arc<RwLock<Box<dyn Any + Send + Sync>>> = Arc::new(RwLock::new(Box::new(
-            arc.read().expect("lock poisoned").clone(),
-        )));
+        // Insert new entry - store the Arc itself in type-erased form
+        let arc: Arc<RwLock<M>> = Arc::new(RwLock::new(model));
+        let type_erased: Box<dyn Any + Send + Sync> = Box::new(Arc::clone(&arc));
 
         self.entries.insert(
             key,
             IdentityEntry {
-                object: type_erased,
+                arc: type_erased,
                 pk_values,
             },
         );
@@ -215,7 +206,8 @@ impl IdentityMap {
     /// # Returns
     ///
     /// `Some(Arc<RwLock<M>>)` if found, `None` otherwise.
-    pub fn get<M: Model + Clone + Send + Sync + 'static>(
+    /// The returned Arc is a clone of the stored Arc, so modifications are shared.
+    pub fn get<M: Model + Send + Sync + 'static>(
         &self,
         pk_values: &[Value],
     ) -> Option<Arc<RwLock<M>>> {
@@ -224,11 +216,10 @@ impl IdentityMap {
         let key = (type_id, pk_hash);
 
         let entry = self.entries.get(&key)?;
-        let guard = entry.object.read().expect("lock poisoned");
 
-        // Downcast and clone into a new Arc
-        let model = guard.downcast_ref::<M>()?;
-        Some(Arc::new(RwLock::new(model.clone())))
+        // Downcast the type-erased Arc to the concrete type and clone it
+        let arc = entry.arc.downcast_ref::<Arc<RwLock<M>>>()?;
+        Some(Arc::clone(arc))
     }
 
     /// Check if an object with the given PK exists in the map.
@@ -311,9 +302,10 @@ impl IdentityMap {
         let key = (type_id, pk_hash);
 
         if let Some(entry) = self.entries.get(&key) {
-            let mut guard = entry.object.write().expect("lock poisoned");
-            if let Some(existing) = guard.downcast_mut::<M>() {
-                *existing = model.clone();
+            // Downcast the Box to get the Arc<RwLock<M>>, then write to the RwLock
+            if let Some(arc) = entry.arc.downcast_ref::<Arc<RwLock<M>>>() {
+                let mut guard = arc.write().expect("lock poisoned");
+                *guard = model.clone();
                 return true;
             }
         }
