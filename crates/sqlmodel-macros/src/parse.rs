@@ -1855,4 +1855,118 @@ mod tests {
         let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
         assert_eq!(name_field.alias, Some("user-name_v2".to_string()));
     }
+
+    // =========================================================================
+    // Decimal Precision Tests (max_digits, decimal_places)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_max_digits() {
+        let input: DeriveInput = parse_quote! {
+            struct Product {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(max_digits = 10)]
+                price: f64,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let price_field = def.fields.iter().find(|f| f.name == "price").unwrap();
+        assert_eq!(price_field.max_digits, Some(10));
+        assert_eq!(price_field.decimal_places, None);
+    }
+
+    #[test]
+    fn test_parse_decimal_places() {
+        let input: DeriveInput = parse_quote! {
+            struct Product {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(decimal_places = 2)]
+                price: f64,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let price_field = def.fields.iter().find(|f| f.name == "price").unwrap();
+        assert_eq!(price_field.max_digits, None);
+        assert_eq!(price_field.decimal_places, Some(2));
+    }
+
+    #[test]
+    fn test_parse_max_digits_and_decimal_places() {
+        let input: DeriveInput = parse_quote! {
+            struct Product {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(max_digits = 10, decimal_places = 2)]
+                price: f64,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let price_field = def.fields.iter().find(|f| f.name == "price").unwrap();
+        assert_eq!(price_field.max_digits, Some(10));
+        assert_eq!(price_field.decimal_places, Some(2));
+    }
+
+    #[test]
+    fn test_decimal_places_exceeds_max_digits_errors() {
+        // decimal_places > max_digits should fail
+        let input: DeriveInput = parse_quote! {
+            struct Product {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(max_digits = 5, decimal_places = 10)]
+                price: f64,
+            }
+        };
+
+        let result = parse_model(&input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("decimal_places") && err.contains("max_digits"));
+    }
+
+    #[test]
+    fn test_max_digits_zero_errors() {
+        // max_digits = 0 should fail
+        let input: DeriveInput = parse_quote! {
+            struct Product {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(max_digits = 0)]
+                price: f64,
+            }
+        };
+
+        let result = parse_model(&input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("max_digits"));
+    }
+
+    #[test]
+    fn test_data_fields_includes_computed() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                name: String,
+                #[sqlmodel(computed)]
+                full_name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        // select_fields should exclude computed
+        assert_eq!(def.select_fields().len(), 2);
+        assert!(def.select_fields().iter().all(|f| !f.computed));
+
+        // data_fields should include computed
+        assert_eq!(def.data_fields().len(), 3);
+        assert!(def.data_fields().iter().any(|f| f.computed));
+    }
 }
