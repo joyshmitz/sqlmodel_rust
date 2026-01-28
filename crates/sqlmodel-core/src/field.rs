@@ -110,6 +110,13 @@ pub struct FieldInfo {
     /// Extra JSON Schema properties (as JSON string, merged into schema).
     /// The string should be valid JSON that will be merged into the field's schema.
     pub schema_extra: Option<&'static str>,
+    /// JSON representation of the field's default value (for exclude_defaults).
+    /// When set, model_dump with exclude_defaults=true will compare the current
+    /// value against this and exclude the field if they match.
+    pub default_json: Option<&'static str>,
+    /// Whether this field has a default value (used for exclude_unset tracking).
+    /// Fields with defaults can be distinguished from fields that were explicitly set.
+    pub has_default: bool,
 }
 
 impl FieldInfo {
@@ -139,6 +146,8 @@ impl FieldInfo {
             title: None,
             description: None,
             schema_extra: None,
+            default_json: None,
+            has_default: false,
         }
     }
 
@@ -457,6 +466,42 @@ impl FieldInfo {
     /// Set schema_extra from optional.
     pub const fn schema_extra_opt(mut self, value: Option<&'static str>) -> Self {
         self.schema_extra = value;
+        self
+    }
+
+    /// Set the JSON representation of the field's default value.
+    ///
+    /// This is used by model_dump with exclude_defaults=true to compare
+    /// the current value against the default.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// FieldInfo::new("count", "count", SqlType::Integer)
+    ///     .default_json("0")
+    ///     .has_default(true)
+    /// ```
+    pub const fn default_json(mut self, value: &'static str) -> Self {
+        self.default_json = Some(value);
+        self.has_default = true;
+        self
+    }
+
+    /// Set default_json from optional.
+    pub const fn default_json_opt(mut self, value: Option<&'static str>) -> Self {
+        self.default_json = value;
+        if value.is_some() {
+            self.has_default = true;
+        }
+        self
+    }
+
+    /// Mark whether this field has a default value.
+    ///
+    /// Used for exclude_unset tracking - fields with defaults may not need
+    /// to be explicitly set.
+    pub const fn has_default(mut self, value: bool) -> Self {
+        self.has_default = value;
         self
     }
 

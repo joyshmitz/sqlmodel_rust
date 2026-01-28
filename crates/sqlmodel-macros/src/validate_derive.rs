@@ -779,6 +779,9 @@ mod tests {
             required: false,
             custom: None,
             multiple_of: None,
+            min_items: None,
+            max_items: None,
+            unique_items: false,
         };
         assert!(has_validation(&field));
 
@@ -793,6 +796,9 @@ mod tests {
             required: false,
             custom: None,
             multiple_of: None,
+            min_items: None,
+            max_items: None,
+            unique_items: false,
         };
         assert!(!has_validation(&field));
     }
@@ -983,6 +989,9 @@ mod tests {
             required: false,
             custom: None,
             multiple_of: Some(5.0),
+            min_items: None,
+            max_items: None,
+            unique_items: false,
         };
         assert!(has_validation(&field_with_multiple_of));
 
@@ -997,7 +1006,109 @@ mod tests {
             required: false,
             custom: None,
             multiple_of: None,
+            min_items: None,
+            max_items: None,
+            unique_items: false,
         };
         assert!(!has_validation(&field_without_validation));
+    }
+
+    // ========================================================================
+    // Collection Validators Tests
+    // ========================================================================
+
+    #[test]
+    fn test_parse_min_items() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Order {
+                #[validate(min_items = 1)]
+                items: Vec<String>,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert_eq!(def.fields[0].min_items, Some(1));
+    }
+
+    #[test]
+    fn test_parse_max_items() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Order {
+                #[validate(max_items = 100)]
+                items: Vec<String>,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert_eq!(def.fields[0].max_items, Some(100));
+    }
+
+    #[test]
+    fn test_parse_unique_items() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Order {
+                #[validate(unique_items)]
+                items: Vec<String>,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert!(def.fields[0].unique_items);
+    }
+
+    #[test]
+    fn test_parse_all_collection_validators() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Order {
+                #[validate(min_items = 1, max_items = 100, unique_items)]
+                items: Vec<String>,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert_eq!(def.fields[0].min_items, Some(1));
+        assert_eq!(def.fields[0].max_items, Some(100));
+        assert!(def.fields[0].unique_items);
+    }
+
+    #[test]
+    fn test_has_validation_includes_collection_validators() {
+        let field_with_min_items = ValidateFieldDef {
+            name: syn::Ident::new("test", proc_macro2::Span::call_site()),
+            ty: syn::parse_quote!(Vec<i32>),
+            min: None,
+            max: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            required: false,
+            custom: None,
+            multiple_of: None,
+            min_items: Some(1),
+            max_items: None,
+            unique_items: false,
+        };
+        assert!(has_validation(&field_with_min_items));
+
+        let field_with_unique = ValidateFieldDef {
+            name: syn::Ident::new("test", proc_macro2::Span::call_site()),
+            ty: syn::parse_quote!(Vec<i32>),
+            min: None,
+            max: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            required: false,
+            custom: None,
+            multiple_of: None,
+            min_items: None,
+            max_items: None,
+            unique_items: true,
+        };
+        assert!(has_validation(&field_with_unique));
     }
 }

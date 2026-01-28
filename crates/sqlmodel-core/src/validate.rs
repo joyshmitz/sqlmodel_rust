@@ -807,6 +807,22 @@ pub trait SqlModelDump: Model + serde::Serialize {
                     .collect();
                 map.retain(|k, _| !computed_field_names.contains(k.as_str()));
             }
+
+            // Exclude fields with default values if requested
+            if options.exclude_defaults {
+                for field in Self::fields() {
+                    if let Some(default_json) = field.default_json {
+                        if let Some(current_value) = map.get(field.name) {
+                            // Parse the default JSON and compare
+                            if let Ok(default_value) = serde_json::from_str::<serde_json::Value>(default_json) {
+                                if current_value == &default_value {
+                                    map.remove(field.name);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Apply serialization aliases if by_alias is set
@@ -1820,5 +1836,271 @@ mod tests {
         assert_eq!(json["firstName"], "John"); // first_name aliased
         assert!(json.get("displayName").is_none()); // Computed field excluded (even though aliased)
         assert!(json.get("display_name").is_none()); // Original name doesn't exist either
+    }
+
+    // ========================================================================
+    // Exclude Defaults Tests
+    // ========================================================================
+
+    /// Test model with default values for exclude_defaults testing.
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct TestModelWithDefaults {
+        id: i64,
+        name: String,
+        count: i32,       // default: 0
+        active: bool,     // default: false
+        score: f64,       // default: 0.0
+        label: String,    // default: "default"
+    }
+
+    impl Model for TestModelWithDefaults {
+        const TABLE_NAME: &'static str = "test_defaults";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            static FIELDS: &[FieldInfo] = &[
+                FieldInfo::new("id", "id", SqlType::BigInt).primary_key(true),
+                FieldInfo::new("name", "name", SqlType::Text),
+                FieldInfo::new("count", "count", SqlType::Integer)
+                    .default_json("0"),
+                FieldInfo::new("active", "active", SqlType::Boolean)
+                    .default_json("false"),
+                FieldInfo::new("score", "score", SqlType::Double)
+                    .default_json("0.0"),
+                FieldInfo::new("label", "label", SqlType::Text)
+                    .default_json("\"default\""),
+            ];
+            FIELDS
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![
+                ("id", Value::BigInt(self.id)),
+                ("name", Value::Text(self.name.clone())),
+                ("count", Value::Int(self.count)),
+                ("active", Value::Bool(self.active)),
+                ("score", Value::Double(self.score)),
+                ("label", Value::Text(self.label.clone())),
+            ]
+        }
+
+        fn from_row(row: &Row) -> crate::Result<Self> {
+            Ok(Self {
+                id: row.get_named("id")?,
+                name: row.get_named("name")?,
+                count: row.get_named("count")?,
+                active: row.get_named("active")?,
+                score: row.get_named("score")?,
+                label: row.get_named("label")?,
+            })
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            vec![Value::BigInt(self.id)]
+        }
+
+        fn is_new(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn test_exclude_defaults_all_at_default() {
+        let model = TestModelWithDefaults {
+            id: 1,
+            name: "Test".to_string(),
+            count: 0,           // at default
+            active: false,      // at default
+            score: 0.0,         // at default
+            label: "default".to_string(), // at default
+        };
+
+        let json = model
+            .sql_model_dump(DumpOptions::default().exclude_defaults())
+            .unwrap();
+
+        // id and name have no default_json, so they're always included
+        assert!(json.get("id").is_some());
+        assert!(json.get("name").is_some());
+
+        // Fields at default value should be excluded
+        assert!(json.get("count").is_none());
+        assert!(json.get("active").is_none());
+        assert!(json.get("score").is_none());
+        assert!(json.get("label").is_none());
+    }
+
+    #[test]
+    fn test_exclude_defaults_none_at_default() {
+        let model = TestModelWithDefaults {
+            id: 1,
+            name: "Test".to_string(),
+            count: 42,          // not at default
+            active: true,       // not at default
+            score: 3.14,        // not at default
+            label: "custom".to_string(), // not at default
+        };
+
+        let json = model
+            .sql_model_dump(DumpOptions::default().exclude_defaults())
+            .unwrap();
+
+        // All fields should be present since none are at defaults
+        assert!(json.get("id").is_some());
+        assert!(json.get("name").is_some());
+        assert!(json.get("count").is_some());
+        assert!(json.get("active").is_some());
+        assert!(json.get("score").is_some());
+        assert!(json.get("label").is_some());
+
+        // Verify values
+        assert_eq!(json["count"], 42);
+        assert_eq!(json["active"], true);
+        assert_eq!(json["score"], 3.14);
+        assert_eq!(json["label"], "custom");
+    }
+
+    #[test]
+    fn test_exclude_defaults_mixed() {
+        let model = TestModelWithDefaults {
+            id: 1,
+            name: "Test".to_string(),
+            count: 0,           // at default
+            active: true,       // not at default
+            score: 0.0,         // at default
+            label: "custom".to_string(), // not at default
+        };
+
+        let json = model
+            .sql_model_dump(DumpOptions::default().exclude_defaults())
+            .unwrap();
+
+        assert!(json.get("id").is_some());
+        assert!(json.get("name").is_some());
+
+        // At default - excluded
+        assert!(json.get("count").is_none());
+        assert!(json.get("score").is_none());
+
+        // Not at default - included
+        assert!(json.get("active").is_some());
+        assert!(json.get("label").is_some());
+        assert_eq!(json["active"], true);
+        assert_eq!(json["label"], "custom");
+    }
+
+    #[test]
+    fn test_exclude_defaults_without_flag() {
+        let model = TestModelWithDefaults {
+            id: 1,
+            name: "Test".to_string(),
+            count: 0,           // at default
+            active: false,      // at default
+            score: 0.0,         // at default
+            label: "default".to_string(), // at default
+        };
+
+        // Without exclude_defaults, all fields should be included
+        let json = model.sql_model_dump(DumpOptions::default()).unwrap();
+
+        assert!(json.get("id").is_some());
+        assert!(json.get("name").is_some());
+        assert!(json.get("count").is_some());
+        assert!(json.get("active").is_some());
+        assert!(json.get("score").is_some());
+        assert!(json.get("label").is_some());
+    }
+
+    #[test]
+    fn test_exclude_defaults_with_by_alias() {
+        // Test that exclude_defaults works correctly with by_alias
+
+        /// Model with defaults and aliases
+        #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+        struct TestAliasWithDefaults {
+            id: i64,
+            count: i32,
+        }
+
+        impl Model for TestAliasWithDefaults {
+            const TABLE_NAME: &'static str = "test";
+            const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+            fn fields() -> &'static [FieldInfo] {
+                static FIELDS: &[FieldInfo] = &[
+                    FieldInfo::new("id", "id", SqlType::BigInt).primary_key(true),
+                    FieldInfo::new("count", "count", SqlType::Integer)
+                        .default_json("0")
+                        .serialization_alias("itemCount"),
+                ];
+                FIELDS
+            }
+
+            fn to_row(&self) -> Vec<(&'static str, Value)> {
+                vec![
+                    ("id", Value::BigInt(self.id)),
+                    ("count", Value::Int(self.count)),
+                ]
+            }
+
+            fn from_row(row: &Row) -> crate::Result<Self> {
+                Ok(Self {
+                    id: row.get_named("id")?,
+                    count: row.get_named("count")?,
+                })
+            }
+
+            fn primary_key_value(&self) -> Vec<Value> {
+                vec![Value::BigInt(self.id)]
+            }
+
+            fn is_new(&self) -> bool {
+                false
+            }
+        }
+
+        // At default value
+        let model_at_default = TestAliasWithDefaults { id: 1, count: 0 };
+        let json = model_at_default
+            .sql_model_dump(DumpOptions::default().exclude_defaults().by_alias())
+            .unwrap();
+
+        // count is at default (0), so neither count nor itemCount should appear
+        assert!(json.get("count").is_none());
+        assert!(json.get("itemCount").is_none());
+
+        // Not at default
+        let model_not_at_default = TestAliasWithDefaults { id: 1, count: 5 };
+        let json = model_not_at_default
+            .sql_model_dump(DumpOptions::default().exclude_defaults().by_alias())
+            .unwrap();
+
+        // count is not at default, should appear with alias
+        assert!(json.get("count").is_none()); // Original name not present
+        assert_eq!(json["itemCount"], 5);     // Alias is present
+    }
+
+    #[test]
+    fn test_field_info_default_json() {
+        // Test the FieldInfo builder methods for default_json
+        let field1 = FieldInfo::new("count", "count", SqlType::Integer)
+            .default_json("0");
+        assert_eq!(field1.default_json, Some("0"));
+        assert!(field1.has_default);
+
+        let field2 = FieldInfo::new("name", "name", SqlType::Text)
+            .default_json_opt(Some("\"hello\""));
+        assert_eq!(field2.default_json, Some("\"hello\""));
+        assert!(field2.has_default);
+
+        let field3 = FieldInfo::new("name", "name", SqlType::Text)
+            .default_json_opt(None);
+        assert_eq!(field3.default_json, None);
+        assert!(!field3.has_default);
+
+        let field4 = FieldInfo::new("flag", "flag", SqlType::Boolean)
+            .has_default(true);
+        assert!(field4.has_default);
+        assert_eq!(field4.default_json, None); // has_default alone doesn't set default_json
     }
 }
