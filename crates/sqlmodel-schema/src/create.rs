@@ -557,6 +557,8 @@ mod tests {
                     column_name: "price",
                     sql_type: SqlType::Real,                  // Base type
                     sql_type_override: Some("DECIMAL(10,2)"), // Override for precision
+                    precision: None,
+                    scale: None,
                     nullable: false,
                     primary_key: false,
                     auto_increment: false,
@@ -572,6 +574,8 @@ mod tests {
                     column_name: "sku",
                     sql_type: SqlType::Text,                // Base type
                     sql_type_override: Some("VARCHAR(50)"), // Override for length constraint
+                    precision: None,
+                    scale: None,
                     nullable: false,
                     primary_key: false,
                     auto_increment: false,
