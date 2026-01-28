@@ -380,3 +380,97 @@ impl<T> Field<T> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SqlType;
+
+    #[test]
+    fn test_field_info_new() {
+        let field = FieldInfo::new("price", "price", SqlType::Decimal { precision: 10, scale: 2 });
+        assert_eq!(field.name, "price");
+        assert_eq!(field.column_name, "price");
+        assert!(field.precision.is_none());
+        assert!(field.scale.is_none());
+    }
+
+    #[test]
+    fn test_field_info_precision_scale() {
+        let field = FieldInfo::new("amount", "amount", SqlType::Decimal { precision: 10, scale: 2 })
+            .precision(12)
+            .scale(4);
+        assert_eq!(field.precision, Some(12));
+        assert_eq!(field.scale, Some(4));
+    }
+
+    #[test]
+    fn test_field_info_decimal_precision() {
+        let field = FieldInfo::new("total", "total", SqlType::Numeric { precision: 10, scale: 2 })
+            .decimal_precision(18, 6);
+        assert_eq!(field.precision, Some(18));
+        assert_eq!(field.scale, Some(6));
+    }
+
+    #[test]
+    fn test_effective_sql_type_override_takes_precedence() {
+        let field = FieldInfo::new("amount", "amount", SqlType::Decimal { precision: 10, scale: 2 })
+            .sql_type_override("MONEY")
+            .precision(18)
+            .scale(4);
+        // Override should take precedence over precision/scale
+        assert_eq!(field.effective_sql_type(), "MONEY");
+    }
+
+    #[test]
+    fn test_effective_sql_type_uses_precision_scale() {
+        let field = FieldInfo::new("price", "price", SqlType::Decimal { precision: 10, scale: 2 })
+            .precision(15)
+            .scale(3);
+        assert_eq!(field.effective_sql_type(), "DECIMAL(15, 3)");
+    }
+
+    #[test]
+    fn test_effective_sql_type_numeric_uses_precision_scale() {
+        let field = FieldInfo::new("value", "value", SqlType::Numeric { precision: 10, scale: 2 })
+            .precision(20)
+            .scale(8);
+        assert_eq!(field.effective_sql_type(), "NUMERIC(20, 8)");
+    }
+
+    #[test]
+    fn test_effective_sql_type_fallback_to_sql_type() {
+        let field = FieldInfo::new("count", "count", SqlType::BigInt);
+        assert_eq!(field.effective_sql_type(), "BIGINT");
+    }
+
+    #[test]
+    fn test_effective_sql_type_decimal_without_precision_scale() {
+        // When precision/scale not set on FieldInfo, use SqlType's values
+        let field = FieldInfo::new("amount", "amount", SqlType::Decimal { precision: 10, scale: 2 });
+        // Falls back to sql_type.sql_name() which should generate "DECIMAL(10, 2)"
+        assert_eq!(field.effective_sql_type(), "DECIMAL(10, 2)");
+    }
+
+    #[test]
+    fn test_precision_opt() {
+        let field = FieldInfo::new("test", "test", SqlType::Decimal { precision: 10, scale: 2 })
+            .precision_opt(Some(16));
+        assert_eq!(field.precision, Some(16));
+
+        let field2 = FieldInfo::new("test2", "test2", SqlType::Decimal { precision: 10, scale: 2 })
+            .precision_opt(None);
+        assert_eq!(field2.precision, None);
+    }
+
+    #[test]
+    fn test_scale_opt() {
+        let field = FieldInfo::new("test", "test", SqlType::Decimal { precision: 10, scale: 2 })
+            .scale_opt(Some(5));
+        assert_eq!(field.scale, Some(5));
+
+        let field2 = FieldInfo::new("test2", "test2", SqlType::Decimal { precision: 10, scale: 2 })
+            .scale_opt(None);
+        assert_eq!(field2.scale, None);
+    }
+}
