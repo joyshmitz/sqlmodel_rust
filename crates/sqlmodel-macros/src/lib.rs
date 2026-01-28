@@ -287,6 +287,13 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
             quote::quote! { None }
         };
 
+        // Default JSON for exclude_defaults support
+        let default_json_token = if let Some(ref dj) = field.default_json {
+            quote::quote! { Some(#dj) }
+        } else {
+            quote::quote! { None }
+        };
+
         // Decimal precision (max_digits -> precision, decimal_places -> scale)
         let precision_token = if let Some(p) = field.max_digits {
             quote::quote! { Some(#p) }
@@ -322,6 +329,7 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
                 .title_opt(#title_token)
                 .description_opt(#description_token)
                 .schema_extra_opt(#schema_extra_token)
+                .default_json_opt(#default_json_token)
         });
     }
 

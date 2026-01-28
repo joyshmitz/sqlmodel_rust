@@ -116,6 +116,9 @@ pub struct FieldDef {
     pub description: Option<String>,
     /// Extra JSON Schema properties (merged into schema).
     pub schema_extra: Option<String>,
+    /// JSON representation of the field's default value (for exclude_defaults).
+    /// Used by model_dump with exclude_defaults=true to compare current value.
+    pub default_json: Option<String>,
 }
 
 /// Parsed relationship attribute from `#[sqlmodel(relationship(...))]`.
@@ -674,6 +677,7 @@ fn parse_field(field: &Field) -> Result<FieldDef> {
         title: attrs.title,
         description: attrs.description,
         schema_extra: attrs.schema_extra,
+        default_json: attrs.default_json,
     })
 }
 
@@ -711,6 +715,8 @@ struct FieldAttrs {
     description: Option<String>,
     /// Extra JSON Schema properties (merged into schema).
     schema_extra: Option<String>,
+    /// JSON representation of the field's default value (for exclude_defaults).
+    default_json: Option<String>,
 }
 
 /// Detect the relationship kind from a field's Rust type.
@@ -970,6 +976,16 @@ fn parse_field_attrs(
                         "expected integer literal for decimal_places",
                     ));
                 }
+            } else if path.is_ident("default_json") {
+                let value: Lit = meta.value()?.parse()?;
+                if let Lit::Str(lit_str) = value {
+                    result.default_json = Some(lit_str.value());
+                } else {
+                    return Err(Error::new_spanned(
+                        value,
+                        "expected string literal for default_json",
+                    ));
+                }
             } else {
                 // Unknown attribute
                 let attr_name = path.to_token_stream().to_string();
@@ -980,7 +996,7 @@ fn parse_field_attrs(
                          Valid attributes are: primary_key, auto_increment, column, nullable, \
                          unique, foreign_key, on_delete, on_update, default, sql_type, index, \
                          skip, skip_insert, skip_update, relationship, alias, validation_alias, \
-                         serialization_alias, computed, max_digits, decimal_places"
+                         serialization_alias, computed, max_digits, decimal_places, default_json"
                     ),
                 ));
             }
@@ -2526,5 +2542,64 @@ mod tests {
 
         let def = parse_model(&input).unwrap();
         assert!(def.config.arbitrary_types_allowed);
+    }
+
+    // =========================================================================
+    // Default JSON Tests (for exclude_defaults support)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_default_json() {
+        let input: DeriveInput = parse_quote! {
+            struct Config {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(default_json = "0")]
+                count: i32,
+                #[sqlmodel(default_json = "false")]
+                active: bool,
+                #[sqlmodel(default_json = r#""default""#)]
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        let count_field = def.fields.iter().find(|f| f.name == "count").unwrap();
+        assert_eq!(count_field.default_json, Some("0".to_string()));
+
+        let active_field = def.fields.iter().find(|f| f.name == "active").unwrap();
+        assert_eq!(active_field.default_json, Some("false".to_string()));
+
+        let name_field = def.fields.iter().find(|f| f.name == "name").unwrap();
+        assert_eq!(name_field.default_json, Some(r#""default""#.to_string()));
+
+        // Field without default_json should have None
+        let id_field = def.fields.iter().find(|f| f.name == "id").unwrap();
+        assert_eq!(id_field.default_json, None);
+    }
+
+    #[test]
+    fn test_default_json_combined_with_other_attrs() {
+        let input: DeriveInput = parse_quote! {
+            struct Settings {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(default_json = "0", alias = "itemCount")]
+                count: i32,
+                #[sqlmodel(default_json = "[]", nullable)]
+                items: Option<Vec<i32>>,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        let count_field = def.fields.iter().find(|f| f.name == "count").unwrap();
+        assert_eq!(count_field.default_json, Some("0".to_string()));
+        assert_eq!(count_field.alias, Some("itemCount".to_string()));
+
+        let items_field = def.fields.iter().find(|f| f.name == "items").unwrap();
+        assert_eq!(items_field.default_json, Some("[]".to_string()));
+        assert!(items_field.nullable);
     }
 }
