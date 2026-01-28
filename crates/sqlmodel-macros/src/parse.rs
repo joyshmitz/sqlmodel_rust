@@ -178,7 +178,11 @@ impl ModelDef {
         self.fields
             .iter()
             .filter(|f| {
-                !f.skip && !f.skip_update && !f.computed && !f.primary_key && f.relationship.is_none()
+                !f.skip
+                    && !f.skip_update
+                    && !f.computed
+                    && !f.primary_key
+                    && f.relationship.is_none()
             })
             .collect()
     }
@@ -220,6 +224,7 @@ impl FieldDef {
     /// Returns the name to use when serializing this field (output).
     ///
     /// Priority: serialization_alias > alias > field name
+    #[allow(dead_code)]
     pub fn output_name(&self) -> &str {
         self.serialization_alias
             .as_deref()
@@ -230,6 +235,7 @@ impl FieldDef {
     /// Returns all names that should be accepted when deserializing (input).
     ///
     /// This includes: field name, alias, and validation_alias.
+    #[allow(dead_code)]
     pub fn input_names(&self) -> Vec<&str> {
         let field_name = self.name.to_string();
         let mut names = vec![field_name.leak() as &str];
@@ -250,6 +256,7 @@ impl FieldDef {
     }
 
     /// Returns true if this field has any alias configuration.
+    #[allow(dead_code)]
     pub fn has_alias(&self) -> bool {
         self.alias.is_some()
             || self.validation_alias.is_some()
@@ -2093,5 +2100,241 @@ mod tests {
         // data_fields should include computed
         assert_eq!(def.data_fields().len(), 3);
         assert!(def.data_fields().iter().any(|f| f.computed));
+    }
+
+    // ==================== Model Config Tests ====================
+
+    #[test]
+    fn test_model_config_defaults() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert!(!def.config.table);
+        assert!(!def.config.from_attributes);
+        assert!(!def.config.validate_assignment);
+        assert_eq!(def.config.extra, "");
+        assert!(!def.config.strict);
+        assert!(!def.config.populate_by_name);
+        assert!(!def.config.use_enum_values);
+    }
+
+    #[test]
+    fn test_model_config_table_flag() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(table)]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert!(def.config.table);
+    }
+
+    #[test]
+    fn test_model_config_table_with_name() {
+        // table = "custom_name" should set table name, not config.table
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(table = "custom_users")]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert_eq!(def.table_name, "custom_users");
+        // config.table remains false because only the flag form sets it
+        assert!(!def.config.table);
+    }
+
+    #[test]
+    fn test_model_config_from_attributes() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(from_attributes)]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert!(def.config.from_attributes);
+    }
+
+    #[test]
+    fn test_model_config_validate_assignment() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(validate_assignment)]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert!(def.config.validate_assignment);
+    }
+
+    #[test]
+    fn test_model_config_extra_forbid() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(extra = "forbid")]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert_eq!(def.config.extra, "forbid");
+    }
+
+    #[test]
+    fn test_model_config_extra_allow() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(extra = "allow")]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert_eq!(def.config.extra, "allow");
+    }
+
+    #[test]
+    fn test_model_config_extra_invalid() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(extra = "invalid")]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+            }
+        };
+
+        let result = parse_model(&input);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("extra"));
+    }
+
+    #[test]
+    fn test_model_config_strict() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(strict)]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert!(def.config.strict);
+    }
+
+    #[test]
+    fn test_model_config_populate_by_name() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(populate_by_name)]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert!(def.config.populate_by_name);
+    }
+
+    #[test]
+    fn test_model_config_use_enum_values() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(use_enum_values)]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert!(def.config.use_enum_values);
+    }
+
+    #[test]
+    fn test_model_config_multiple_options() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(table, from_attributes, validate_assignment, extra = "forbid", strict)]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert!(def.config.table);
+        assert!(def.config.from_attributes);
+        assert!(def.config.validate_assignment);
+        assert_eq!(def.config.extra, "forbid");
+        assert!(def.config.strict);
+    }
+
+    #[test]
+    fn test_model_config_title() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(title = "User Model")]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert_eq!(def.config.title, Some("User Model".to_string()));
+    }
+
+    #[test]
+    fn test_model_config_json_schema_extra() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(json_schema_extra = "{\"key\": \"value\"}")]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert_eq!(
+            def.config.json_schema_extra,
+            Some("{\"key\": \"value\"}".to_string())
+        );
+    }
+
+    #[test]
+    fn test_model_config_arbitrary_types_allowed() {
+        let input: DeriveInput = parse_quote! {
+            #[sqlmodel(arbitrary_types_allowed)]
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        assert!(def.config.arbitrary_types_allowed);
     }
 }

@@ -525,4 +525,44 @@ mod tests {
         assert!(model.on_load().is_ok());
         assert!(model.on_refresh().is_ok());
     }
+
+    // ==================== ModelConfig Tests ====================
+
+    #[test]
+    fn test_model_config_new_defaults() {
+        let config = ModelConfig::new();
+        assert!(!config.table);
+        assert!(!config.from_attributes);
+        assert!(!config.validate_assignment);
+        assert_eq!(config.extra, ExtraFieldsBehavior::Ignore);
+        assert!(!config.strict);
+        assert!(!config.populate_by_name);
+        assert!(!config.use_enum_values);
+        assert!(!config.arbitrary_types_allowed);
+        assert!(!config.defer_build);
+        assert!(!config.revalidate_instances);
+        assert!(config.json_schema_extra.is_none());
+        assert!(config.title.is_none());
+    }
+
+    #[test]
+    fn test_model_config_table_constructor() {
+        let config = ModelConfig::table();
+        assert!(config.table);
+        assert!(!config.from_attributes);
+    }
+
+    #[test]
+    fn test_extra_fields_behavior_default() {
+        let behavior = ExtraFieldsBehavior::default();
+        assert_eq!(behavior, ExtraFieldsBehavior::Ignore);
+    }
+
+    #[test]
+    fn test_model_default_config() {
+        // TestModel uses default implementation of model_config()
+        let config = TestModel::model_config();
+        assert!(!config.table);
+        assert!(!config.from_attributes);
+    }
 }
