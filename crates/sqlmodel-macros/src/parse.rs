@@ -8,6 +8,35 @@ use proc_macro2::Span;
 use quote::ToTokens;
 use syn::{Attribute, Data, DeriveInput, Error, Field, Fields, Generics, Ident, Lit, Result, Type};
 
+/// Model-level configuration parsed from attributes.
+#[derive(Debug, Clone, Default)]
+pub struct ModelConfigParsed {
+    /// Whether this model maps to a database table.
+    pub table: bool,
+    /// Allow reading data from object attributes (ORM mode).
+    pub from_attributes: bool,
+    /// Validate field values when they are assigned.
+    pub validate_assignment: bool,
+    /// How to handle extra fields: "ignore", "forbid", or "allow".
+    pub extra: String,
+    /// Enable strict type checking during validation.
+    pub strict: bool,
+    /// Allow populating fields by either name or alias.
+    pub populate_by_name: bool,
+    /// Use enum values instead of names during serialization.
+    pub use_enum_values: bool,
+    /// Allow arbitrary types in fields.
+    pub arbitrary_types_allowed: bool,
+    /// Defer model validation to allow forward references.
+    pub defer_build: bool,
+    /// Revalidate instances when converting to this model.
+    pub revalidate_instances: bool,
+    /// Custom JSON schema extra data.
+    pub json_schema_extra: Option<String>,
+    /// Title for JSON schema generation.
+    pub title: Option<String>,
+}
+
 /// Parsed model definition from a struct with `#[derive(Model)]`.
 #[derive(Debug)]
 pub struct ModelDef {
@@ -22,6 +51,8 @@ pub struct ModelDef {
     pub fields: Vec<FieldDef>,
     /// Generic parameters from the struct.
     pub generics: Generics,
+    /// Model-level configuration.
+    pub config: ModelConfigParsed,
 }
 
 /// Parsed field definition from a struct field.
@@ -236,7 +267,11 @@ pub fn parse_model(input: &DeriveInput) -> Result<ModelDef> {
     let generics = input.generics.clone();
 
     // Parse struct-level attributes
-    let (table_name, table_alias) = parse_struct_sqlmodel_attrs(&input.attrs, &name)?;
+    let StructAttrs {
+        table_name,
+        table_alias,
+        config,
+    } = parse_struct_sqlmodel_attrs(&input.attrs, &name)?;
 
     // Get struct fields
     let fields = match &input.data {
@@ -269,7 +304,15 @@ pub fn parse_model(input: &DeriveInput) -> Result<ModelDef> {
         table_alias,
         fields,
         generics,
+        config,
     })
+}
+
+/// Parsed struct-level attributes result.
+struct StructAttrs {
+    table_name: String,
+    table_alias: Option<String>,
+    config: ModelConfigParsed,
 }
 
 /// Parse struct-level `#[sqlmodel(...)]` attributes.
@@ -277,12 +320,11 @@ pub fn parse_model(input: &DeriveInput) -> Result<ModelDef> {
 /// Supported keys:
 /// - `table = "name"` (overrides derived table name)
 /// - `table_alias = "alias"` (optional table alias)
-fn parse_struct_sqlmodel_attrs(
-    attrs: &[Attribute],
-    struct_name: &Ident,
-) -> Result<(String, Option<String>)> {
+/// - Model config options (from_attributes, validate_assignment, extra, strict, etc.)
+fn parse_struct_sqlmodel_attrs(attrs: &[Attribute], struct_name: &Ident) -> Result<StructAttrs> {
     let mut table_name: Option<String> = None;
     let mut table_alias: Option<String> = None;
+    let mut config = ModelConfigParsed::default();
 
     for attr in attrs {
         if !attr.path().is_ident("sqlmodel") {
@@ -291,23 +333,28 @@ fn parse_struct_sqlmodel_attrs(
 
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("table") {
-                if table_name.is_some() {
-                    return Err(Error::new_spanned(
-                        meta.path,
-                        "duplicate sqlmodel attribute: table",
-                    ));
-                }
-
-                let value: Lit = meta.value()?.parse()?;
-                if let Lit::Str(lit_str) = value {
-                    table_name = Some(lit_str.value());
-                    Ok(())
+                // Check if it's a flag (no value) or has a value
+                if meta.input.peek(syn::Token![=]) {
+                    let value: Lit = meta.value()?.parse()?;
+                    if let Lit::Str(lit_str) = value {
+                        if table_name.is_some() {
+                            return Err(Error::new_spanned(
+                                meta.path,
+                                "duplicate sqlmodel attribute: table",
+                            ));
+                        }
+                        table_name = Some(lit_str.value());
+                    } else {
+                        return Err(Error::new_spanned(
+                            value,
+                            "expected string literal for table name",
+                        ));
+                    }
                 } else {
-                    Err(Error::new_spanned(
-                        value,
-                        "expected string literal for table name",
-                    ))
+                    // Flag form: #[sqlmodel(table)]
+                    config.table = true;
                 }
+                Ok(())
             } else if meta.path.is_ident("table_alias") {
                 if table_alias.is_some() {
                     return Err(Error::new_spanned(
@@ -326,17 +373,85 @@ fn parse_struct_sqlmodel_attrs(
                         "expected string literal for table_alias",
                     ))
                 }
+            // Model config options
+            } else if meta.path.is_ident("from_attributes") {
+                config.from_attributes = true;
+                Ok(())
+            } else if meta.path.is_ident("validate_assignment") {
+                config.validate_assignment = true;
+                Ok(())
+            } else if meta.path.is_ident("extra") {
+                let value: Lit = meta.value()?.parse()?;
+                if let Lit::Str(lit_str) = value {
+                    let extra_value = lit_str.value().to_lowercase();
+                    if !["ignore", "forbid", "allow"].contains(&extra_value.as_str()) {
+                        return Err(Error::new_spanned(
+                            lit_str,
+                            "extra must be one of: 'ignore', 'forbid', 'allow'",
+                        ));
+                    }
+                    config.extra = extra_value;
+                    Ok(())
+                } else {
+                    Err(Error::new_spanned(
+                        value,
+                        "expected string literal for extra",
+                    ))
+                }
+            } else if meta.path.is_ident("strict") {
+                config.strict = true;
+                Ok(())
+            } else if meta.path.is_ident("populate_by_name") {
+                config.populate_by_name = true;
+                Ok(())
+            } else if meta.path.is_ident("use_enum_values") {
+                config.use_enum_values = true;
+                Ok(())
+            } else if meta.path.is_ident("arbitrary_types_allowed") {
+                config.arbitrary_types_allowed = true;
+                Ok(())
+            } else if meta.path.is_ident("defer_build") {
+                config.defer_build = true;
+                Ok(())
+            } else if meta.path.is_ident("revalidate_instances") {
+                config.revalidate_instances = true;
+                Ok(())
+            } else if meta.path.is_ident("json_schema_extra") {
+                let value: Lit = meta.value()?.parse()?;
+                if let Lit::Str(lit_str) = value {
+                    config.json_schema_extra = Some(lit_str.value());
+                    Ok(())
+                } else {
+                    Err(Error::new_spanned(
+                        value,
+                        "expected string literal for json_schema_extra",
+                    ))
+                }
+            } else if meta.path.is_ident("title") {
+                let value: Lit = meta.value()?.parse()?;
+                if let Lit::Str(lit_str) = value {
+                    config.title = Some(lit_str.value());
+                    Ok(())
+                } else {
+                    Err(Error::new_spanned(value, "expected string literal for title"))
+                }
             } else {
                 Err(Error::new_spanned(
                     meta.path,
-                    "unknown sqlmodel struct attribute (supported: table, table_alias)",
+                    "unknown sqlmodel struct attribute (supported: table, table_alias, from_attributes, \
+                     validate_assignment, extra, strict, populate_by_name, use_enum_values, \
+                     arbitrary_types_allowed, defer_build, revalidate_instances, json_schema_extra, title)",
                 ))
             }
         })?;
     }
 
     let table_name = table_name.unwrap_or_else(|| derive_table_name(&struct_name.to_string()));
-    Ok((table_name, table_alias))
+    Ok(StructAttrs {
+        table_name,
+        table_alias,
+        config,
+    })
 }
 
 /// Derive table name from struct name: convert to snake_case and pluralize.

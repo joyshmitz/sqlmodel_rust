@@ -796,14 +796,9 @@ pub trait SqlModelDump: Model + serde::Serialize {
         // First, serialize to JSON value
         let mut value = serde_json::to_value(self)?;
 
-        // Apply serialization aliases if by_alias is set
-        if options.by_alias {
-            apply_serialization_aliases(&mut value, Self::fields());
-        }
-
-        // Apply other options
+        // Apply options that work on original field names BEFORE alias renaming
         if let serde_json::Value::Object(ref mut map) = value {
-            // Exclude computed fields if requested
+            // Exclude computed fields if requested (must happen before alias renaming)
             if options.exclude_computed_fields {
                 let computed_field_names: std::collections::HashSet<&str> = Self::fields()
                     .iter()
@@ -812,7 +807,15 @@ pub trait SqlModelDump: Model + serde::Serialize {
                     .collect();
                 map.retain(|k, _| !computed_field_names.contains(k.as_str()));
             }
+        }
 
+        // Apply serialization aliases if by_alias is set
+        if options.by_alias {
+            apply_serialization_aliases(&mut value, Self::fields());
+        }
+
+        // Apply remaining options (include/exclude work on the final key names)
+        if let serde_json::Value::Object(ref mut map) = value {
             // Apply include filter
             if let Some(ref include) = options.include {
                 map.retain(|k, _| include.contains(k));
@@ -1731,5 +1734,91 @@ mod tests {
         assert!(options2.exclude_computed_fields);
         assert!(options2.by_alias);
         assert!(options2.exclude_none);
+    }
+
+    /// Test model with both computed fields AND serialization aliases.
+    #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+    struct TestUserWithComputedAndAlias {
+        id: i64,
+        first_name: String,
+        #[serde(default)]
+        display_name: String, // Computed field that also has an alias
+    }
+
+    impl Model for TestUserWithComputedAndAlias {
+        const TABLE_NAME: &'static str = "users";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            static FIELDS: &[FieldInfo] = &[
+                FieldInfo::new("id", "id", SqlType::BigInt).primary_key(true),
+                FieldInfo::new("first_name", "first_name", SqlType::Text)
+                    .serialization_alias("firstName"),
+                FieldInfo::new("display_name", "display_name", SqlType::Text)
+                    .computed(true)
+                    .serialization_alias("displayName"),
+            ];
+            FIELDS
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![
+                ("id", Value::BigInt(self.id)),
+                ("first_name", Value::Text(self.first_name.clone())),
+            ]
+        }
+
+        fn from_row(row: &Row) -> crate::Result<Self> {
+            Ok(Self {
+                id: row.get_named("id")?,
+                first_name: row.get_named("first_name")?,
+                display_name: String::new(),
+            })
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            vec![Value::BigInt(self.id)]
+        }
+
+        fn is_new(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn test_exclude_computed_with_by_alias() {
+        // This test verifies that computed field exclusion works correctly
+        // even when combined with by_alias (which renames keys)
+        let user = TestUserWithComputedAndAlias {
+            id: 1,
+            first_name: "John".to_string(),
+            display_name: "John Doe".to_string(),
+        };
+
+        // Test with by_alias only - computed field should still appear (aliased)
+        let json = user
+            .sql_model_dump(DumpOptions::default().by_alias())
+            .unwrap();
+        assert_eq!(json["firstName"], "John"); // first_name aliased
+        assert_eq!(json["displayName"], "John Doe"); // display_name aliased (computed but not excluded)
+        assert!(json.get("first_name").is_none()); // Original name should not exist
+        assert!(json.get("display_name").is_none()); // Original name should not exist
+
+        // Test with exclude_computed_fields only - computed field should be excluded
+        let json = user
+            .sql_model_dump(DumpOptions::default().exclude_computed_fields())
+            .unwrap();
+        assert_eq!(json["first_name"], "John");
+        assert!(json.get("display_name").is_none()); // Computed field excluded
+
+        // Test with BOTH by_alias AND exclude_computed_fields
+        // This was buggy before the fix - computed field wasn't excluded
+        // because exclusion happened after aliasing
+        let json = user
+            .sql_model_dump(DumpOptions::default().by_alias().exclude_computed_fields())
+            .unwrap();
+        assert_eq!(json["firstName"], "John"); // first_name aliased
+        assert!(json.get("displayName").is_none()); // Computed field excluded (even though aliased)
+        assert!(json.get("display_name").is_none()); // Original name doesn't exist either
     }
 }
