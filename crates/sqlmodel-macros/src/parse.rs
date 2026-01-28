@@ -162,20 +162,24 @@ impl ModelDef {
     }
 
     /// Returns fields that should be included in INSERT statements (reserved for future use).
+    /// Excludes skipped fields, computed fields, and relationship fields.
     #[allow(dead_code)]
     pub fn insert_fields(&self) -> Vec<&FieldDef> {
         self.fields
             .iter()
-            .filter(|f| !f.skip && !f.skip_insert && f.relationship.is_none())
+            .filter(|f| !f.skip && !f.skip_insert && !f.computed && f.relationship.is_none())
             .collect()
     }
 
     /// Returns fields that should be included in UPDATE statements (reserved for future use).
+    /// Excludes skipped fields, computed fields, primary key fields, and relationship fields.
     #[allow(dead_code)]
     pub fn update_fields(&self) -> Vec<&FieldDef> {
         self.fields
             .iter()
-            .filter(|f| !f.skip && !f.skip_update && !f.primary_key && f.relationship.is_none())
+            .filter(|f| {
+                !f.skip && !f.skip_update && !f.computed && !f.primary_key && f.relationship.is_none()
+            })
             .collect()
     }
 
