@@ -2,10 +2,18 @@
 //!
 //! This module provides validation functions that can be called from
 //! generated validation code (via the `#[derive(Validate)]` macro).
+//!
+//! It also provides `model_validate()` functionality for creating and
+//! validating models from various input types (similar to Pydantic).
 
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use regex::Regex;
+use serde::de::DeserializeOwned;
+
+use crate::error::{ValidationError, ValidationErrorKind};
+use crate::Value;
 
 /// Thread-safe regex cache for compiled patterns.
 ///
@@ -94,6 +102,242 @@ pub fn validate_pattern(pattern: &str) -> Option<String> {
     match Regex::new(pattern) {
         Ok(_) => None,
         Err(e) => Some(format!("invalid regex pattern: {e}")),
+    }
+}
+
+// ============================================================================
+// Model Validation (model_validate)
+// ============================================================================
+
+/// Input types for model_validate().
+///
+/// Supports creating models from various input formats.
+#[derive(Debug, Clone)]
+pub enum ValidateInput {
+    /// A HashMap of field names to values.
+    Dict(HashMap<String, Value>),
+    /// A JSON string to parse.
+    Json(String),
+    /// A serde_json::Value for direct deserialization.
+    JsonValue(serde_json::Value),
+}
+
+impl From<HashMap<String, Value>> for ValidateInput {
+    fn from(map: HashMap<String, Value>) -> Self {
+        ValidateInput::Dict(map)
+    }
+}
+
+impl From<String> for ValidateInput {
+    fn from(json: String) -> Self {
+        ValidateInput::Json(json)
+    }
+}
+
+impl From<&str> for ValidateInput {
+    fn from(json: &str) -> Self {
+        ValidateInput::Json(json.to_string())
+    }
+}
+
+impl From<serde_json::Value> for ValidateInput {
+    fn from(value: serde_json::Value) -> Self {
+        ValidateInput::JsonValue(value)
+    }
+}
+
+/// Options for model_validate().
+///
+/// Controls the validation behavior.
+#[derive(Debug, Clone, Default)]
+pub struct ValidateOptions {
+    /// If true, use strict type coercion (no implicit conversions).
+    pub strict: bool,
+    /// If true, read from object attributes (ORM mode).
+    /// Currently unused - reserved for future from_attributes support.
+    pub from_attributes: bool,
+    /// Optional context dictionary passed to custom validators.
+    pub context: Option<HashMap<String, serde_json::Value>>,
+    /// Additional values to merge into the result after parsing.
+    pub update: Option<HashMap<String, serde_json::Value>>,
+}
+
+impl ValidateOptions {
+    /// Create new default options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enable strict mode (no implicit type conversions).
+    pub fn strict(mut self) -> Self {
+        self.strict = true;
+        self
+    }
+
+    /// Enable from_attributes mode (read from object attributes).
+    pub fn from_attributes(mut self) -> Self {
+        self.from_attributes = true;
+        self
+    }
+
+    /// Set context for custom validators.
+    pub fn with_context(mut self, context: HashMap<String, serde_json::Value>) -> Self {
+        self.context = Some(context);
+        self
+    }
+
+    /// Set values to merge into result.
+    pub fn with_update(mut self, update: HashMap<String, serde_json::Value>) -> Self {
+        self.update = Some(update);
+        self
+    }
+}
+
+/// Result type for model_validate operations.
+pub type ValidateResult<T> = std::result::Result<T, ValidationError>;
+
+/// Trait for models that support model_validate().
+///
+/// This is typically implemented via derive macro or blanket impl
+/// for models that implement Deserialize.
+pub trait ModelValidate: Sized {
+    /// Create and validate a model from input.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The input to validate (Dict, Json, or JsonValue)
+    /// * `options` - Validation options
+    ///
+    /// # Returns
+    ///
+    /// The validated model or validation errors.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use sqlmodel_core::validate::{ModelValidate, ValidateInput, ValidateOptions};
+    ///
+    /// let user = User::model_validate(
+    ///     r#"{"name": "Alice", "age": 30}"#,
+    ///     ValidateOptions::default()
+    /// )?;
+    /// ```
+    fn model_validate(
+        input: impl Into<ValidateInput>,
+        options: ValidateOptions,
+    ) -> ValidateResult<Self>;
+
+    /// Create and validate a model from JSON string with default options.
+    fn model_validate_json(json: &str) -> ValidateResult<Self> {
+        Self::model_validate(json, ValidateOptions::default())
+    }
+
+    /// Create and validate a model from a HashMap with default options.
+    fn model_validate_dict(dict: HashMap<String, Value>) -> ValidateResult<Self> {
+        Self::model_validate(dict, ValidateOptions::default())
+    }
+}
+
+/// Blanket implementation of ModelValidate for types that implement DeserializeOwned.
+///
+/// This provides model_validate() for any model that can be deserialized from JSON.
+impl<T: DeserializeOwned> ModelValidate for T {
+    fn model_validate(
+        input: impl Into<ValidateInput>,
+        options: ValidateOptions,
+    ) -> ValidateResult<Self> {
+        let input = input.into();
+
+        // Convert input to serde_json::Value
+        let mut json_value = match input {
+            ValidateInput::Dict(dict) => {
+                // Convert HashMap<String, Value> to serde_json::Value
+                let map: serde_json::Map<String, serde_json::Value> = dict
+                    .into_iter()
+                    .map(|(k, v)| (k, value_to_json(v)))
+                    .collect();
+                serde_json::Value::Object(map)
+            }
+            ValidateInput::Json(json_str) => {
+                serde_json::from_str(&json_str).map_err(|e| {
+                    let mut err = ValidationError::new();
+                    err.add("_json", ValidationErrorKind::Custom, format!("Invalid JSON: {e}"));
+                    err
+                })?
+            }
+            ValidateInput::JsonValue(value) => value,
+        };
+
+        // Apply update values if provided
+        if let Some(update) = options.update {
+            if let serde_json::Value::Object(ref mut map) = json_value {
+                for (key, value) in update {
+                    map.insert(key, value);
+                }
+            }
+        }
+
+        // Deserialize with appropriate strictness
+        if options.strict {
+            // In strict mode, we use serde's strict deserialization
+            // (default behavior - no implicit conversions)
+            serde_json::from_value(json_value).map_err(|e| {
+                let mut err = ValidationError::new();
+                err.add(
+                    "_model",
+                    ValidationErrorKind::Custom,
+                    format!("Validation failed: {e}"),
+                );
+                err
+            })
+        } else {
+            // Non-strict mode - same for now, but could add coercion logic
+            serde_json::from_value(json_value).map_err(|e| {
+                let mut err = ValidationError::new();
+                err.add(
+                    "_model",
+                    ValidationErrorKind::Custom,
+                    format!("Validation failed: {e}"),
+                );
+                err
+            })
+        }
+    }
+}
+
+/// Convert a Value to serde_json::Value.
+fn value_to_json(value: Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(b) => serde_json::Value::Bool(b),
+        Value::TinyInt(i) => serde_json::Value::Number(i.into()),
+        Value::SmallInt(i) => serde_json::Value::Number(i.into()),
+        Value::Int(i) => serde_json::Value::Number(i.into()),
+        Value::BigInt(i) => serde_json::Value::Number(i.into()),
+        Value::Float(f) => serde_json::Number::from_f64(f as f64)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::Double(f) => serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::Decimal(s) => serde_json::Value::String(s),
+        Value::Text(s) => serde_json::Value::String(s),
+        Value::Bytes(b) => {
+            // Encode bytes as base64
+            use base64::Engine;
+            let encoded = base64::engine::general_purpose::STANDARD.encode(&b);
+            serde_json::Value::String(encoded)
+        }
+        Value::Date(d) => serde_json::Value::String(d),
+        Value::Time(t) => serde_json::Value::String(t),
+        Value::Timestamp(ts) => serde_json::Value::String(ts),
+        Value::TimestampTz(ts) => serde_json::Value::String(ts),
+        Value::Uuid(u) => serde_json::Value::String(u),
+        Value::Json(j) => j,
+        Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(value_to_json).collect())
+        }
+        Value::Default => serde_json::Value::Null,
     }
 }
 

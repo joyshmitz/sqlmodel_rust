@@ -25,6 +25,7 @@ pub use connection::{
     Connection, IsolationLevel, PreparedStatement, Transaction, TransactionInternal, TransactionOps,
 };
 pub use error::{Error, FieldValidationError, Result, ValidationError, ValidationErrorKind};
+pub use validate::{ModelValidate, ValidateInput, ValidateOptions, ValidateResult};
 pub use field::{Column, Field, FieldInfo, ReferentialAction};
 pub use model::Model;
 pub use relationship::{
