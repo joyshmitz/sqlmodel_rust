@@ -454,4 +454,149 @@ mod tests {
         assert!(!matches_pattern("hello<script>", pattern));
         assert!(!matches_pattern("test'; DROP TABLE users;--", pattern));
     }
+
+    // =========================================================================
+    // model_validate tests
+    // =========================================================================
+
+    #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+    struct TestUser {
+        name: String,
+        age: i32,
+        #[serde(default)]
+        active: bool,
+    }
+
+    #[test]
+    fn test_model_validate_from_json() {
+        let json = r#"{"name": "Alice", "age": 30}"#;
+        let user: TestUser = TestUser::model_validate_json(json).unwrap();
+        assert_eq!(user.name, "Alice");
+        assert_eq!(user.age, 30);
+        assert!(!user.active); // default
+    }
+
+    #[test]
+    fn test_model_validate_from_json_value() {
+        let json_value = serde_json::json!({"name": "Bob", "age": 25, "active": true});
+        let user: TestUser =
+            TestUser::model_validate(json_value, ValidateOptions::default()).unwrap();
+        assert_eq!(user.name, "Bob");
+        assert_eq!(user.age, 25);
+        assert!(user.active);
+    }
+
+    #[test]
+    fn test_model_validate_from_dict() {
+        let mut dict = HashMap::new();
+        dict.insert("name".to_string(), Value::Text("Charlie".to_string()));
+        dict.insert("age".to_string(), Value::Int(35));
+        dict.insert("active".to_string(), Value::Bool(true));
+
+        let user: TestUser = TestUser::model_validate_dict(dict).unwrap();
+        assert_eq!(user.name, "Charlie");
+        assert_eq!(user.age, 35);
+        assert!(user.active);
+    }
+
+    #[test]
+    fn test_model_validate_invalid_json() {
+        let json = r#"{"name": "Invalid"}"#; // missing required 'age' field
+        let result: ValidateResult<TestUser> = TestUser::model_validate_json(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(!err.is_empty());
+    }
+
+    #[test]
+    fn test_model_validate_malformed_json() {
+        let json = r#"{"name": "Alice", age: 30}"#; // invalid JSON syntax
+        let result: ValidateResult<TestUser> = TestUser::model_validate_json(json);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.errors.iter().any(|e| e.message.contains("Invalid JSON")));
+    }
+
+    #[test]
+    fn test_model_validate_with_update() {
+        let json = r#"{"name": "Original", "age": 20}"#;
+        let mut update = HashMap::new();
+        update.insert("name".to_string(), serde_json::json!("Updated"));
+
+        let options = ValidateOptions::new().with_update(update);
+        let user: TestUser = TestUser::model_validate(json, options).unwrap();
+        assert_eq!(user.name, "Updated"); // overridden by update
+        assert_eq!(user.age, 20);
+    }
+
+    #[test]
+    fn test_model_validate_strict_mode() {
+        let json = r#"{"name": "Alice", "age": 30}"#;
+        let options = ValidateOptions::new().strict();
+        let user: TestUser = TestUser::model_validate(json, options).unwrap();
+        assert_eq!(user.name, "Alice");
+        assert_eq!(user.age, 30);
+    }
+
+    #[test]
+    fn test_validate_options_builder() {
+        let mut context = HashMap::new();
+        context.insert("key".to_string(), serde_json::json!("value"));
+
+        let options = ValidateOptions::new()
+            .strict()
+            .from_attributes()
+            .with_context(context.clone());
+
+        assert!(options.strict);
+        assert!(options.from_attributes);
+        assert!(options.context.is_some());
+        assert_eq!(
+            options.context.unwrap().get("key"),
+            Some(&serde_json::json!("value"))
+        );
+    }
+
+    #[test]
+    fn test_validate_input_from_conversions() {
+        // From String
+        let input: ValidateInput = "{}".to_string().into();
+        assert!(matches!(input, ValidateInput::Json(_)));
+
+        // From &str
+        let input: ValidateInput = "{}".into();
+        assert!(matches!(input, ValidateInput::Json(_)));
+
+        // From serde_json::Value
+        let input: ValidateInput = serde_json::json!({}).into();
+        assert!(matches!(input, ValidateInput::JsonValue(_)));
+
+        // From HashMap
+        let map: HashMap<String, Value> = HashMap::new();
+        let input: ValidateInput = map.into();
+        assert!(matches!(input, ValidateInput::Dict(_)));
+    }
+
+    #[test]
+    fn test_value_to_json_conversions() {
+        assert_eq!(value_to_json(Value::Null), serde_json::Value::Null);
+        assert_eq!(value_to_json(Value::Bool(true)), serde_json::json!(true));
+        assert_eq!(value_to_json(Value::Int(42)), serde_json::json!(42));
+        assert_eq!(value_to_json(Value::BigInt(100)), serde_json::json!(100));
+        assert_eq!(
+            value_to_json(Value::Text("hello".to_string())),
+            serde_json::json!("hello")
+        );
+        assert_eq!(
+            value_to_json(Value::Uuid("abc-123".to_string())),
+            serde_json::json!("abc-123")
+        );
+
+        // Array conversion
+        let arr = vec![Value::Int(1), Value::Int(2), Value::Int(3)];
+        assert_eq!(
+            value_to_json(Value::Array(arr)),
+            serde_json::json!([1, 2, 3])
+        );
+    }
 }
