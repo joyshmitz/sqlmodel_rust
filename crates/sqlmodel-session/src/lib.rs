@@ -1018,10 +1018,7 @@ impl<C: Connection> Session<C> {
             }
             Some(attrs) => {
                 // Expire specific attributes
-                let mut expired = tracked
-                    .expired_attributes
-                    .take()
-                    .unwrap_or_default();
+                let mut expired = tracked.expired_attributes.take().unwrap_or_default();
                 for attr in attrs {
                     expired.insert((*attr).to_string());
                 }

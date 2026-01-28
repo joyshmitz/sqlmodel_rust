@@ -249,8 +249,7 @@ mod tests {
                     .primary_key(true)
                     .auto_increment(true),
                 FieldInfo::new("name", "name", sqlmodel_core::SqlType::Text),
-                FieldInfo::new("age", "age", sqlmodel_core::SqlType::Integer)
-                    .nullable(true),
+                FieldInfo::new("age", "age", sqlmodel_core::SqlType::Integer).nullable(true),
             ];
             &FIELDS
         }

@@ -26,6 +26,23 @@ pub enum RelationshipKind {
     ManyToMany,
 }
 
+/// Passive delete behavior for relationships.
+///
+/// Controls whether the ORM emits DELETE statements for related objects
+/// or relies on the database's foreign key ON DELETE cascade behavior.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PassiveDeletes {
+    /// ORM emits DELETE for related objects (default behavior).
+    #[default]
+    Active,
+    /// ORM relies on database ON DELETE CASCADE; no DELETE emitted.
+    /// The database foreign key must have ON DELETE CASCADE configured.
+    Passive,
+    /// Like Passive, but also disables orphan tracking entirely.
+    /// Use when you want complete database-side cascade with no ORM overhead.
+    All,
+}
+
 /// Information about a link/join table for many-to-many relationships.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LinkTableInfo {
@@ -86,6 +103,9 @@ pub struct RelationshipInfo {
 
     /// Cascade delete behavior.
     pub cascade_delete: bool,
+
+    /// Passive delete behavior - whether ORM emits DELETE or relies on DB cascade.
+    pub passive_deletes: PassiveDeletes,
 }
 
 impl RelationshipInfo {
@@ -106,6 +126,7 @@ impl RelationshipInfo {
             back_populates: None,
             lazy: false,
             cascade_delete: false,
+            passive_deletes: PassiveDeletes::Active,
         }
     }
 
@@ -149,6 +170,32 @@ impl RelationshipInfo {
     pub const fn cascade_delete(mut self, value: bool) -> Self {
         self.cascade_delete = value;
         self
+    }
+
+    /// Set passive delete behavior.
+    ///
+    /// - `PassiveDeletes::Active` (default): ORM emits DELETE for related objects
+    /// - `PassiveDeletes::Passive`: Relies on DB ON DELETE CASCADE
+    /// - `PassiveDeletes::All`: Passive + disables orphan tracking
+    #[must_use]
+    pub const fn passive_deletes(mut self, value: PassiveDeletes) -> Self {
+        self.passive_deletes = value;
+        self
+    }
+
+    /// Check if passive deletes are enabled (Passive or All).
+    #[must_use]
+    pub const fn is_passive_deletes(&self) -> bool {
+        matches!(
+            self.passive_deletes,
+            PassiveDeletes::Passive | PassiveDeletes::All
+        )
+    }
+
+    /// Check if orphan tracking is disabled (passive_deletes='all').
+    #[must_use]
+    pub const fn is_passive_deletes_all(&self) -> bool {
+        matches!(self.passive_deletes, PassiveDeletes::All)
     }
 }
 
@@ -971,7 +1018,8 @@ mod tests {
             .local_key("team_id")
             .back_populates("heroes")
             .lazy(true)
-            .cascade_delete(true);
+            .cascade_delete(true)
+            .passive_deletes(PassiveDeletes::Passive);
 
         assert_eq!(info.name, "team");
         assert_eq!(info.related_table, "teams");
@@ -982,6 +1030,41 @@ mod tests {
         assert_eq!(info.back_populates, Some("heroes"));
         assert!(info.lazy);
         assert!(info.cascade_delete);
+        assert_eq!(info.passive_deletes, PassiveDeletes::Passive);
+    }
+
+    #[test]
+    fn test_passive_deletes_default() {
+        assert_eq!(PassiveDeletes::default(), PassiveDeletes::Active);
+    }
+
+    #[test]
+    fn test_passive_deletes_helper_methods() {
+        // Active: ORM handles deletes
+        let active_info = RelationshipInfo::new("test", "test", RelationshipKind::OneToMany)
+            .passive_deletes(PassiveDeletes::Active);
+        assert!(!active_info.is_passive_deletes());
+        assert!(!active_info.is_passive_deletes_all());
+
+        // Passive: DB handles deletes
+        let passive_info = RelationshipInfo::new("test", "test", RelationshipKind::OneToMany)
+            .passive_deletes(PassiveDeletes::Passive);
+        assert!(passive_info.is_passive_deletes());
+        assert!(!passive_info.is_passive_deletes_all());
+
+        // All: DB handles + no orphan tracking
+        let all_info = RelationshipInfo::new("test", "test", RelationshipKind::OneToMany)
+            .passive_deletes(PassiveDeletes::All);
+        assert!(all_info.is_passive_deletes());
+        assert!(all_info.is_passive_deletes_all());
+    }
+
+    #[test]
+    fn test_relationship_info_new_has_active_passive_deletes() {
+        // New relationship should default to Active
+        let info = RelationshipInfo::new("test", "test", RelationshipKind::ManyToOne);
+        assert_eq!(info.passive_deletes, PassiveDeletes::Active);
+        assert!(!info.is_passive_deletes());
     }
 
     #[test]
@@ -1751,6 +1834,7 @@ mod tests {
             back_populates: Some("heroes"),
             lazy: false,
             cascade_delete: false,
+            passive_deletes: PassiveDeletes::Active,
         }];
 
         fn fields() -> &'static [FieldInfo] {
@@ -1800,6 +1884,7 @@ mod tests {
             back_populates: Some("team"),
             lazy: false,
             cascade_delete: false,
+            passive_deletes: PassiveDeletes::Active,
         }];
 
         fn fields() -> &'static [FieldInfo] {

@@ -1147,19 +1147,18 @@ pub trait SqlModelUpdate: Model + serde::Serialize + DeserializeOwned {
         })?;
 
         // Filter out null values (None fields)
-        let update_map: HashMap<String, serde_json::Value> = if let serde_json::Value::Object(map) =
-            source_json
-        {
-            map.into_iter().filter(|(_, v)| !v.is_null()).collect()
-        } else {
-            let mut err = ValidationError::new();
-            err.add(
-                "_source",
-                ValidationErrorKind::Custom,
-                "Source model must serialize to an object".to_string(),
-            );
-            return Err(err);
-        };
+        let update_map: HashMap<String, serde_json::Value> =
+            if let serde_json::Value::Object(map) = source_json {
+                map.into_iter().filter(|(_, v)| !v.is_null()).collect()
+            } else {
+                let mut err = ValidationError::new();
+                err.add(
+                    "_source",
+                    ValidationErrorKind::Custom,
+                    "Source model must serialize to an object".to_string(),
+                );
+                return Err(err);
+            };
 
         self.sqlmodel_update(update_map, options)
     }
@@ -2408,7 +2407,8 @@ mod tests {
 
         // Update name only
         let update = HashMap::from([("name".to_string(), serde_json::json!("Bob"))]);
-        user.sqlmodel_update(update, UpdateOptions::default()).unwrap();
+        user.sqlmodel_update(update, UpdateOptions::default())
+            .unwrap();
 
         assert_eq!(user.name, "Bob");
         assert_eq!(user.age, 30); // Unchanged
@@ -2562,10 +2562,7 @@ mod tests {
                 vec![
                     ("id", Value::BigInt(self.id)),
                     ("name", Value::Text(self.name.clone())),
-                    (
-                        "email",
-                        self.email.clone().map_or(Value::Null, Value::Text),
-                    ),
+                    ("email", self.email.clone().map_or(Value::Null, Value::Text)),
                 ]
             }
 
@@ -2652,8 +2649,11 @@ mod tests {
         let mut item = TestItem { id: 1, count: 10 };
 
         // Use the convenience method
-        item.sqlmodel_update_dict(HashMap::from([("count".to_string(), serde_json::json!(20))]))
-            .unwrap();
+        item.sqlmodel_update_dict(HashMap::from([(
+            "count".to_string(),
+            serde_json::json!(20),
+        )]))
+        .unwrap();
 
         assert_eq!(item.count, 20);
     }

@@ -694,6 +694,17 @@ fn generate_relationships(model: &ModelDef) -> proc_macro2::TokenStream {
 
         let lazy_val = rel.lazy;
         let cascade_val = rel.cascade_delete;
+        let passive_deletes_token = match rel.passive_deletes {
+            crate::parse::PassiveDeletesAttr::Active => {
+                quote::quote! { sqlmodel_core::PassiveDeletes::Active }
+            }
+            crate::parse::PassiveDeletesAttr::Passive => {
+                quote::quote! { sqlmodel_core::PassiveDeletes::Passive }
+            }
+            crate::parse::PassiveDeletesAttr::All => {
+                quote::quote! { sqlmodel_core::PassiveDeletes::All }
+            }
+        };
 
         relationship_tokens.push(quote::quote! {
             sqlmodel_core::RelationshipInfo::new(
@@ -707,6 +718,7 @@ fn generate_relationships(model: &ModelDef) -> proc_macro2::TokenStream {
             #link_table_call
             .lazy(#lazy_val)
             .cascade_delete(#cascade_val)
+            .passive_deletes(#passive_deletes_token)
         });
     }
 

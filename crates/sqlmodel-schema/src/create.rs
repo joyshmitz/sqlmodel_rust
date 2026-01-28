@@ -166,10 +166,8 @@ mod tests {
                     .nullable(true)
                     .primary_key(true)
                     .auto_increment(true),
-                FieldInfo::new("name", "name", SqlType::Text)
-                    .unique(true),
-                FieldInfo::new("age", "age", SqlType::Integer)
-                    .nullable(true),
+                FieldInfo::new("name", "name", SqlType::Text).unique(true),
+                FieldInfo::new("age", "age", SqlType::Integer).nullable(true),
                 FieldInfo::new("team_id", "team_id", SqlType::BigInt)
                     .nullable(true)
                     .foreign_key("teams.id"),
@@ -288,10 +286,8 @@ mod tests {
 
         fn fields() -> &'static [FieldInfo] {
             static FIELDS: &[FieldInfo] = &[
-                FieldInfo::new("id", "id", SqlType::Integer)
-                    .primary_key(true),
-                FieldInfo::new("is_active", "is_active", SqlType::Boolean)
-                    .default("true"),
+                FieldInfo::new("id", "id", SqlType::Integer).primary_key(true),
+                FieldInfo::new("is_active", "is_active", SqlType::Boolean).default("true"),
             ];
             FIELDS
         }
@@ -424,8 +420,7 @@ mod tests {
                     .nullable(true)
                     .primary_key(true)
                     .auto_increment(true),
-                FieldInfo::new("price", "price", SqlType::Real)
-                    .sql_type_override("DECIMAL(10,2)"),
+                FieldInfo::new("price", "price", SqlType::Real).sql_type_override("DECIMAL(10,2)"),
                 FieldInfo::new("sku", "sku", SqlType::Text)
                     .sql_type_override("VARCHAR(50)")
                     .unique(true),

@@ -150,6 +150,8 @@ pub struct RelationshipAttr {
     pub lazy: bool,
     /// Cascade delete behavior.
     pub cascade_delete: bool,
+    /// Passive deletes: let DB handle cascade deletes instead of ORM.
+    pub passive_deletes: PassiveDeletesAttr,
     /// Inferred relationship kind from field type.
     pub kind: RelationshipKindAttr,
 }
@@ -176,6 +178,20 @@ pub enum RelationshipKindAttr {
     OneToMany,
     /// Many-to-many via link table.
     ManyToMany,
+}
+
+/// Passive deletes behavior parsed from attribute.
+///
+/// Controls whether ORM emits DELETE or relies on DB cascade.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PassiveDeletesAttr {
+    /// ORM handles deletes (default).
+    #[default]
+    Active,
+    /// Let database handle via ON DELETE CASCADE.
+    Passive,
+    /// Passive + disable orphan tracking entirely.
+    All,
 }
 
 impl ModelDef {
@@ -1096,6 +1112,7 @@ fn parse_relationship_content(
     let mut back_populates: Option<String> = None;
     let mut lazy = false;
     let mut cascade_delete = false;
+    let mut passive_deletes = PassiveDeletesAttr::Active;
     let mut link_table: Option<LinkTableAttr> = None;
     let mut one_to_one = false;
     let mut many_to_many = false;
@@ -1169,6 +1186,46 @@ fn parse_relationship_content(
             } else {
                 cascade_delete = true;
             }
+        } else if path.is_ident("passive_deletes") {
+            // passive_deletes can be:
+            // - bare: passive_deletes (equivalent to true)
+            // - bool: passive_deletes = true/false
+            // - string: passive_deletes = "all"
+            if nested.input.peek(syn::Token![=]) {
+                let value: Lit = nested.value()?.parse()?;
+                match value {
+                    Lit::Bool(lit_bool) => {
+                        passive_deletes = if lit_bool.value() {
+                            PassiveDeletesAttr::Passive
+                        } else {
+                            PassiveDeletesAttr::Active
+                        };
+                    }
+                    Lit::Str(lit_str) => {
+                        let s = lit_str.value();
+                        passive_deletes = match s.to_lowercase().as_str() {
+                            "all" => PassiveDeletesAttr::All,
+                            "true" => PassiveDeletesAttr::Passive,
+                            "false" => PassiveDeletesAttr::Active,
+                            _ => {
+                                return Err(Error::new_spanned(
+                                    lit_str,
+                                    "expected 'all', 'true', or 'false' for passive_deletes",
+                                ));
+                            }
+                        };
+                    }
+                    _ => {
+                        return Err(Error::new_spanned(
+                            value,
+                            "expected boolean or 'all' string for passive_deletes",
+                        ));
+                    }
+                }
+            } else {
+                // Bare passive_deletes is equivalent to passive_deletes = true
+                passive_deletes = PassiveDeletesAttr::Passive;
+            }
         } else if path.is_ident("one_to_one") {
             one_to_one = true;
         } else if path.is_ident("many_to_many") {
@@ -1231,7 +1288,7 @@ fn parse_relationship_content(
                 path,
                 "unknown relationship attribute. \
                  Valid: model, foreign_key, remote_key, back_populates, lazy, \
-                 cascade_delete, one_to_one, many_to_many, link_table",
+                 cascade_delete, passive_deletes, one_to_one, many_to_many, link_table",
             ));
         }
 
@@ -1264,6 +1321,7 @@ fn parse_relationship_content(
         back_populates,
         lazy,
         cascade_delete,
+        passive_deletes,
         kind,
     })
 }
@@ -1592,6 +1650,88 @@ mod tests {
         let def = parse_model(&input).unwrap();
         let rel = def.relationship_fields()[0].relationship.as_ref().unwrap();
         assert!(rel.cascade_delete);
+    }
+
+    #[test]
+    fn test_parse_relationship_with_passive_deletes_bare() {
+        // Bare passive_deletes (no value) is equivalent to true
+        let input: DeriveInput = parse_quote! {
+            struct Parent {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(relationship(model = "children", passive_deletes))]
+                children: RelatedMany<Child>,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let rel = def.relationship_fields()[0].relationship.as_ref().unwrap();
+        assert_eq!(rel.passive_deletes, PassiveDeletesAttr::Passive);
+    }
+
+    #[test]
+    fn test_parse_relationship_with_passive_deletes_true() {
+        let input: DeriveInput = parse_quote! {
+            struct Parent {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(relationship(model = "children", passive_deletes = true))]
+                children: RelatedMany<Child>,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let rel = def.relationship_fields()[0].relationship.as_ref().unwrap();
+        assert_eq!(rel.passive_deletes, PassiveDeletesAttr::Passive);
+    }
+
+    #[test]
+    fn test_parse_relationship_with_passive_deletes_false() {
+        let input: DeriveInput = parse_quote! {
+            struct Parent {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(relationship(model = "children", passive_deletes = false))]
+                children: RelatedMany<Child>,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let rel = def.relationship_fields()[0].relationship.as_ref().unwrap();
+        assert_eq!(rel.passive_deletes, PassiveDeletesAttr::Active);
+    }
+
+    #[test]
+    fn test_parse_relationship_with_passive_deletes_all() {
+        let input: DeriveInput = parse_quote! {
+            struct Parent {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(relationship(model = "children", passive_deletes = "all"))]
+                children: RelatedMany<Child>,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let rel = def.relationship_fields()[0].relationship.as_ref().unwrap();
+        assert_eq!(rel.passive_deletes, PassiveDeletesAttr::All);
+    }
+
+    #[test]
+    fn test_parse_relationship_passive_deletes_default() {
+        // Default should be Active (ORM handles deletes)
+        let input: DeriveInput = parse_quote! {
+            struct Team {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(relationship(model = "heroes"))]
+                members: RelatedMany<Hero>,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+        let rel = def.relationship_fields()[0].relationship.as_ref().unwrap();
+        assert_eq!(rel.passive_deletes, PassiveDeletesAttr::Active);
     }
 
     #[test]

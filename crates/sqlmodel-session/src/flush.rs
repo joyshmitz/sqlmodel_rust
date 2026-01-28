@@ -711,11 +711,10 @@ mod tests {
         const PRIMARY_KEY: &'static [&'static str] = &["id"];
 
         fn fields() -> &'static [FieldInfo] {
-            static FIELDS: [FieldInfo; 1] = [
-                FieldInfo::new("id", "id", sqlmodel_core::SqlType::BigInt)
+            static FIELDS: [FieldInfo; 1] =
+                [FieldInfo::new("id", "id", sqlmodel_core::SqlType::BigInt)
                     .primary_key(true)
-                    .auto_increment(true),
-            ];
+                    .auto_increment(true)];
             &FIELDS
         }
 

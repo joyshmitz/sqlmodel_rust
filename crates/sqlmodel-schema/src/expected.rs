@@ -460,12 +460,10 @@ mod tests {
             const PRIMARY_KEY: &'static [&'static str] = &["id"];
 
             fn fields() -> &'static [FieldInfo] {
-                static FIELDS: &[FieldInfo] = &[
-                    FieldInfo::new("id", "id", SqlType::BigInt)
-                        .nullable(true)
-                        .primary_key(true)
-                        .auto_increment(true),
-                ];
+                static FIELDS: &[FieldInfo] = &[FieldInfo::new("id", "id", SqlType::BigInt)
+                    .nullable(true)
+                    .primary_key(true)
+                    .auto_increment(true)];
                 FIELDS
             }
 
