@@ -485,6 +485,32 @@ impl<C: Connection> Session<C> {
         self.pending_new.push(key);
     }
 
+    /// Add multiple objects to the session at once.
+    ///
+    /// This is equivalent to calling `add()` for each object, but provides a more
+    /// convenient API for bulk operations.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let users = vec![user1, user2, user3];
+    /// session.add_all(&users);
+    ///
+    /// // Or with an iterator
+    /// session.add_all(users.iter());
+    /// ```
+    ///
+    /// All objects will be INSERTed on the next `flush()` call.
+    pub fn add_all<'a, M, I>(&mut self, objects: I)
+    where
+        M: Model + Clone + Send + Sync + Serialize + 'static,
+        I: IntoIterator<Item = &'a M>,
+    {
+        for obj in objects {
+            self.add(obj);
+        }
+    }
+
     /// Delete an object from the session.
     ///
     /// The object will be DELETEd on the next `flush()` call.
