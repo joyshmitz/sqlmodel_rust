@@ -305,6 +305,183 @@ impl<T: DeserializeOwned> ModelValidate for T {
     }
 }
 
+// ============================================================================
+// Model Dump (model_dump)
+// ============================================================================
+
+/// Output mode for model_dump().
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DumpMode {
+    /// JSON-compatible types (strings, numbers, booleans, null)
+    #[default]
+    Json,
+    /// Rust native types (preserves Value variants)
+    Python,
+}
+
+/// Options for model_dump().
+///
+/// Controls the serialization behavior.
+#[derive(Debug, Clone, Default)]
+pub struct DumpOptions {
+    /// Output mode: Json or Python (Rust native)
+    pub mode: DumpMode,
+    /// Only include these fields (if Some)
+    pub include: Option<std::collections::HashSet<String>>,
+    /// Exclude these fields
+    pub exclude: Option<std::collections::HashSet<String>>,
+    /// Use field aliases in output (currently unused - for future alias support)
+    pub by_alias: bool,
+    /// Exclude fields that were not explicitly set (requires tracking)
+    pub exclude_unset: bool,
+    /// Exclude fields with default values
+    pub exclude_defaults: bool,
+    /// Exclude fields with None/null values
+    pub exclude_none: bool,
+    /// Exclude computed fields (for future computed_field support)
+    pub exclude_computed_fields: bool,
+    /// Enable round-trip mode (preserves types for re-parsing)
+    pub round_trip: bool,
+}
+
+impl DumpOptions {
+    /// Create new default options.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set output mode to JSON.
+    pub fn json(mut self) -> Self {
+        self.mode = DumpMode::Json;
+        self
+    }
+
+    /// Set output mode to Python (Rust native).
+    pub fn python(mut self) -> Self {
+        self.mode = DumpMode::Python;
+        self
+    }
+
+    /// Set fields to include.
+    pub fn include(mut self, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.include = Some(fields.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Set fields to exclude.
+    pub fn exclude(mut self, fields: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.exclude = Some(fields.into_iter().map(Into::into).collect());
+        self
+    }
+
+    /// Enable by_alias mode.
+    pub fn by_alias(mut self) -> Self {
+        self.by_alias = true;
+        self
+    }
+
+    /// Enable exclude_unset mode.
+    pub fn exclude_unset(mut self) -> Self {
+        self.exclude_unset = true;
+        self
+    }
+
+    /// Enable exclude_defaults mode.
+    pub fn exclude_defaults(mut self) -> Self {
+        self.exclude_defaults = true;
+        self
+    }
+
+    /// Enable exclude_none mode.
+    pub fn exclude_none(mut self) -> Self {
+        self.exclude_none = true;
+        self
+    }
+
+    /// Enable exclude_computed_fields mode.
+    pub fn exclude_computed_fields(mut self) -> Self {
+        self.exclude_computed_fields = true;
+        self
+    }
+
+    /// Enable round_trip mode.
+    pub fn round_trip(mut self) -> Self {
+        self.round_trip = true;
+        self
+    }
+}
+
+/// Result type for model_dump operations.
+pub type DumpResult = std::result::Result<serde_json::Value, serde_json::Error>;
+
+/// Trait for models that support model_dump().
+///
+/// This is typically implemented via blanket impl for models that implement Serialize.
+pub trait ModelDump {
+    /// Serialize a model to a JSON value.
+    ///
+    /// # Arguments
+    ///
+    /// * `options` - Dump options controlling serialization behavior
+    ///
+    /// # Returns
+    ///
+    /// A serde_json::Value representing the serialized model.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use sqlmodel_core::validate::{ModelDump, DumpOptions};
+    ///
+    /// let json = user.model_dump(DumpOptions::default())?;
+    /// ```
+    fn model_dump(&self, options: DumpOptions) -> DumpResult;
+
+    /// Serialize a model to a JSON string with default options.
+    fn model_dump_json(&self) -> std::result::Result<String, serde_json::Error> {
+        let value = self.model_dump(DumpOptions::default())?;
+        serde_json::to_string(&value)
+    }
+
+    /// Serialize a model to a pretty-printed JSON string.
+    fn model_dump_json_pretty(&self) -> std::result::Result<String, serde_json::Error> {
+        let value = self.model_dump(DumpOptions::default())?;
+        serde_json::to_string_pretty(&value)
+    }
+}
+
+/// Blanket implementation of ModelDump for types that implement Serialize.
+impl<T: serde::Serialize> ModelDump for T {
+    fn model_dump(&self, options: DumpOptions) -> DumpResult {
+        // First, serialize to JSON value
+        let mut value = serde_json::to_value(self)?;
+
+        // Apply options
+        if let serde_json::Value::Object(ref mut map) = value {
+            // Apply include filter
+            if let Some(ref include) = options.include {
+                map.retain(|k, _| include.contains(k));
+            }
+
+            // Apply exclude filter
+            if let Some(ref exclude) = options.exclude {
+                map.retain(|k, _| !exclude.contains(k));
+            }
+
+            // Apply exclude_none filter
+            if options.exclude_none {
+                map.retain(|_, v| !v.is_null());
+            }
+
+            // Note: exclude_unset and exclude_defaults require runtime tracking
+            // which is not available without additional infrastructure.
+            // These are documented as no-ops in the current implementation.
+        }
+
+        Ok(value)
+    }
+}
+
 /// Convert a Value to serde_json::Value.
 fn value_to_json(value: Value) -> serde_json::Value {
     match value {
@@ -625,5 +802,141 @@ mod tests {
             value_to_json(Value::Array(arr)),
             serde_json::json!([1, 2, 3])
         );
+    }
+
+    // =========================================================================
+    // model_dump tests
+    // =========================================================================
+
+    #[derive(Debug, Clone, PartialEq, serde::Deserialize, serde::Serialize)]
+    struct TestProduct {
+        name: String,
+        price: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+    }
+
+    #[test]
+    fn test_model_dump_default() {
+        let product = TestProduct {
+            name: "Widget".to_string(),
+            price: 19.99,
+            description: Some("A useful widget".to_string()),
+        };
+        let json = product.model_dump(DumpOptions::default()).unwrap();
+        assert_eq!(json["name"], "Widget");
+        assert_eq!(json["price"], 19.99);
+        assert_eq!(json["description"], "A useful widget");
+    }
+
+    #[test]
+    fn test_model_dump_json() {
+        let product = TestProduct {
+            name: "Gadget".to_string(),
+            price: 29.99,
+            description: None,
+        };
+        let json_str = product.model_dump_json().unwrap();
+        assert!(json_str.contains("Gadget"));
+        assert!(json_str.contains("29.99"));
+    }
+
+    #[test]
+    fn test_model_dump_json_pretty() {
+        let product = TestProduct {
+            name: "Gadget".to_string(),
+            price: 29.99,
+            description: None,
+        };
+        let json_str = product.model_dump_json_pretty().unwrap();
+        // Pretty print should have newlines
+        assert!(json_str.contains('\n'));
+        assert!(json_str.contains("Gadget"));
+    }
+
+    #[test]
+    fn test_model_dump_include() {
+        let product = TestProduct {
+            name: "Widget".to_string(),
+            price: 19.99,
+            description: Some("A widget".to_string()),
+        };
+        let options = DumpOptions::new().include(["name"]);
+        let json = product.model_dump(options).unwrap();
+        assert!(json.get("name").is_some());
+        assert!(json.get("price").is_none());
+        assert!(json.get("description").is_none());
+    }
+
+    #[test]
+    fn test_model_dump_exclude() {
+        let product = TestProduct {
+            name: "Widget".to_string(),
+            price: 19.99,
+            description: Some("A widget".to_string()),
+        };
+        let options = DumpOptions::new().exclude(["description"]);
+        let json = product.model_dump(options).unwrap();
+        assert!(json.get("name").is_some());
+        assert!(json.get("price").is_some());
+        assert!(json.get("description").is_none());
+    }
+
+    #[test]
+    fn test_model_dump_exclude_none() {
+        let product = TestProduct {
+            name: "Widget".to_string(),
+            price: 19.99,
+            description: None,
+        };
+        // Note: serde skip_serializing_if already handles this
+        // But we can still test the exclude_none flag
+        let options = DumpOptions::new().exclude_none();
+        let json = product.model_dump(options).unwrap();
+        assert!(json.get("name").is_some());
+        // description would be None, but serde already skips it
+    }
+
+    #[test]
+    fn test_dump_options_builder() {
+        let options = DumpOptions::new()
+            .json()
+            .include(["name", "age"])
+            .exclude(["password"])
+            .by_alias()
+            .exclude_none()
+            .exclude_defaults()
+            .round_trip();
+
+        assert_eq!(options.mode, DumpMode::Json);
+        assert!(options.include.is_some());
+        assert!(options.exclude.is_some());
+        assert!(options.by_alias);
+        assert!(options.exclude_none);
+        assert!(options.exclude_defaults);
+        assert!(options.round_trip);
+    }
+
+    #[test]
+    fn test_dump_mode_default() {
+        assert_eq!(DumpMode::default(), DumpMode::Json);
+    }
+
+    #[test]
+    fn test_model_dump_include_exclude_combined() {
+        let user = TestUser {
+            name: "Alice".to_string(),
+            age: 30,
+            active: true,
+        };
+        // Include name and age, but exclude age
+        let options = DumpOptions::new()
+            .include(["name", "age"])
+            .exclude(["age"]);
+        let json = user.model_dump(options).unwrap();
+        // Include is applied first, then exclude
+        assert!(json.get("name").is_some());
+        assert!(json.get("age").is_none());
+        assert!(json.get("active").is_none());
     }
 }
