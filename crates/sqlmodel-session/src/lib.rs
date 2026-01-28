@@ -2292,4 +2292,105 @@ mod tests {
 
         assert_eq!(state.lock().expect("lock poisoned").query_calls, 1);
     }
+
+    #[test]
+    fn test_add_all_with_vec() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        // Each object needs a unique PK for identity tracking
+        // (objects without PKs get the same ObjectKey)
+        let teams = vec![
+            Team {
+                id: Some(100),
+                name: "Team A".to_string(),
+            },
+            Team {
+                id: Some(101),
+                name: "Team B".to_string(),
+            },
+            Team {
+                id: Some(102),
+                name: "Team C".to_string(),
+            },
+        ];
+
+        session.add_all(&teams);
+
+        let info = session.debug_state();
+        assert_eq!(info.pending_new, 3);
+        assert_eq!(info.tracked, 3);
+    }
+
+    #[test]
+    fn test_add_all_with_empty_collection() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        let teams: Vec<Team> = vec![];
+        session.add_all(&teams);
+
+        let info = session.debug_state();
+        assert_eq!(info.pending_new, 0);
+        assert_eq!(info.tracked, 0);
+    }
+
+    #[test]
+    fn test_add_all_with_iterator() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        let teams = vec![
+            Team {
+                id: Some(200),
+                name: "Team X".to_string(),
+            },
+            Team {
+                id: Some(201),
+                name: "Team Y".to_string(),
+            },
+        ];
+
+        // Use iter() explicitly
+        session.add_all(teams.iter());
+
+        let info = session.debug_state();
+        assert_eq!(info.pending_new, 2);
+        assert_eq!(info.tracked, 2);
+    }
+
+    #[test]
+    fn test_add_all_with_slice() {
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection {
+            state: Arc::clone(&state),
+        };
+        let mut session = Session::new(conn);
+
+        let teams = [
+            Team {
+                id: Some(300),
+                name: "Team 1".to_string(),
+            },
+            Team {
+                id: Some(301),
+                name: "Team 2".to_string(),
+            },
+        ];
+
+        session.add_all(&teams);
+
+        let info = session.debug_state();
+        assert_eq!(info.pending_new, 2);
+        assert_eq!(info.tracked, 2);
+    }
 }
