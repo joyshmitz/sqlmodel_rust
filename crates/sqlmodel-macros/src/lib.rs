@@ -868,6 +868,203 @@ pub fn derive_validate(input: TokenStream) -> TokenStream {
     validate_derive::generate_validate_impl(&def).into()
 }
 
+/// Derive macro for SQL enum types.
+///
+/// Generates `SqlEnum` trait implementation, `From<EnumType> for Value`,
+/// `TryFrom<Value> for EnumType`, and `Display`/`FromStr` implementations.
+///
+/// Enum variants are mapped to their snake_case string representations by default.
+/// Use `#[sqlmodel(rename = "custom_name")]` on variants to override.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(SqlEnum, Debug, Clone, PartialEq)]
+/// enum Status {
+///     Active,
+///     Inactive,
+///     #[sqlmodel(rename = "on_hold")]
+///     OnHold,
+/// }
+/// ```
+#[proc_macro_derive(SqlEnum, attributes(sqlmodel))]
+pub fn derive_sql_enum(input: TokenStream) -> TokenStream {
+    let input = syn::parse_macro_input!(input as syn::DeriveInput);
+    match generate_sql_enum_impl(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn generate_sql_enum_impl(input: &syn::DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let syn::Data::Enum(data) = &input.data else {
+        return Err(syn::Error::new_spanned(
+            input,
+            "SqlEnum can only be derived for enums",
+        ));
+    };
+
+    // Collect variant info
+    let mut variant_names = Vec::new();
+    let mut variant_strings = Vec::new();
+
+    for variant in &data.variants {
+        if !variant.fields.is_empty() {
+            return Err(syn::Error::new_spanned(
+                variant,
+                "SqlEnum variants must be unit variants (no fields)",
+            ));
+        }
+
+        let ident = &variant.ident;
+        variant_names.push(ident.clone());
+
+        // Check for #[sqlmodel(rename = "...")] attribute
+        let mut custom_name = None;
+        for attr in &variant.attrs {
+            if attr.path().is_ident("sqlmodel") {
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("rename") {
+                        let value = meta.value()?;
+                        let s: syn::LitStr = value.parse()?;
+                        custom_name = Some(s.value());
+                    }
+                    Ok(())
+                })?;
+            }
+        }
+
+        let sql_str = custom_name.unwrap_or_else(|| to_snake_case(&ident.to_string()));
+        variant_strings.push(sql_str);
+    }
+
+    let type_name = to_snake_case(&name.to_string());
+    let _variant_count = variant_names.len();
+
+    // Generate static VARIANTS array
+    let variant_str_refs: Vec<_> = variant_strings.iter().map(|s| s.as_str()).collect();
+
+    let to_sql_arms: Vec<_> = variant_names
+        .iter()
+        .zip(variant_strings.iter())
+        .map(|(ident, s)| {
+            quote::quote! { #name::#ident => #s }
+        })
+        .collect();
+
+    let from_sql_arms: Vec<_> = variant_names
+        .iter()
+        .zip(variant_strings.iter())
+        .map(|(ident, s)| {
+            quote::quote! { #s => Ok(#name::#ident) }
+        })
+        .collect();
+
+    // Build the error message listing valid values
+    let valid_values: String = variant_strings
+        .iter()
+        .map(|s| format!("'{}'", s))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let error_msg = format!(
+        "invalid value for {}: expected one of {}",
+        name, valid_values
+    );
+
+    Ok(quote::quote! {
+        impl #impl_generics sqlmodel_core::SqlEnum for #name #ty_generics #where_clause {
+            const VARIANTS: &'static [&'static str] = &[#(#variant_str_refs),*];
+            const TYPE_NAME: &'static str = #type_name;
+
+            fn to_sql_str(&self) -> &'static str {
+                match self {
+                    #(#to_sql_arms,)*
+                }
+            }
+
+            fn from_sql_str(s: &str) -> Result<Self, String> {
+                match s {
+                    #(#from_sql_arms,)*
+                    _ => Err(format!("{}, got '{}'", #error_msg, s)),
+                }
+            }
+        }
+
+        impl #impl_generics From<#name #ty_generics> for sqlmodel_core::Value #where_clause {
+            fn from(v: #name #ty_generics) -> Self {
+                sqlmodel_core::Value::Text(
+                    sqlmodel_core::SqlEnum::to_sql_str(&v).to_string()
+                )
+            }
+        }
+
+        impl #impl_generics From<&#name #ty_generics> for sqlmodel_core::Value #where_clause {
+            fn from(v: &#name #ty_generics) -> Self {
+                sqlmodel_core::Value::Text(
+                    sqlmodel_core::SqlEnum::to_sql_str(v).to_string()
+                )
+            }
+        }
+
+        impl #impl_generics TryFrom<sqlmodel_core::Value> for #name #ty_generics #where_clause {
+            type Error = sqlmodel_core::Error;
+
+            fn try_from(value: sqlmodel_core::Value) -> Result<Self, Self::Error> {
+                match value {
+                    sqlmodel_core::Value::Text(ref s) => {
+                        sqlmodel_core::SqlEnum::from_sql_str(s.as_str()).map_err(|e| {
+                            sqlmodel_core::Error::Type(sqlmodel_core::error::TypeError {
+                                expected: <#name as sqlmodel_core::SqlEnum>::TYPE_NAME,
+                                actual: e,
+                                column: None,
+                                rust_type: None,
+                            })
+                        })
+                    }
+                    other => Err(sqlmodel_core::Error::Type(sqlmodel_core::error::TypeError {
+                        expected: <#name as sqlmodel_core::SqlEnum>::TYPE_NAME,
+                        actual: other.type_name().to_string(),
+                        column: None,
+                        rust_type: None,
+                    })),
+                }
+            }
+        }
+
+        impl #impl_generics ::core::fmt::Display for #name #ty_generics #where_clause {
+            fn fmt(&self, f: &mut ::core::fmt::Formatter<'_>) -> ::core::fmt::Result {
+                f.write_str(sqlmodel_core::SqlEnum::to_sql_str(self))
+            }
+        }
+
+        impl #impl_generics ::core::str::FromStr for #name #ty_generics #where_clause {
+            type Err = String;
+
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                sqlmodel_core::SqlEnum::from_sql_str(s)
+            }
+        }
+    })
+}
+
+fn to_snake_case(s: &str) -> String {
+    let mut result = String::with_capacity(s.len() + 4);
+    for (i, ch) in s.chars().enumerate() {
+        if ch.is_uppercase() {
+            if i > 0 {
+                result.push('_');
+            }
+            result.push(ch.to_ascii_lowercase());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 /// Attribute macro for defining SQL functions in handlers.
 ///
 /// # Example

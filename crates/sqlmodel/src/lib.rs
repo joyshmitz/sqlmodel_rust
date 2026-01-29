@@ -81,13 +81,14 @@ pub use sqlmodel_core::{
     RegionId,
     Result,
     Row,
+    SqlEnum,
     SqlType,
     TaskId,
     TypeInfo,
     Value,
 };
 
-pub use sqlmodel_macros::{Model, Validate};
+pub use sqlmodel_macros::{Model, SqlEnum, Validate};
 
 pub use sqlmodel_query::{
     BinaryOp, Expr, Join, JoinType, Limit, Offset, OrderBy, QueryBuilder, Select, UnaryOp, Where,
@@ -172,8 +173,8 @@ pub mod prelude {
         select,
         update,
     };
-    // Derive macros (re-export only Validate since Model trait conflicts)
-    pub use sqlmodel_macros::Validate;
+    // Derive macros (re-export only Validate/SqlEnum since Model trait conflicts)
+    pub use sqlmodel_macros::{SqlEnum, Validate};
 
     // Console types when feature enabled
     #[cfg(feature = "console")]

@@ -34,7 +34,7 @@ pub use relationship::{
     RelationshipKind, find_back_relationship, find_relationship, validate_back_populates,
 };
 pub use row::Row;
-pub use types::{SqlType, TypeInfo};
+pub use types::{SqlEnum, SqlType, TypeInfo};
 pub use validate::{
     DumpMode, DumpOptions, DumpResult, ModelDump, ModelValidate, SqlModelDump, SqlModelValidate,
     ValidateInput, ValidateOptions, ValidateResult, apply_serialization_aliases,

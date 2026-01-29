@@ -47,6 +47,9 @@ pub enum SqlType {
     // Arrays (PostgreSQL)
     Array(Box<SqlType>),
 
+    // Enum type with allowed values
+    Enum(Vec<&'static str>),
+
     // Custom type name
     Custom(&'static str),
 }
@@ -78,6 +81,11 @@ impl SqlType {
             SqlType::Uuid => "UUID".to_string(),
             SqlType::Json => "JSON".to_string(),
             SqlType::JsonB => "JSONB".to_string(),
+            SqlType::Enum(variants) => {
+                // Default: just use TEXT; dialect-specific DDL handles the real type
+                let _ = variants;
+                "TEXT".to_string()
+            }
             SqlType::Array(inner) => format!("{}[]", inner.sql_name()),
             SqlType::Custom(name) => name.to_string(),
         }
@@ -114,6 +122,36 @@ impl SqlType {
                 | SqlType::TimestampTz
         )
     }
+}
+
+/// Trait for Rust enums that map to SQL enum types.
+///
+/// Implement this trait to enable automatic conversion between Rust enums
+/// and their SQL string representations. The `SqlEnum` derive macro
+/// generates this implementation automatically.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(SqlEnum)]
+/// enum Status {
+///     Active,
+///     Inactive,
+///     Pending,
+/// }
+/// ```
+pub trait SqlEnum: Sized {
+    /// All valid string values for this enum.
+    const VARIANTS: &'static [&'static str];
+
+    /// The SQL enum type name (typically the enum's snake_case name).
+    const TYPE_NAME: &'static str;
+
+    /// Convert the enum to its string representation.
+    fn to_sql_str(&self) -> &'static str;
+
+    /// Parse from a string representation.
+    fn from_sql_str(s: &str) -> Result<Self, String>;
 }
 
 /// Trait for types that have a corresponding SQL type.
