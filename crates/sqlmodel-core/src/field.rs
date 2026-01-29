@@ -130,6 +130,13 @@ pub struct FieldInfo {
     /// Extra metadata as JSON string (for custom extensions/info).
     /// This can be used to store additional information that doesn't fit in other fields.
     pub column_info: Option<&'static str>,
+    /// SQL expression for hybrid properties.
+    ///
+    /// When set, this field is a hybrid property: it has both a Rust-side computed
+    /// value and a SQL expression that can be used in queries (WHERE, ORDER BY, etc.).
+    /// The macro generates a `{field}_expr()` associated function that returns
+    /// `Expr::raw(this_sql)`.
+    pub hybrid_sql: Option<&'static str>,
 }
 
 impl FieldInfo {
@@ -165,6 +172,7 @@ impl FieldInfo {
             column_constraints: &[],
             column_comment: None,
             column_info: None,
+            hybrid_sql: None,
         }
     }
 
@@ -581,6 +589,18 @@ impl FieldInfo {
     /// Set column info from optional.
     pub const fn column_info_opt(mut self, info: Option<&'static str>) -> Self {
         self.column_info = info;
+        self
+    }
+
+    /// Set hybrid SQL expression.
+    pub const fn hybrid_sql(mut self, sql: &'static str) -> Self {
+        self.hybrid_sql = Some(sql);
+        self
+    }
+
+    /// Set hybrid SQL expression from optional.
+    pub const fn hybrid_sql_opt(mut self, sql: Option<&'static str>) -> Self {
+        self.hybrid_sql = sql;
         self
     }
 

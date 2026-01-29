@@ -129,6 +129,9 @@ fn generate_model_impl(model: &ModelDef) -> proc_macro2::TokenStream {
     // Generate Debug impl only if any field has repr=false
     let debug_impl = generate_debug_impl(model);
 
+    // Generate hybrid property expr methods
+    let hybrid_impl = generate_hybrid_methods(model);
+
     quote::quote! {
         impl #impl_generics sqlmodel_core::Model for #name #ty_generics #where_clause {
             const TABLE_NAME: &'static str = #table_name;
@@ -164,6 +167,52 @@ fn generate_model_impl(model: &ModelDef) -> proc_macro2::TokenStream {
         }
 
         #debug_impl
+
+        #hybrid_impl
+    }
+}
+
+/// Generate associated functions for hybrid properties.
+///
+/// For each field with `#[sqlmodel(hybrid, sql = "...")]`, generates
+/// a `pub fn {field}_expr() -> sqlmodel_query::Expr` method that returns
+/// `Expr::raw(sql)`.
+fn generate_hybrid_methods(model: &ModelDef) -> proc_macro2::TokenStream {
+    let hybrid_fields: Vec<_> = model
+        .fields
+        .iter()
+        .filter(|f| f.hybrid && f.hybrid_sql.is_some())
+        .collect();
+
+    if hybrid_fields.is_empty() {
+        return quote::quote! {};
+    }
+
+    let name = &model.name;
+    let (impl_generics, ty_generics, where_clause) = model.generics.split_for_impl();
+
+    let methods: Vec<_> = hybrid_fields
+        .iter()
+        .map(|field| {
+            let sql = field.hybrid_sql.as_ref().unwrap();
+            let method_name = quote::format_ident!("{}_expr", field.name);
+            let doc = format!(
+                "SQL expression for the `{}` hybrid property.\n\nGenerates: `{}`",
+                field.name, sql
+            );
+            quote::quote! {
+                #[doc = #doc]
+                pub fn #method_name() -> sqlmodel_query::Expr {
+                    sqlmodel_query::Expr::raw(#sql)
+                }
+            }
+        })
+        .collect();
+
+    quote::quote! {
+        impl #impl_generics #name #ty_generics #where_clause {
+            #(#methods)*
+        }
     }
 }
 
@@ -349,6 +398,13 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
             quote::quote! { None }
         };
 
+        // Hybrid SQL expression
+        let hybrid_sql_token = if let Some(ref sql) = field.hybrid_sql {
+            quote::quote! { Some(#sql) }
+        } else {
+            quote::quote! { None }
+        };
+
         // Decimal precision (max_digits -> precision, decimal_places -> scale)
         let precision_token = if let Some(p) = field.max_digits {
             quote::quote! { Some(#p) }
@@ -389,6 +445,7 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
                 .column_constraints(#column_constraints_token)
                 .column_comment_opt(#column_comment_token)
                 .column_info_opt(#column_info_token)
+                .hybrid_sql_opt(#hybrid_sql_token)
         });
     }
 

@@ -15,6 +15,7 @@ pub mod connection;
 pub mod dynamic;
 pub mod error;
 pub mod field;
+pub mod hybrid;
 pub mod model;
 pub mod relationship;
 pub mod row;
@@ -27,6 +28,7 @@ pub use connection::{
 };
 pub use error::{Error, FieldValidationError, Result, ValidationError, ValidationErrorKind};
 pub use field::{Column, Field, FieldInfo, ReferentialAction};
+pub use hybrid::Hybrid;
 pub use model::{
     AutoIncrement, ExtraFieldsBehavior, Model, ModelConfig, ModelEvents, SoftDelete, Timestamps,
 };

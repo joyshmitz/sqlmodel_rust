@@ -76,6 +76,7 @@ pub use sqlmodel_core::{
     Error,
     Field,
     FieldInfo,
+    Hybrid,
     Model,
     Outcome,
     RegionId,
@@ -148,6 +149,7 @@ pub mod prelude {
         Error,
         // Query building
         Expr,
+        Hybrid,
         Join,
         JoinType,
         Migration,

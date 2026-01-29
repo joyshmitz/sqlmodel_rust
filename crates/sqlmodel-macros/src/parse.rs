@@ -134,6 +134,10 @@ pub struct FieldDef {
     /// Complete column specification override (sa_column).
     /// When set, provides full column control and disables other column attributes.
     pub sa_column: Option<SaColumnDef>,
+    /// Whether this is a hybrid property.
+    pub hybrid: bool,
+    /// SQL expression for hybrid properties.
+    pub hybrid_sql: Option<String>,
 }
 
 /// Parsed relationship attribute from `#[sqlmodel(relationship(...))]`.
@@ -783,6 +787,8 @@ fn parse_field(field: &Field) -> Result<FieldDef> {
         column_comment: attrs.column_comment,
         column_info: attrs.column_info,
         sa_column: attrs.sa_column,
+        hybrid: attrs.hybrid,
+        hybrid_sql: attrs.hybrid_sql,
     })
 }
 
@@ -835,6 +841,10 @@ struct FieldAttrs {
     column_info: Option<String>,
     /// Complete column specification override (sa_column).
     sa_column: Option<SaColumnDef>,
+    /// Whether this is a hybrid property.
+    hybrid: bool,
+    /// SQL expression for hybrid properties.
+    hybrid_sql: Option<String>,
 }
 
 /// Detect the relationship kind from a field's Rust type.
@@ -1153,6 +1163,20 @@ fn parse_field_attrs(
                 // Parse sa_column(...) attribute for full column override
                 let sa_col = parse_sa_column_content(&meta)?;
                 result.sa_column = Some(sa_col);
+            } else if path.is_ident("hybrid") {
+                result.hybrid = true;
+                // Hybrid fields are implicitly computed (not stored in DB)
+                result.computed = true;
+            } else if path.is_ident("sql") {
+                let value: Lit = meta.value()?.parse()?;
+                if let Lit::Str(lit_str) = value {
+                    result.hybrid_sql = Some(lit_str.value());
+                } else {
+                    return Err(Error::new_spanned(
+                        value,
+                        "expected string literal for sql",
+                    ));
+                }
             } else {
                 // Unknown attribute
                 let attr_name = path.to_token_stream().to_string();
@@ -1164,7 +1188,8 @@ fn parse_field_attrs(
                          unique, foreign_key, on_delete, on_update, default, sql_type, index, \
                          skip, skip_insert, skip_update, relationship, alias, validation_alias, \
                          serialization_alias, computed, max_digits, decimal_places, default_json, repr, \
-                         const_field, column_constraints, column_comment, column_info, sa_column"
+                         const_field, column_constraints, column_comment, column_info, sa_column, \
+                         hybrid, sql"
                     ),
                 ));
             }
@@ -1685,6 +1710,20 @@ fn validate_field_attrs(attrs: &FieldAttrs, field_name: &Ident, field_type: &Typ
                 ),
             ));
         }
+    }
+
+    // Validate hybrid property: `sql` requires `hybrid`, and `hybrid` requires `sql`
+    if attrs.hybrid && attrs.hybrid_sql.is_none() {
+        return Err(Error::new_spanned(
+            field_name,
+            "`hybrid` attribute requires `sql = \"...\"` to specify the SQL expression",
+        ));
+    }
+    if attrs.hybrid_sql.is_some() && !attrs.hybrid {
+        return Err(Error::new_spanned(
+            field_name,
+            "`sql` attribute is only valid on hybrid fields; add `hybrid` attribute",
+        ));
     }
 
     Ok(())
@@ -2866,6 +2905,65 @@ mod tests {
         // data_fields should include computed
         assert_eq!(def.data_fields().len(), 3);
         assert!(def.data_fields().iter().any(|f| f.computed));
+    }
+
+    // ==================== Hybrid Property Tests ====================
+
+    #[test]
+    fn test_hybrid_field_parsed() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                first_name: String,
+                last_name: String,
+                #[sqlmodel(hybrid, sql = "first_name || ' ' || last_name")]
+                full_name: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        let hybrid_field = def.fields.iter().find(|f| f.name == "full_name").unwrap();
+        assert!(hybrid_field.hybrid);
+        assert!(hybrid_field.computed); // hybrid implies computed
+        assert_eq!(
+            hybrid_field.hybrid_sql.as_deref(),
+            Some("first_name || ' ' || last_name")
+        );
+
+        // Hybrid fields should be excluded from select (they're computed)
+        assert!(def.select_fields().iter().all(|f| f.name != "full_name"));
+    }
+
+    #[test]
+    fn test_hybrid_without_sql_errors() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(hybrid)]
+                full_name: String,
+            }
+        };
+
+        let err = parse_model(&input).unwrap_err();
+        assert!(err.to_string().contains("requires `sql = \"...\"`"));
+    }
+
+    #[test]
+    fn test_sql_without_hybrid_errors() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(sql = "first_name || last_name")]
+                full_name: String,
+            }
+        };
+
+        let err = parse_model(&input).unwrap_err();
+        assert!(err.to_string().contains("only valid on hybrid fields"));
     }
 
     // ==================== Model Config Tests ====================
