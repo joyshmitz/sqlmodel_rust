@@ -606,6 +606,22 @@ impl TryFrom<Value> for Vec<bool> {
     }
 }
 
+impl TryFrom<Value> for Vec<f64> {
+    type Error = Error;
+
+    fn try_from(value: Value) -> Result<Self, Self::Error> {
+        match value {
+            Value::Array(arr) => arr.into_iter().map(f64::try_from).collect(),
+            other => Err(Error::Type(TypeError {
+                expected: "ARRAY",
+                actual: other.type_name().to_string(),
+                column: None,
+                rust_type: None,
+            })),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
