@@ -3281,4 +3281,194 @@ mod tests {
         );
         assert!(price_field.nullable);
     }
+
+    // =========================================================================
+    // sa_column Tests (Full Column Override)
+    // =========================================================================
+
+    #[test]
+    fn test_parse_sa_column_basic() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(sa_column(
+                    sql_type = "VARCHAR(50)",
+                    server_default = "'active'",
+                    comment = "User status"
+                ))]
+                status: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        let status_field = def.fields.iter().find(|f| f.name == "status").unwrap();
+        let sa_col = status_field.sa_column.as_ref().unwrap();
+        assert_eq!(sa_col.sql_type.as_deref(), Some("VARCHAR(50)"));
+        assert_eq!(sa_col.server_default.as_deref(), Some("'active'"));
+        assert_eq!(sa_col.comment.as_deref(), Some("User status"));
+    }
+
+    #[test]
+    fn test_parse_sa_column_with_check_constraint() {
+        let input: DeriveInput = parse_quote! {
+            struct Product {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(sa_column(
+                    sql_type = "DECIMAL(10,2)",
+                    check = "price > 0",
+                    check = "price < 1000000"
+                ))]
+                price: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        let price_field = def.fields.iter().find(|f| f.name == "price").unwrap();
+        let sa_col = price_field.sa_column.as_ref().unwrap();
+        assert_eq!(sa_col.sql_type.as_deref(), Some("DECIMAL(10,2)"));
+        assert_eq!(sa_col.check.len(), 2);
+        assert_eq!(sa_col.check[0], "price > 0");
+        assert_eq!(sa_col.check[1], "price < 1000000");
+    }
+
+    #[test]
+    fn test_parse_sa_column_with_nullable_and_unique() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(sa_column(
+                    sql_type = "VARCHAR(255)",
+                    nullable,
+                    unique
+                ))]
+                email: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        let email_field = def.fields.iter().find(|f| f.name == "email").unwrap();
+        let sa_col = email_field.sa_column.as_ref().unwrap();
+        assert_eq!(sa_col.sql_type.as_deref(), Some("VARCHAR(255)"));
+        assert_eq!(sa_col.nullable, Some(true));
+        assert_eq!(sa_col.unique, Some(true));
+    }
+
+    #[test]
+    fn test_parse_sa_column_with_index() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(sa_column(
+                    sql_type = "VARCHAR(100)",
+                    index = "idx_user_email"
+                ))]
+                email: String,
+            }
+        };
+
+        let def = parse_model(&input).unwrap();
+
+        let email_field = def.fields.iter().find(|f| f.name == "email").unwrap();
+        let sa_col = email_field.sa_column.as_ref().unwrap();
+        assert_eq!(sa_col.index.as_deref(), Some("idx_user_email"));
+    }
+
+    #[test]
+    fn test_sa_column_mutual_exclusivity_with_sql_type() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(
+                    sql_type = "TEXT",
+                    sa_column(sql_type = "VARCHAR(50)")
+                )]
+                status: String,
+            }
+        };
+
+        let err = parse_model(&input).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("sa_column") && err_msg.contains("sql_type"),
+            "Expected mutual exclusivity error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_sa_column_mutual_exclusivity_with_default() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(
+                    default = "'pending'",
+                    sa_column(server_default = "'active'")
+                )]
+                status: String,
+            }
+        };
+
+        let err = parse_model(&input).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("sa_column") && err_msg.contains("default"),
+            "Expected mutual exclusivity error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_sa_column_mutual_exclusivity_with_column_constraints() {
+        let input: DeriveInput = parse_quote! {
+            struct Product {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(
+                    column_constraints = ["CHECK(price > 0)"],
+                    sa_column(check = "price > 0")
+                )]
+                price: i64,
+            }
+        };
+
+        let err = parse_model(&input).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("sa_column") && err_msg.contains("column_constraints"),
+            "Expected mutual exclusivity error, got: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_sa_column_unknown_attribute_error() {
+        let input: DeriveInput = parse_quote! {
+            struct User {
+                #[sqlmodel(primary_key)]
+                id: i64,
+                #[sqlmodel(sa_column(
+                    sql_type = "VARCHAR(50)",
+                    unknown_attr = "value"
+                ))]
+                status: String,
+            }
+        };
+
+        let err = parse_model(&input).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(
+            err_msg.contains("unknown sa_column attribute"),
+            "Expected unknown attribute error, got: {}",
+            err_msg
+        );
+    }
 }

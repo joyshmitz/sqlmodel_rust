@@ -1101,12 +1101,13 @@ mod tests {
 
     #[test]
     fn test_field_info_column_constraints() {
+        static CONSTRAINTS: &[&str] = &["CHECK(price > 0)", "CHECK(price < 1000)"];
+
         // Default should be empty
         let field1 = FieldInfo::new("price", "price", SqlType::Integer);
         assert!(field1.column_constraints.is_empty());
 
         // With constraints
-        static CONSTRAINTS: &[&str] = &["CHECK(price > 0)", "CHECK(price < 1000)"];
         let field2 =
             FieldInfo::new("price", "price", SqlType::Integer).column_constraints(CONSTRAINTS);
         assert_eq!(field2.column_constraints.len(), 2);

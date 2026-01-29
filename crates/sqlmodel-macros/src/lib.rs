@@ -193,13 +193,23 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
     for field in model.data_fields() {
         let field_ident = field.name.unraw();
         let column_name = &field.column_name;
-        let nullable = field.nullable;
         let primary_key = field.primary_key;
         let auto_increment = field.auto_increment;
-        let unique = field.unique;
 
-        // Determine SQL type: use explicit attribute or infer from Rust type
-        let sql_type_token = if let Some(ref sql_type_str) = field.sql_type {
+        // Check if sa_column override is present
+        let sa_col = field.sa_column.as_ref();
+
+        // Nullable: sa_column.nullable takes precedence over field.nullable
+        let nullable = sa_col.and_then(|sc| sc.nullable).unwrap_or(field.nullable);
+
+        // Unique: sa_column.unique takes precedence over field.unique
+        let unique = sa_col.and_then(|sc| sc.unique).unwrap_or(field.unique);
+
+        // Determine SQL type: sa_column.sql_type > field.sql_type > inferred
+        let effective_sql_type = sa_col
+            .and_then(|sc| sc.sql_type.as_ref())
+            .or(field.sql_type.as_ref());
+        let sql_type_token = if let Some(sql_type_str) = effective_sql_type {
             // Parse the explicit SQL type attribute string
             infer::parse_sql_type_attr(sql_type_str)
         } else {
@@ -208,28 +218,34 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
         };
 
         // If sql_type attribute was provided, also store the raw string as an override for DDL.
-        let sql_type_override_token = if let Some(ref sql_type_str) = field.sql_type {
+        let sql_type_override_token = if let Some(sql_type_str) = effective_sql_type {
             quote::quote! { Some(#sql_type_str) }
         } else {
             quote::quote! { None }
         };
 
-        // Default value
-        let default_token = if let Some(d) = &field.default {
+        // Default value: sa_column.server_default takes precedence over field.default
+        let effective_default = sa_col
+            .and_then(|sc| sc.server_default.as_ref())
+            .or(field.default.as_ref());
+        let default_token = if let Some(d) = effective_default {
             quote::quote! { Some(#d) }
         } else {
             quote::quote! { None }
         };
 
-        // Foreign key
+        // Foreign key (not overridden by sa_column - kept from field)
         let fk_token = if let Some(fk) = &field.foreign_key {
             quote::quote! { Some(#fk) }
         } else {
             quote::quote! { None }
         };
 
-        // Index
-        let index_token = if let Some(idx) = &field.index {
+        // Index: sa_column.index takes precedence over field.index
+        let effective_index = sa_col
+            .and_then(|sc| sc.index.as_ref())
+            .or(field.index.as_ref());
+        let index_token = if let Some(idx) = effective_index {
             quote::quote! { Some(#idx) }
         } else {
             quote::quote! { None }
@@ -302,16 +318,27 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
         // Const field
         let const_field = field.const_field;
 
-        // Column constraints
-        let column_constraints = &field.column_constraints;
-        let column_constraints_token = if column_constraints.is_empty() {
+        // Column constraints: sa_column.check takes precedence over field.column_constraints
+        let effective_constraints: Vec<&String> = if let Some(sc) = sa_col {
+            if sc.check.is_empty() {
+                field.column_constraints.iter().collect()
+            } else {
+                sc.check.iter().collect()
+            }
+        } else {
+            field.column_constraints.iter().collect()
+        };
+        let column_constraints_token = if effective_constraints.is_empty() {
             quote::quote! { &[] }
         } else {
-            quote::quote! { &[#(#column_constraints),*] }
+            quote::quote! { &[#(#effective_constraints),*] }
         };
 
-        // Column comment
-        let column_comment_token = if let Some(ref comment) = field.column_comment {
+        // Column comment: sa_column.comment takes precedence over field.column_comment
+        let effective_comment = sa_col
+            .and_then(|sc| sc.comment.as_ref())
+            .or(field.column_comment.as_ref());
+        let column_comment_token = if let Some(comment) = effective_comment {
             quote::quote! { Some(#comment) }
         } else {
             quote::quote! { None }
