@@ -738,6 +738,7 @@ dependencies = [
  "num-rational",
  "once_cell",
  "regex",
+ "smallvec",
  "syntect",
  "time",
  "unicode-width",
