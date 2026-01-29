@@ -255,6 +255,24 @@ impl<C> PoolShared<C> {
             timeouts: AtomicU64::new(0),
         }
     }
+
+    /// Lock the inner mutex, recovering from poisoning for read-only access.
+    ///
+    /// A poisoned mutex occurs when a thread panicked while holding the lock.
+    /// The data inside is still valid for reading, so we recover by logging
+    /// and using `into_inner()` to get the guard.
+    ///
+    /// This should only be used for read-only operations where the data is
+    /// always valid regardless of whether a previous operation completed.
+    fn lock_or_recover(&self) -> std::sync::MutexGuard<'_, PoolInner<C>> {
+        self.inner.lock().unwrap_or_else(|poisoned| {
+            tracing::error!(
+                "Pool mutex poisoned; recovering for read-only access. \
+                 A thread panicked while holding the lock."
+            );
+            poisoned.into_inner()
+        })
+    }
 }
 
 /// A connection pool for database connections.
@@ -287,14 +305,14 @@ impl<C: Connection> Pool<C> {
     /// Get the pool configuration.
     #[must_use]
     pub fn config(&self) -> PoolConfig {
-        let inner = self.shared.inner.lock().expect("pool lock poisoned");
+        let inner = self.shared.lock_or_recover();
         inner.config.clone()
     }
 
     /// Get the current pool statistics.
     #[must_use]
     pub fn stats(&self) -> PoolStats {
-        let inner = self.shared.inner.lock().expect("pool lock poisoned");
+        let inner = self.shared.lock_or_recover();
         let mut stats = inner.stats();
         stats.connections_created = self.shared.connections_created.load(Ordering::Relaxed);
         stats.connections_closed = self.shared.connections_closed.load(Ordering::Relaxed);
@@ -306,14 +324,14 @@ impl<C: Connection> Pool<C> {
     /// Check if the pool is at capacity.
     #[must_use]
     pub fn at_capacity(&self) -> bool {
-        let inner = self.shared.inner.lock().expect("pool lock poisoned");
+        let inner = self.shared.lock_or_recover();
         inner.total_count >= inner.config.max_connections
     }
 
     /// Check if the pool has been closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        let inner = self.shared.inner.lock().expect("pool lock poisoned");
+        let inner = self.shared.lock_or_recover();
         inner.closed
     }
 
