@@ -4,6 +4,7 @@
 //! with compile-time type safety.
 
 pub mod builder;
+pub mod cache;
 pub mod clause;
 pub mod cte;
 pub mod eager;
@@ -16,6 +17,7 @@ pub use builder::{
     DeleteBuilder, InsertBuilder, InsertManyBuilder, OnConflict, QueryBuilder, SetClause,
     UpdateBuilder,
 };
+pub use cache::{StatementCache, cache_key};
 pub use clause::{Limit, Offset, OrderBy, Where};
 pub use cte::{Cte, CteRef, WithQuery};
 pub use eager::{EagerLoader, IncludePath};
