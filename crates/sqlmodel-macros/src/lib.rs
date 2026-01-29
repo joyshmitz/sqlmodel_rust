@@ -234,7 +234,7 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
             quote::quote! { None }
         };
 
-        // Foreign key (not overridden by sa_column - kept from field)
+        // Foreign key (validation prevents use with sa_column, so field value is always used)
         let fk_token = if let Some(fk) = &field.foreign_key {
             quote::quote! { Some(#fk) }
         } else {
@@ -318,13 +318,10 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
         // Const field
         let const_field = field.const_field;
 
-        // Column constraints: sa_column.check takes precedence over field.column_constraints
+        // Column constraints: sa_column.check is used if sa_column is present,
+        // otherwise field.column_constraints (validation prevents both being set)
         let effective_constraints: Vec<&String> = if let Some(sc) = sa_col {
-            if sc.check.is_empty() {
-                field.column_constraints.iter().collect()
-            } else {
-                sc.check.iter().collect()
-            }
+            sc.check.iter().collect()
         } else {
             field.column_constraints.iter().collect()
         };
@@ -334,7 +331,8 @@ fn generate_field_infos(model: &ModelDef) -> proc_macro2::TokenStream {
             quote::quote! { &[#(#effective_constraints),*] }
         };
 
-        // Column comment: sa_column.comment takes precedence over field.column_comment
+        // Column comment: sa_column.comment is used if sa_column is present,
+        // otherwise field.column_comment (validation prevents both being set)
         let effective_comment = sa_col
             .and_then(|sc| sc.comment.as_ref())
             .or(field.column_comment.as_ref());
