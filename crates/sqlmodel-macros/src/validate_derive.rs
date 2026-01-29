@@ -71,6 +71,8 @@ pub struct ValidateFieldDef {
     pub max_items: Option<usize>,
     /// Whether items in a collection must be unique.
     pub unique_items: bool,
+    /// Whether to validate as a credit card number (Luhn check).
+    pub credit_card: bool,
 }
 
 /// Parse a `DeriveInput` into a `ValidateDef`.
@@ -238,6 +240,7 @@ fn parse_validate_field(field: &Field) -> Result<ValidateFieldDef> {
     let mut min_items = None;
     let mut max_items = None;
     let mut unique_items = false;
+    let mut credit_card = false;
 
     // Parse #[validate(...)] attributes
     for attr in &field.attrs {
@@ -296,6 +299,49 @@ fn parse_validate_field(field: &Field) -> Result<ValidateFieldDef> {
             } else if path.is_ident("url") {
                 // URL validation pattern (simplified)
                 pattern = Some(r"^https?://[^\s/$.?#].[^\s]*$".to_string());
+            } else if path.is_ident("uuid") {
+                // UUID format validation (RFC 4122)
+                // Matches: 8-4-4-4-12 hex digits with version 1-5 and variant 8-b
+                pattern = Some(
+                    r"(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        .to_string(),
+                );
+            } else if path.is_ident("ipv4") {
+                // IPv4 address validation
+                // Matches: 0.0.0.0 to 255.255.255.255
+                pattern = Some(
+                    r"^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)$"
+                        .to_string(),
+                );
+            } else if path.is_ident("ipv6") {
+                // IPv6 address validation (simplified - covers most common formats)
+                // Full form: 8 groups of 4 hex digits separated by colons
+                // Also handles :: abbreviation for consecutive zeros
+                pattern = Some(
+                    r"(?i)^(?:(?:[0-9a-f]{1,4}:){7}[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,7}:|(?:[0-9a-f]{1,4}:){1,6}:[0-9a-f]{1,4}|(?:[0-9a-f]{1,4}:){1,5}(?::[0-9a-f]{1,4}){1,2}|(?:[0-9a-f]{1,4}:){1,4}(?::[0-9a-f]{1,4}){1,3}|(?:[0-9a-f]{1,4}:){1,3}(?::[0-9a-f]{1,4}){1,4}|(?:[0-9a-f]{1,4}:){1,2}(?::[0-9a-f]{1,4}){1,5}|[0-9a-f]{1,4}:(?::[0-9a-f]{1,4}){1,6}|:(?::[0-9a-f]{1,4}){1,7}|::)$"
+                        .to_string(),
+                );
+            } else if path.is_ident("mac_address") {
+                // MAC address validation (colon or hyphen separated)
+                // Matches: XX:XX:XX:XX:XX:XX or XX-XX-XX-XX-XX-XX
+                pattern = Some(
+                    r"(?i)^(?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2}$".to_string(),
+                );
+            } else if path.is_ident("slug") {
+                // URL-safe slug validation
+                // Lowercase alphanumeric with hyphens, no leading/trailing hyphens
+                pattern = Some(r"^[a-z0-9]+(?:-[a-z0-9]+)*$".to_string());
+            } else if path.is_ident("hex_color") {
+                // Hex color validation (#RGB or #RRGGBB)
+                pattern = Some(r"(?i)^#(?:[0-9a-f]{3}|[0-9a-f]{6})$".to_string());
+            } else if path.is_ident("phone") {
+                // Phone number validation (E.164 format)
+                // Optional + followed by 1-15 digits, can't start with 0
+                pattern = Some(r"^\+?[1-9]\d{1,14}$".to_string());
+            } else if path.is_ident("credit_card") {
+                // Credit card validation requires Luhn algorithm check
+                // This flag triggers runtime validation, not just regex
+                credit_card = true;
             } else if path.is_ident("multiple_of") {
                 let value: Lit = meta.value()?.parse()?;
                 let divisor = parse_numeric_lit(&value)?;
@@ -318,7 +364,8 @@ fn parse_validate_field(field: &Field) -> Result<ValidateFieldDef> {
                     format!(
                         "unknown validate attribute `{attr_name}`. \
                          Valid attributes are: min, max, min_length, max_length, pattern, \
-                         required, custom, email, url, multiple_of, min_items, max_items, unique_items"
+                         required, custom, email, url, uuid, ipv4, ipv6, mac_address, slug, \
+                         hex_color, phone, credit_card, multiple_of, min_items, max_items, unique_items"
                     ),
                 ));
             }
@@ -352,6 +399,7 @@ fn parse_validate_field(field: &Field) -> Result<ValidateFieldDef> {
         min_items,
         max_items,
         unique_items,
+        credit_card,
     })
 }
 
@@ -506,6 +554,7 @@ fn has_validation(field: &ValidateFieldDef) -> bool {
         || field.min_items.is_some()
         || field.max_items.is_some()
         || field.unique_items
+        || field.credit_card
 }
 
 /// Generate validation code for a single field.
@@ -747,6 +796,25 @@ fn generate_field_validation(field: &ValidateFieldDef) -> TokenStream {
         }
     }
 
+    // Credit card validation (Luhn algorithm check)
+    if field.credit_card {
+        if is_optional {
+            checks.push(quote! {
+                if let Some(ref value) = self.#field_name {
+                    if !sqlmodel_core::validate::is_valid_credit_card(value.as_ref()) {
+                        errors.add_credit_card(#field_name_str);
+                    }
+                }
+            });
+        } else {
+            checks.push(quote! {
+                if !sqlmodel_core::validate::is_valid_credit_card(self.#field_name.as_ref()) {
+                    errors.add_credit_card(#field_name_str);
+                }
+            });
+        }
+    }
+
     quote! {
         #(#checks)*
     }
@@ -782,6 +850,7 @@ mod tests {
             min_items: None,
             max_items: None,
             unique_items: false,
+            credit_card: false,
         };
         assert!(has_validation(&field));
 
@@ -799,6 +868,7 @@ mod tests {
             min_items: None,
             max_items: None,
             unique_items: false,
+            credit_card: false,
         };
         assert!(!has_validation(&field));
     }
@@ -992,6 +1062,7 @@ mod tests {
             min_items: None,
             max_items: None,
             unique_items: false,
+            credit_card: false,
         };
         assert!(has_validation(&field_with_multiple_of));
 
@@ -1009,6 +1080,7 @@ mod tests {
             min_items: None,
             max_items: None,
             unique_items: false,
+            credit_card: false,
         };
         assert!(!has_validation(&field_without_validation));
     }
@@ -1091,6 +1163,7 @@ mod tests {
             min_items: Some(1),
             max_items: None,
             unique_items: false,
+            credit_card: false,
         };
         assert!(has_validation(&field_with_min_items));
 
@@ -1108,7 +1181,230 @@ mod tests {
             min_items: None,
             max_items: None,
             unique_items: true,
+            credit_card: false,
         };
         assert!(has_validation(&field_with_unique));
+    }
+
+    // ========================================================================
+    // Built-in Validators Tests (uuid, ipv4, ipv6, mac_address, slug, etc.)
+    // ========================================================================
+
+    #[test]
+    fn test_parse_uuid_validator() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Device {
+                #[validate(uuid)]
+                device_id: String,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert!(def.fields[0].pattern.is_some());
+        let pattern = def.fields[0].pattern.as_ref().unwrap();
+        // Pattern should match valid UUIDs
+        let re = regex::Regex::new(pattern).unwrap();
+        assert!(re.is_match("550e8400-e29b-41d4-a716-446655440000"));
+        assert!(!re.is_match("invalid-uuid"));
+    }
+
+    #[test]
+    fn test_parse_ipv4_validator() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Server {
+                #[validate(ipv4)]
+                ip_address: String,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert!(def.fields[0].pattern.is_some());
+        let pattern = def.fields[0].pattern.as_ref().unwrap();
+        let re = regex::Regex::new(pattern).unwrap();
+        assert!(re.is_match("192.168.1.1"));
+        assert!(re.is_match("0.0.0.0"));
+        assert!(re.is_match("255.255.255.255"));
+        assert!(!re.is_match("256.1.1.1"));
+        assert!(!re.is_match("192.168.1"));
+    }
+
+    #[test]
+    fn test_parse_ipv6_validator() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Server {
+                #[validate(ipv6)]
+                ip_address: String,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert!(def.fields[0].pattern.is_some());
+        let pattern = def.fields[0].pattern.as_ref().unwrap();
+        let re = regex::Regex::new(pattern).unwrap();
+        assert!(re.is_match("2001:0db8:85a3:0000:0000:8a2e:0370:7334"));
+        assert!(re.is_match("::1"));
+        assert!(re.is_match("::"));
+        assert!(!re.is_match("192.168.1.1"));
+    }
+
+    #[test]
+    fn test_parse_mac_address_validator() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Device {
+                #[validate(mac_address)]
+                mac: String,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert!(def.fields[0].pattern.is_some());
+        let pattern = def.fields[0].pattern.as_ref().unwrap();
+        let re = regex::Regex::new(pattern).unwrap();
+        assert!(re.is_match("00:1A:2B:3C:4D:5E"));
+        assert!(re.is_match("00-1A-2B-3C-4D-5E"));
+        assert!(!re.is_match("00:1A:2B:3C:4D"));
+        assert!(!re.is_match("invalid"));
+    }
+
+    #[test]
+    fn test_parse_slug_validator() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Post {
+                #[validate(slug)]
+                url_slug: String,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert!(def.fields[0].pattern.is_some());
+        let pattern = def.fields[0].pattern.as_ref().unwrap();
+        let re = regex::Regex::new(pattern).unwrap();
+        assert!(re.is_match("hello-world"));
+        assert!(re.is_match("post123"));
+        assert!(re.is_match("a"));
+        assert!(!re.is_match("Hello-World")); // uppercase not allowed
+        assert!(!re.is_match("-hello")); // can't start with hyphen
+        assert!(!re.is_match("hello-")); // can't end with hyphen
+    }
+
+    #[test]
+    fn test_parse_hex_color_validator() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Theme {
+                #[validate(hex_color)]
+                primary_color: String,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert!(def.fields[0].pattern.is_some());
+        let pattern = def.fields[0].pattern.as_ref().unwrap();
+        let re = regex::Regex::new(pattern).unwrap();
+        assert!(re.is_match("#fff"));
+        assert!(re.is_match("#FFF"));
+        assert!(re.is_match("#ffffff"));
+        assert!(re.is_match("#FF00FF"));
+        assert!(!re.is_match("fff"));
+        assert!(!re.is_match("#ffff"));
+        assert!(!re.is_match("#gggggg"));
+    }
+
+    #[test]
+    fn test_parse_phone_validator() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Contact {
+                #[validate(phone)]
+                phone_number: String,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert!(def.fields[0].pattern.is_some());
+        let pattern = def.fields[0].pattern.as_ref().unwrap();
+        let re = regex::Regex::new(pattern).unwrap();
+        assert!(re.is_match("+12025551234"));
+        assert!(re.is_match("12025551234"));
+        assert!(!re.is_match("0123456789")); // can't start with 0
+        assert!(!re.is_match("+0123456789")); // can't start with 0 after +
+    }
+
+    #[test]
+    fn test_parse_credit_card_validator() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Payment {
+                #[validate(credit_card)]
+                card_number: String,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        // credit_card uses runtime validation, not regex
+        assert!(def.fields[0].pattern.is_none());
+        assert!(def.fields[0].credit_card);
+    }
+
+    #[test]
+    fn test_has_validation_includes_credit_card() {
+        let field_with_credit_card = ValidateFieldDef {
+            name: syn::Ident::new("test", proc_macro2::Span::call_site()),
+            ty: syn::parse_quote!(String),
+            min: None,
+            max: None,
+            min_length: None,
+            max_length: None,
+            pattern: None,
+            required: false,
+            custom: None,
+            multiple_of: None,
+            min_items: None,
+            max_items: None,
+            unique_items: false,
+            credit_card: true,
+        };
+        assert!(has_validation(&field_with_credit_card));
+    }
+
+    #[test]
+    fn test_parse_multiple_builtin_validators() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct Network {
+                #[validate(uuid)]
+                device_id: String,
+                #[validate(ipv4)]
+                ipv4_addr: String,
+                #[validate(mac_address)]
+                mac: String,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 3);
+        assert!(def.fields[0].pattern.is_some()); // uuid
+        assert!(def.fields[1].pattern.is_some()); // ipv4
+        assert!(def.fields[2].pattern.is_some()); // mac_address
+    }
+
+    #[test]
+    fn test_builtin_validator_with_other_constraints() {
+        let input: syn::DeriveInput = parse_quote! {
+            struct User {
+                #[validate(uuid, min_length = 36, max_length = 36)]
+                user_id: String,
+            }
+        };
+
+        let def = parse_validate(&input).unwrap();
+        assert_eq!(def.fields.len(), 1);
+        assert!(def.fields[0].pattern.is_some()); // uuid pattern
+        assert_eq!(def.fields[0].min_length, Some(36));
+        assert_eq!(def.fields[0].max_length, Some(36));
     }
 }

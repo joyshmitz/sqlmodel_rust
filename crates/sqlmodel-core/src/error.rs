@@ -222,6 +222,8 @@ pub enum ValidationErrorKind {
     MaxItems,
     /// Collection contains duplicate items
     UniqueItems,
+    /// Invalid credit card number (Luhn check failed)
+    CreditCard,
 }
 
 impl ValidationError {
@@ -373,6 +375,15 @@ impl ValidationError {
     /// entire model state. The error is recorded with field "__model__".
     pub fn add_model_error(&mut self, message: impl Into<String>) {
         self.add("__model__", ValidationErrorKind::Model, message);
+    }
+
+    /// Add a credit card validation error.
+    pub fn add_credit_card(&mut self, field: impl Into<String>) {
+        self.add(
+            field,
+            ValidationErrorKind::CreditCard,
+            "is not a valid credit card number".to_string(),
+        );
     }
 
     /// Convert to Result, returning Ok(()) if no errors, Err(self) otherwise.

@@ -106,6 +106,78 @@ pub fn validate_pattern(pattern: &str) -> Option<String> {
 }
 
 // ============================================================================
+// Built-in Validators
+// ============================================================================
+
+/// Validate a credit card number using the Luhn algorithm.
+///
+/// The Luhn algorithm (also known as the "modulus 10" algorithm) is a simple
+/// checksum formula used to validate identification numbers such as credit card
+/// numbers, IMEI numbers, and others.
+///
+/// # Algorithm
+///
+/// 1. Starting from the rightmost digit (check digit) and moving left,
+///    double the value of every second digit.
+/// 2. If the result of doubling is greater than 9, subtract 9.
+/// 3. Sum all the digits.
+/// 4. The total modulo 10 must equal 0.
+///
+/// # Arguments
+///
+/// * `value` - The credit card number as a string (may contain spaces or hyphens)
+///
+/// # Returns
+///
+/// `true` if the number is valid according to the Luhn algorithm, `false` otherwise.
+///
+/// # Example
+///
+/// ```ignore
+/// use sqlmodel_core::validate::is_valid_credit_card;
+///
+/// assert!(is_valid_credit_card("4539578763621486"));  // Valid Visa
+/// assert!(is_valid_credit_card("4539-5787-6362-1486")); // With dashes
+/// assert!(is_valid_credit_card("4539 5787 6362 1486")); // With spaces
+/// assert!(!is_valid_credit_card("1234567890123456")); // Invalid
+/// ```
+pub fn is_valid_credit_card(value: &str) -> bool {
+    // Remove all non-digit characters (spaces, hyphens, etc.)
+    let digits: Vec<u32> = value
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .filter_map(|c| c.to_digit(10))
+        .collect();
+
+    // Credit card numbers are typically 13-19 digits
+    if digits.len() < 13 || digits.len() > 19 {
+        return false;
+    }
+
+    // Luhn algorithm
+    let mut sum = 0u32;
+    let len = digits.len();
+
+    for (i, &digit) in digits.iter().enumerate() {
+        // Count from right: rightmost is position 1 (odd)
+        // We double every second digit starting from the second-to-last
+        let position_from_right = len - i;
+        let is_double_position = position_from_right % 2 == 0;
+
+        let value = if is_double_position {
+            let doubled = digit * 2;
+            if doubled > 9 { doubled - 9 } else { doubled }
+        } else {
+            digit
+        };
+
+        sum += value;
+    }
+
+    sum % 10 == 0
+}
+
+// ============================================================================
 // Model Validation (model_validate)
 // ============================================================================
 
@@ -2656,5 +2728,81 @@ mod tests {
         .unwrap();
 
         assert_eq!(item.count, 20);
+    }
+
+    // ========================================================================
+    // Credit Card Validation Tests (Luhn Algorithm)
+    // ========================================================================
+
+    #[test]
+    fn test_credit_card_valid_visa() {
+        // Valid Visa test number
+        assert!(is_valid_credit_card("4539578763621486"));
+    }
+
+    #[test]
+    fn test_credit_card_valid_mastercard() {
+        // Valid Mastercard test number
+        assert!(is_valid_credit_card("5425233430109903"));
+    }
+
+    #[test]
+    fn test_credit_card_valid_amex() {
+        // Valid American Express test number
+        assert!(is_valid_credit_card("374245455400126"));
+    }
+
+    #[test]
+    fn test_credit_card_with_spaces() {
+        // Spaces should be stripped
+        assert!(is_valid_credit_card("4539 5787 6362 1486"));
+    }
+
+    #[test]
+    fn test_credit_card_with_dashes() {
+        // Dashes should be stripped
+        assert!(is_valid_credit_card("4539-5787-6362-1486"));
+    }
+
+    #[test]
+    fn test_credit_card_invalid_luhn() {
+        // Invalid Luhn checksum
+        assert!(!is_valid_credit_card("1234567890123456"));
+    }
+
+    #[test]
+    fn test_credit_card_too_short() {
+        // Less than 13 digits
+        assert!(!is_valid_credit_card("123456789012"));
+    }
+
+    #[test]
+    fn test_credit_card_too_long() {
+        // More than 19 digits
+        assert!(!is_valid_credit_card("12345678901234567890"));
+    }
+
+    #[test]
+    fn test_credit_card_empty() {
+        assert!(!is_valid_credit_card(""));
+    }
+
+    #[test]
+    fn test_credit_card_non_numeric() {
+        // Contains letters
+        assert!(!is_valid_credit_card("453957876362abcd"));
+    }
+
+    #[test]
+    fn test_credit_card_all_zeros() {
+        // All zeros - 16 digits, technically passes Luhn (sum=0, 0%10=0)
+        // but not a realistic card number
+        assert!(is_valid_credit_card("0000000000000000"));
+    }
+
+    #[test]
+    fn test_credit_card_valid_discover() {
+        // Valid Discover test number
+        assert!(is_valid_credit_card("6011111111111117"));
     }
 }
