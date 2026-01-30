@@ -134,6 +134,156 @@ pub use sqlmodel_console::{
     renderables::{ErrorPanel, ErrorSeverity, PoolHealth, PoolStatsProvider, PoolStatusDisplay},
 };
 
+// ============================================================================
+// Generic Model Support Tests
+// ============================================================================
+//
+// These compile-time tests verify that the Model derive macro correctly handles
+// generic type parameters at the parsing and code generation level.
+//
+// IMPORTANT CONSTRAINTS for Generic Models:
+// When using generic type parameters in Model fields, the type must satisfy:
+// - Send + Sync (Model trait bounds)
+// - Into<Value> / From<Value> conversions (for to_row/from_row)
+//
+// The easiest patterns for generic models are:
+// 1. Use generics only for non-database fields (with #[sqlmodel(skip)])
+// 2. Use concrete types for database fields, generics for metadata
+// 3. Use PhantomData for type markers
+
+#[cfg(test)]
+mod generic_model_tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+    use std::marker::PhantomData;
+
+    // Pattern 1: Generic with skipped field
+    // The generic type is not stored in the database
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    struct TaggedModel<T: Clone + std::fmt::Debug + Send + Sync + Default> {
+        #[sqlmodel(primary_key)]
+        id: i64,
+        name: String,
+        #[sqlmodel(skip)]
+        _marker: PhantomData<T>,
+    }
+
+    // Pattern 2: Concrete model with generic metadata
+    // Database fields are concrete, generic is for compile-time type safety
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    struct TypedResponse<T: Send + Sync> {
+        #[sqlmodel(primary_key)]
+        id: i64,
+        status_code: i32,
+        body: String,
+        #[sqlmodel(skip)]
+        _type: PhantomData<T>,
+    }
+
+    // Test marker type for TypedResponse
+    #[derive(Debug, Clone)]
+    struct UserData;
+
+    #[derive(Debug, Clone)]
+    struct OrderData;
+
+    #[test]
+    fn test_generic_model_with_phantom_data() {
+        // TaggedModel compiles and works with any marker type
+        let model: TaggedModel<UserData> = TaggedModel {
+            id: 1,
+            name: "test".to_string(),
+            _marker: PhantomData,
+        };
+        assert_eq!(model.id, 1);
+        assert_eq!(model.name, "test");
+    }
+
+    #[test]
+    fn test_generic_model_fields() {
+        // Verify TaggedModel has correct fields (skip fields are excluded from to_row)
+        let fields = <TaggedModel<UserData> as Model>::fields();
+        // _marker is skipped, so only id and name
+        assert_eq!(fields.len(), 2);
+        assert!(fields.iter().any(|f| f.name == "id"));
+        assert!(fields.iter().any(|f| f.name == "name"));
+    }
+
+    #[test]
+    fn test_generic_model_table_name() {
+        // Table name should be derived from struct name
+        assert_eq!(<TaggedModel<UserData> as Model>::TABLE_NAME, "tagged_model");
+        assert_eq!(<TypedResponse<UserData> as Model>::TABLE_NAME, "typed_response");
+    }
+
+    #[test]
+    fn test_generic_model_primary_key() {
+        assert_eq!(
+            <TaggedModel<UserData> as Model>::PRIMARY_KEY,
+            &["id"]
+        );
+    }
+
+    #[test]
+    fn test_generic_model_type_safety() {
+        // Different type parameters create distinct types at compile time
+        let user_response: TypedResponse<UserData> = TypedResponse {
+            id: 1,
+            status_code: 200,
+            body: r#"{"name": "Alice"}"#.to_string(),
+            _type: PhantomData,
+        };
+
+        let order_response: TypedResponse<OrderData> = TypedResponse {
+            id: 2,
+            status_code: 201,
+            body: r#"{"order_id": 123}"#.to_string(),
+            _type: PhantomData,
+        };
+
+        // These are different types - can't accidentally mix them
+        assert_eq!(user_response.id, 1);
+        assert_eq!(order_response.id, 2);
+    }
+
+    #[test]
+    fn test_generic_model_to_row() {
+        let model: TaggedModel<UserData> = TaggedModel {
+            id: 1,
+            name: "test".to_string(),
+            _marker: PhantomData,
+        };
+        let row = model.to_row();
+        // Only non-skipped fields
+        assert_eq!(row.len(), 2);
+        assert!(row.iter().any(|(name, _)| *name == "id"));
+        assert!(row.iter().any(|(name, _)| *name == "name"));
+    }
+
+    #[test]
+    fn test_generic_model_primary_key_value() {
+        let model: TaggedModel<UserData> = TaggedModel {
+            id: 42,
+            name: "test".to_string(),
+            _marker: PhantomData,
+        };
+        let pk = model.primary_key_value();
+        assert_eq!(pk.len(), 1);
+        assert_eq!(pk[0], Value::BigInt(42));
+    }
+
+    #[test]
+    fn test_generic_model_is_new() {
+        let new_model: TaggedModel<UserData> = TaggedModel {
+            id: 0,
+            data: "new".to_string(),
+            message: None,
+        };
+        // Note: is_new() depends on the implementation - typically checks if pk is default
+        let _ = new_response.is_new(); // Just verify it compiles
+    }
+}
+
 /// Prelude module for convenient imports.
 ///
 /// ```ignore
