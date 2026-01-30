@@ -428,6 +428,100 @@ mod inheritance_tests {
     }
 }
 
+// ============================================================================
+// Horizontal Sharding Tests
+// ============================================================================
+//
+// These tests verify that the Model derive macro correctly handles shard_key
+// attributes and generates the appropriate SHARD_KEY constant and shard_key_value() method.
+
+#[cfg(test)]
+mod shard_key_tests {
+    use super::*;
+    use serde::{Deserialize, Serialize};
+
+    // Model with shard_key on tenant_id
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    #[sqlmodel(table, shard_key = "tenant_id")]
+    struct TenantData {
+        #[sqlmodel(primary_key)]
+        id: i64,
+        tenant_id: i64,
+        data: String,
+    }
+
+    // Model with shard_key on an optional field
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    #[sqlmodel(table, shard_key = "region")]
+    struct RegionalData {
+        #[sqlmodel(primary_key)]
+        id: i64,
+        region: Option<String>,
+        value: i32,
+    }
+
+    // Model without shard_key (default)
+    #[derive(Model, Debug, Clone, Serialize, Deserialize)]
+    #[sqlmodel(table)]
+    struct UnshardedData {
+        #[sqlmodel(primary_key)]
+        id: i64,
+        data: String,
+    }
+
+    #[test]
+    fn test_shard_key_constant() {
+        assert_eq!(<TenantData as Model>::SHARD_KEY, Some("tenant_id"));
+        assert_eq!(<RegionalData as Model>::SHARD_KEY, Some("region"));
+        assert_eq!(<UnshardedData as Model>::SHARD_KEY, None);
+    }
+
+    #[test]
+    fn test_shard_key_value_non_optional() {
+        let data = TenantData {
+            id: 1,
+            tenant_id: 42,
+            data: "test".to_string(),
+        };
+        let shard_value = data.shard_key_value();
+        assert!(shard_value.is_some());
+        assert_eq!(shard_value.unwrap(), Value::BigInt(42));
+    }
+
+    #[test]
+    fn test_shard_key_value_optional_some() {
+        let data = RegionalData {
+            id: 1,
+            region: Some("us-west".to_string()),
+            value: 100,
+        };
+        let shard_value = data.shard_key_value();
+        assert!(shard_value.is_some());
+        assert_eq!(shard_value.unwrap(), Value::Text("us-west".to_string()));
+    }
+
+    #[test]
+    fn test_shard_key_value_optional_none() {
+        let data = RegionalData {
+            id: 1,
+            region: None,
+            value: 100,
+        };
+        let shard_value = data.shard_key_value();
+        assert!(shard_value.is_none());
+    }
+
+    #[test]
+    fn test_shard_key_value_unsharded() {
+        let data = UnshardedData {
+            id: 1,
+            data: "test".to_string(),
+        };
+        let shard_value = data.shard_key_value();
+        assert!(shard_value.is_none());
+    }
+}
+
 /// Prelude module for convenient imports.
 ///
 /// ```ignore
