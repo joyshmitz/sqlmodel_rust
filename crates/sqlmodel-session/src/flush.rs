@@ -275,9 +275,12 @@ impl PendingOp {
 
     /// Generate the SQL that would be executed for this operation.
     ///
-    /// This is useful for testing and debugging. For INSERT/DELETE operations,
-    /// this generates the batch SQL with a single row. For UPDATE, it generates
-    /// the full UPDATE statement.
+    /// This is useful for testing and debugging. For INSERT, this generates
+    /// a single-row insert. For DELETE/UPDATE, the SQL matches what would be
+    /// executed for a single operation.
+    ///
+    /// Returns a descriptive error string for invalid operations (e.g., empty
+    /// pk_columns for DELETE/UPDATE, empty set_columns for UPDATE).
     pub fn to_sql(&self) -> String {
         match self {
             PendingOp::Insert {
@@ -286,6 +289,12 @@ impl PendingOp {
                 values,
                 ..
             } => {
+                if columns.is_empty() {
+                    return format!(
+                        "-- ERROR: INSERT INTO {} with no columns",
+                        quote_ident(table)
+                    );
+                }
                 let col_list: String = columns
                     .iter()
                     .map(|c| quote_ident(c))
@@ -303,6 +312,12 @@ impl PendingOp {
             PendingOp::Delete {
                 table, pk_columns, ..
             } => {
+                if pk_columns.is_empty() {
+                    return format!(
+                        "-- ERROR: DELETE FROM {} with no pk_columns",
+                        quote_ident(table)
+                    );
+                }
                 if pk_columns.len() == 1 {
                     format!(
                         "DELETE FROM {} WHERE {} IN ($1)",
@@ -325,6 +340,15 @@ impl PendingOp {
                 set_columns,
                 ..
             } => {
+                if pk_columns.is_empty() {
+                    return format!("-- ERROR: UPDATE {} with no pk_columns", quote_ident(table));
+                }
+                if set_columns.is_empty() {
+                    return format!(
+                        "-- ERROR: UPDATE {} with no set_columns",
+                        quote_ident(table)
+                    );
+                }
                 let mut param_idx = 1;
                 let set_clause: String = set_columns
                     .iter()
@@ -1667,5 +1691,83 @@ mod tests {
         );
         let sql = op.to_sql();
         assert_eq!(sql, "INSERT INTO \"\" (\"\", \"\") VALUES ($1, $2)");
+    }
+
+    // ------ Invalid Operation Edge Cases ------
+
+    #[test]
+    fn test_pending_op_delete_empty_pk_columns() {
+        let op = PendingOp::Delete {
+            key: ObjectKey {
+                type_id: TypeId::of::<()>(),
+                pk_hash: 1,
+            },
+            table: "orphan_table",
+            pk_columns: vec![], // No PK columns - invalid!
+            pk_values: vec![],
+        };
+        let sql = op.to_sql();
+        // Should return error indicator, not invalid SQL
+        assert!(sql.starts_with("-- ERROR:"));
+        assert!(sql.contains("DELETE"));
+        assert!(sql.contains("no pk_columns"));
+    }
+
+    #[test]
+    fn test_pending_op_update_empty_pk_columns() {
+        let op = PendingOp::Update {
+            key: ObjectKey {
+                type_id: TypeId::of::<()>(),
+                pk_hash: 1,
+            },
+            table: "orphan_table",
+            pk_columns: vec![], // No PK columns - invalid!
+            pk_values: vec![],
+            set_columns: vec!["name"],
+            set_values: vec![Value::Text("test".to_string())],
+        };
+        let sql = op.to_sql();
+        // Should return error indicator, not invalid SQL
+        assert!(sql.starts_with("-- ERROR:"));
+        assert!(sql.contains("UPDATE"));
+        assert!(sql.contains("no pk_columns"));
+    }
+
+    #[test]
+    fn test_pending_op_update_empty_set_columns() {
+        let op = PendingOp::Update {
+            key: ObjectKey {
+                type_id: TypeId::of::<()>(),
+                pk_hash: 1,
+            },
+            table: "nothing_to_update",
+            pk_columns: vec!["id"],
+            pk_values: vec![Value::BigInt(1)],
+            set_columns: vec![], // No columns to set - invalid!
+            set_values: vec![],
+        };
+        let sql = op.to_sql();
+        // Should return error indicator, not invalid SQL
+        assert!(sql.starts_with("-- ERROR:"));
+        assert!(sql.contains("UPDATE"));
+        assert!(sql.contains("no set_columns"));
+    }
+
+    #[test]
+    fn test_pending_op_insert_empty_columns() {
+        let op = PendingOp::Insert {
+            key: ObjectKey {
+                type_id: TypeId::of::<()>(),
+                pk_hash: 1,
+            },
+            table: "empty_insert",
+            columns: vec![], // No columns - invalid!
+            values: vec![],
+        };
+        let sql = op.to_sql();
+        // Should return error indicator, not invalid SQL
+        assert!(sql.starts_with("-- ERROR:"));
+        assert!(sql.contains("INSERT"));
+        assert!(sql.contains("no columns"));
     }
 }

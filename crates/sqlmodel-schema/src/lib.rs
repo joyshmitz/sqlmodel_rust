@@ -195,8 +195,8 @@ mod tests {
         // Verify the whole thing is treated as a single identifier
         assert!(sql.starts_with("DROP TABLE IF EXISTS \""));
         assert!(sql.ends_with("\""));
-        // Count quotes - should be start quote, doubled embedded quote, end quote
+        // Count quotes: 1 opening + 2 for doubled embedded quote + 1 closing = 4
         let quote_count = sql.matches('"').count();
-        assert_eq!(quote_count, 4); // opening, doubled embedded, closing
+        assert_eq!(quote_count, 4);
     }
 }
