@@ -569,9 +569,10 @@ impl TryFrom<Value> for f32 {
                 }
                 Ok(v as f32)
             }
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             Value::BigInt(v) => {
-                if v.abs() > F32_MAX_EXACT_INT {
+                // Use unsigned_abs to avoid overflow on i64::MIN
+                if v.unsigned_abs() > F32_MAX_EXACT_INT as u64 {
                     return Err(Error::Type(TypeError {
                         expected: "f32-representable i64",
                         actual: format!(
@@ -611,8 +612,10 @@ impl TryFrom<Value> for f64 {
             Value::SmallInt(v) => Ok(f64::from(v)),
             Value::Int(v) => Ok(f64::from(v)),
             #[allow(clippy::cast_precision_loss)]
+            #[allow(clippy::cast_sign_loss)]
             Value::BigInt(v) => {
-                if v.abs() > F64_MAX_EXACT_INT {
+                // Use unsigned_abs to avoid overflow on i64::MIN
+                if v.unsigned_abs() > F64_MAX_EXACT_INT as u64 {
                     return Err(Error::Type(TypeError {
                         expected: "f64-representable i64",
                         actual: format!(
@@ -1219,5 +1222,191 @@ mod tests {
     fn test_f64_lossy_rejects_non_numeric() {
         let result = Value::Text("not a number".to_string()).to_f64_lossy();
         assert!(result.is_err());
+    }
+
+    // ==================== Error Message Quality Tests ====================
+
+    #[test]
+    fn test_u64_error_message_includes_value() {
+        let big_val = u64::MAX;
+        let result = Value::try_from(big_val);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        // Error should include the actual value for debugging
+        assert!(
+            msg.contains("18446744073709551615") || msg.contains(&big_val.to_string()),
+            "Error should include the u64 value, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_f32_precision_error_is_descriptive() {
+        let result = f32::try_from(Value::BigInt(i64::MAX));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        // Error should explain the precision issue
+        assert!(
+            msg.contains("f32") && (msg.contains("exact") || msg.contains("precision")),
+            "Error should describe f32 precision issue, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_f64_precision_error_is_descriptive() {
+        let result = f64::try_from(Value::BigInt(i64::MAX));
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("f64") && (msg.contains("exact") || msg.contains("precision")),
+            "Error should describe f64 precision issue, got: {}",
+            msg
+        );
+    }
+
+    // ==================== Negative Boundary Tests ====================
+
+    #[test]
+    fn test_f64_negative_boundary() {
+        // Exactly -2^53 is representable
+        let neg_boundary = -(1i64 << 53);
+        let v: f64 = Value::BigInt(neg_boundary).try_into().unwrap();
+        assert!((v - neg_boundary as f64).abs() < 1.0);
+
+        // -2^53 - 1 should error
+        let result = f64::try_from(Value::BigInt(neg_boundary - 1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_f32_negative_boundary() {
+        let neg_boundary = -(F32_MAX_EXACT);
+        let v: f32 = Value::BigInt(neg_boundary).try_into().unwrap();
+        assert!((v - neg_boundary as f32).abs() < 1.0);
+
+        // Just past negative boundary should error
+        let result = f32::try_from(Value::BigInt(neg_boundary - 1));
+        assert!(result.is_err());
+    }
+
+    // ==================== Error Type Verification Tests ====================
+
+    #[test]
+    fn test_conversion_errors_are_type_errors() {
+        use crate::Error;
+
+        // u64 overflow
+        let err = Value::try_from(u64::MAX).unwrap_err();
+        assert!(
+            matches!(err, Error::Type(_)),
+            "u64 overflow should be TypeError"
+        );
+
+        // f32 precision loss
+        let err = f32::try_from(Value::BigInt(i64::MAX)).unwrap_err();
+        assert!(
+            matches!(err, Error::Type(_)),
+            "f32 precision loss should be TypeError"
+        );
+
+        // f64 precision loss
+        let err = f64::try_from(Value::BigInt(i64::MAX)).unwrap_err();
+        assert!(
+            matches!(err, Error::Type(_)),
+            "f64 precision loss should be TypeError"
+        );
+    }
+
+    #[test]
+    fn test_conversion_errors_include_expected_type() {
+        // f32 conversion error should mention f32
+        let err = f32::try_from(Value::BigInt(i64::MAX)).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("f32"),
+            "Error should mention f32, got: {}",
+            err
+        );
+
+        // f64 conversion error should mention f64
+        let err = f64::try_from(Value::BigInt(i64::MAX)).unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("f64"),
+            "Error should mention f64, got: {}",
+            err
+        );
+    }
+
+    // ==================== Roundtrip Tests ====================
+
+    #[test]
+    fn test_u64_roundtrip_within_range() {
+        // Values within i64 range should roundtrip through Value
+        let original = 42u64;
+        let value: Value = original.try_into().unwrap();
+        let recovered: i64 = value.try_into().unwrap();
+        assert_eq!(recovered, original as i64);
+
+        // Max representable value
+        let original = i64::MAX as u64;
+        let value: Value = original.try_into().unwrap();
+        let recovered: i64 = value.try_into().unwrap();
+        assert_eq!(recovered, i64::MAX);
+    }
+
+    #[test]
+    fn test_f32_roundtrip_preserves_value() {
+        let original = std::f32::consts::PI;
+        let value: Value = original.into();
+        let recovered: f32 = value.try_into().unwrap();
+        assert!((original - recovered).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_f64_i64_roundtrip() {
+        // Small i64 values should roundtrip through f64 exactly
+        let original = 12345i64;
+        let value = Value::BigInt(original);
+        let as_f64: f64 = value.try_into().unwrap();
+        assert!((as_f64 - original as f64).abs() < 1e-10);
+    }
+
+    // ==================== Additional Boundary Tests ====================
+
+    #[test]
+    fn test_u64_boundary_edge_cases() {
+        // Zero is always valid
+        let v: Value = 0u64.try_into().unwrap();
+        assert_eq!(v, Value::BigInt(0));
+
+        // i64::MAX - 1 is valid
+        let v: Value = ((i64::MAX - 1) as u64).try_into().unwrap();
+        assert_eq!(v, Value::BigInt(i64::MAX - 1));
+
+        // i64::MAX is valid
+        let v: Value = (i64::MAX as u64).try_into().unwrap();
+        assert_eq!(v, Value::BigInt(i64::MAX));
+    }
+
+    #[test]
+    fn test_i64_min_max_to_f64() {
+        // i64::MAX exceeds f64 exact range (2^63-1 > 2^53)
+        let result = f64::try_from(Value::BigInt(i64::MAX));
+        assert!(result.is_err());
+
+        // i64::MIN also exceeds f64 exact range (-2^63 < -2^53)
+        let result = f64::try_from(Value::BigInt(i64::MIN));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_f32_from_float_is_lossless() {
+        // Converting from Float variant should always succeed
+        let original = std::f32::consts::E;
+        let v: f32 = Value::Float(original).try_into().unwrap();
+        assert!((v - original).abs() < f32::EPSILON);
     }
 }

@@ -444,9 +444,10 @@ impl FromValue for f32 {
                 }
                 Ok(*v as f32)
             }
-            #[allow(clippy::cast_possible_truncation)]
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             Value::BigInt(v) => {
-                if v.abs() > F32_MAX_EXACT_INT {
+                // Use unsigned_abs to avoid overflow on i64::MIN
+                if v.unsigned_abs() > F32_MAX_EXACT_INT as u64 {
                     return Err(Error::Type(TypeError {
                         expected: "f32-representable i64",
                         actual: format!(
@@ -481,9 +482,10 @@ impl FromValue for f64 {
             Value::TinyInt(v) => Ok(f64::from(*v)),
             Value::SmallInt(v) => Ok(f64::from(*v)),
             Value::Int(v) => Ok(f64::from(*v)),
-            #[allow(clippy::cast_precision_loss)]
+            #[allow(clippy::cast_precision_loss, clippy::cast_sign_loss)]
             Value::BigInt(v) => {
-                if v.abs() > F64_MAX_EXACT_INT {
+                // Use unsigned_abs to avoid overflow on i64::MIN
+                if v.unsigned_abs() > F64_MAX_EXACT_INT as u64 {
                     return Err(Error::Type(TypeError {
                         expected: "f64-representable i64",
                         actual: format!(
@@ -883,5 +885,70 @@ mod tests {
 
         // Non-existent prefix is considered "all null"
         assert!(row.prefix_is_all_null("powers"));
+    }
+
+    // ==================== FromValue Precision Tests ====================
+
+    #[test]
+    fn test_from_value_f32_precision_checks() {
+        // Small f64 values should convert to f32
+        let v = f32::from_value(&Value::Double(1.5)).unwrap();
+        assert!((v - 1.5).abs() < f32::EPSILON);
+
+        // Large f64 values should error
+        let result = f32::from_value(&Value::Double(1e20_f64));
+        assert!(result.is_err());
+
+        // Small integers should convert
+        let v = f32::from_value(&Value::Int(1000)).unwrap();
+        assert!((v - 1000.0).abs() < f32::EPSILON);
+
+        // Large integers (> 2^24) should error
+        let result = f32::from_value(&Value::BigInt(i64::MAX));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_value_f64_precision_checks() {
+        // Small integers should convert
+        let v = f64::from_value(&Value::BigInt(42)).unwrap();
+        assert!((v - 42.0).abs() < f64::EPSILON);
+
+        // Large integers (> 2^53) should error
+        let result = f64::from_value(&Value::BigInt(i64::MAX));
+        assert!(result.is_err());
+
+        // Exactly 2^53 should succeed
+        let boundary = 1i64 << 53;
+        let v = f64::from_value(&Value::BigInt(boundary)).unwrap();
+        assert!((v - boundary as f64).abs() < 1.0);
+
+        // 2^53 + 1 should fail
+        let result = f64::from_value(&Value::BigInt(boundary + 1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_value_f32_int_boundary() {
+        const F32_MAX_EXACT: i64 = 1 << 24; // 16,777,216
+
+        // At boundary: success
+        #[allow(clippy::cast_possible_truncation)]
+        let boundary = F32_MAX_EXACT as i32;
+        let v = f32::from_value(&Value::Int(boundary)).unwrap();
+        assert!((v - boundary as f32).abs() < 1.0);
+
+        // Just over boundary: error
+        #[allow(clippy::cast_possible_truncation)]
+        let over = (F32_MAX_EXACT + 1) as i32;
+        let result = f32::from_value(&Value::Int(over));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_from_value_bool_to_f64() {
+        // Bool should convert to f64
+        assert!((f64::from_value(&Value::Bool(true)).unwrap() - 1.0).abs() < f64::EPSILON);
+        assert!((f64::from_value(&Value::Bool(false)).unwrap() - 0.0).abs() < f64::EPSILON);
     }
 }
