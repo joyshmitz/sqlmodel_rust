@@ -398,15 +398,36 @@ pub enum DumpMode {
 /// Controls the serialization behavior.
 #[derive(Debug, Clone, Default)]
 pub struct DumpOptions {
-    /// Output mode: Json or Python (Rust native)
+    /// Output mode: Json or Python (Rust native).
+    ///
+    /// **Note:** This option is currently NOT IMPLEMENTED. In Pydantic,
+    /// `mode='json'` returns JSON-compatible types (strings for dates) while
+    /// `mode='python'` returns native Python types (datetime objects). In Rust
+    /// with serde, type serialization is determined by Serialize implementations,
+    /// so both modes currently produce identical `serde_json::Value` output.
     pub mode: DumpMode,
     /// Only include these fields (if Some)
     pub include: Option<std::collections::HashSet<String>>,
     /// Exclude these fields
     pub exclude: Option<std::collections::HashSet<String>>,
-    /// Use field aliases in output (currently unused - for future alias support)
+    /// Use field aliases in output.
+    ///
+    /// When true, `sql_model_dump()` will rename fields to their
+    /// `serialization_alias` (or `alias` as fallback) in the output.
     pub by_alias: bool,
-    /// Exclude fields that were not explicitly set (requires tracking)
+    /// Exclude fields that were not explicitly set.
+    ///
+    /// **Note:** This option is currently NOT IMPLEMENTED. It is defined for
+    /// API compatibility with Pydantic but has no effect. Full implementation
+    /// requires compile-time code generation to track which fields were
+    /// explicitly provided during construction (a `fields_set: HashSet<String>`).
+    /// This differs from `exclude_defaults` which compares current values to
+    /// known defaults.
+    ///
+    /// Pydantic semantics: If a field has a default value and the user explicitly
+    /// sets it to that default, it should still be included (it was "set").
+    /// With `exclude_defaults`, it would be excluded regardless of whether
+    /// it was explicitly provided.
     pub exclude_unset: bool,
     /// Exclude fields with default values
     pub exclude_defaults: bool,
@@ -414,7 +435,12 @@ pub struct DumpOptions {
     pub exclude_none: bool,
     /// Exclude computed fields (for future computed_field support)
     pub exclude_computed_fields: bool,
-    /// Enable round-trip mode (preserves types for re-parsing)
+    /// Enable round-trip mode (preserves types for re-parsing).
+    ///
+    /// **Note:** This option is currently NOT IMPLEMENTED. In Pydantic,
+    /// round_trip mode serializes values in a way that can be deserialized
+    /// back to the exact same model. In Rust with serde, round-trip fidelity
+    /// is generally handled by the Serialize/Deserialize implementations.
     pub round_trip: bool,
     /// Indentation for JSON output (None = compact, Some(n) = n spaces)
     pub indent: Option<usize>,
@@ -607,9 +633,12 @@ impl<T: serde::Serialize> ModelDump for T {
                 map.retain(|_, v| !v.is_null());
             }
 
-            // Note: exclude_unset and exclude_defaults require runtime tracking
-            // which is not available without additional infrastructure.
-            // These are documented as no-ops in the current implementation.
+            // Note: This is the generic ModelDump implementation for Serialize types.
+            // - exclude_defaults: Requires Model::fields() metadata. Use SqlModelDump instead.
+            // - exclude_unset: Requires fields_set tracking. NOT IMPLEMENTED in either trait.
+            // - exclude_computed_fields: Requires Model::fields() metadata. Use SqlModelDump instead.
+            // - by_alias: Requires Model::fields() metadata. Use SqlModelDump instead.
+            // - mode/round_trip: Currently not implemented (no effect).
         }
 
         Ok(value)
@@ -2816,5 +2845,146 @@ mod tests {
     fn test_credit_card_valid_discover() {
         // Valid Discover test number
         assert!(is_valid_credit_card("6011111111111117"));
+    }
+
+    // =========================================================================
+    // Nested Model Tests
+    // =========================================================================
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Address {
+        street: String,
+        city: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        zip: Option<String>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+    struct Person {
+        name: String,
+        age: i32,
+        address: Address,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        spouse: Option<Box<Person>>,
+    }
+
+    #[test]
+    fn test_nested_model_dump_basic() {
+        let person = Person {
+            name: "Alice".to_string(),
+            age: 30,
+            address: Address {
+                street: "123 Main St".to_string(),
+                city: "Springfield".to_string(),
+                zip: Some("12345".to_string()),
+            },
+            spouse: None,
+        };
+
+        let json = person.model_dump(DumpOptions::default()).unwrap();
+        assert_eq!(json["name"], "Alice");
+        assert_eq!(json["age"], 30);
+        assert_eq!(json["address"]["street"], "123 Main St");
+        assert_eq!(json["address"]["city"], "Springfield");
+        assert_eq!(json["address"]["zip"], "12345");
+    }
+
+    #[test]
+    fn test_nested_model_dump_exclude_top_level() {
+        let person = Person {
+            name: "Alice".to_string(),
+            age: 30,
+            address: Address {
+                street: "123 Main St".to_string(),
+                city: "Springfield".to_string(),
+                zip: Some("12345".to_string()),
+            },
+            spouse: None,
+        };
+
+        // Exclude only applies to top-level fields
+        let json = person
+            .model_dump(DumpOptions::default().exclude(["age"]))
+            .unwrap();
+        assert!(json.get("name").is_some());
+        assert!(json.get("age").is_none());
+        assert!(json.get("address").is_some()); // Still present
+        // Nested fields are NOT affected by top-level exclude
+        assert_eq!(json["address"]["city"], "Springfield");
+    }
+
+    #[test]
+    fn test_nested_model_dump_exclude_nested_limitation() {
+        // NOTE: This test documents a LIMITATION.
+        // In Pydantic, you can exclude nested fields with dot notation: exclude={"address.zip"}
+        // Our current implementation only supports top-level field exclusion.
+        let person = Person {
+            name: "Alice".to_string(),
+            age: 30,
+            address: Address {
+                street: "123 Main St".to_string(),
+                city: "Springfield".to_string(),
+                zip: Some("12345".to_string()),
+            },
+            spouse: None,
+        };
+
+        // Trying to exclude "address.zip" won't work - it treats it as a top-level field name
+        let json = person
+            .model_dump(DumpOptions::default().exclude(["address.zip"]))
+            .unwrap();
+        // address.zip is still present because we don't support nested path exclusion
+        assert_eq!(json["address"]["zip"], "12345");
+    }
+
+    #[test]
+    fn test_deeply_nested_model_dump() {
+        let person = Person {
+            name: "Alice".to_string(),
+            age: 30,
+            address: Address {
+                street: "123 Main St".to_string(),
+                city: "Springfield".to_string(),
+                zip: None,
+            },
+            spouse: Some(Box::new(Person {
+                name: "Bob".to_string(),
+                age: 32,
+                address: Address {
+                    street: "456 Oak Ave".to_string(),
+                    city: "Springfield".to_string(),
+                    zip: Some("12346".to_string()),
+                },
+                spouse: None,
+            })),
+        };
+
+        let json = person.model_dump(DumpOptions::default()).unwrap();
+        assert_eq!(json["name"], "Alice");
+        assert_eq!(json["spouse"]["name"], "Bob");
+        assert_eq!(json["spouse"]["address"]["street"], "456 Oak Ave");
+    }
+
+    #[test]
+    fn test_nested_model_exclude_none() {
+        let person = Person {
+            name: "Alice".to_string(),
+            age: 30,
+            address: Address {
+                street: "123 Main St".to_string(),
+                city: "Springfield".to_string(),
+                zip: None, // Will be skipped by serde skip_serializing_if
+            },
+            spouse: None, // Will be skipped by serde skip_serializing_if
+        };
+
+        let json = person
+            .model_dump(DumpOptions::default().exclude_none())
+            .unwrap();
+        assert!(json.get("name").is_some());
+        // spouse is None and serde skips it, so it's not in the output
+        assert!(json.get("spouse").is_none());
+        // Note: exclude_none only affects top-level nulls in model_dump
+        // Nested nulls are handled by serde's skip_serializing_if
     }
 }
