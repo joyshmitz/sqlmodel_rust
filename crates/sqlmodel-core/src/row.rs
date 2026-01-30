@@ -460,6 +460,8 @@ impl FromValue for f32 {
                 }
                 Ok(*v as f32)
             }
+            // Bool to f32 is lossless (0.0 or 1.0)
+            Value::Bool(v) => Ok(if *v { 1.0 } else { 0.0 }),
             _ => Err(Error::Type(TypeError {
                 expected: "f32",
                 actual: value.type_name().to_string(),

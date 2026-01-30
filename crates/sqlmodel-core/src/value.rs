@@ -585,6 +585,8 @@ impl TryFrom<Value> for f32 {
                 }
                 Ok(v as f32)
             }
+            // Bool to f32 is lossless (0.0 or 1.0)
+            Value::Bool(v) => Ok(if v { 1.0 } else { 0.0 }),
             other => Err(Error::Type(TypeError {
                 expected: "f32",
                 actual: other.type_name().to_string(),
@@ -628,6 +630,8 @@ impl TryFrom<Value> for f64 {
                 }
                 Ok(v as f64)
             }
+            // Bool to f64 is lossless (0.0 or 1.0)
+            Value::Bool(v) => Ok(if v { 1.0 } else { 0.0 }),
             other => Err(Error::Type(TypeError {
                 expected: "f64",
                 actual: other.type_name().to_string(),
