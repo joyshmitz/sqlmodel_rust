@@ -16,6 +16,7 @@ pub mod dynamic;
 pub mod error;
 pub mod field;
 pub mod hybrid;
+pub mod identifiers;
 pub mod model;
 pub mod relationship;
 pub mod row;
@@ -45,3 +46,4 @@ pub use validate::{
     apply_validation_aliases,
 };
 pub use value::Value;
+pub use identifiers::{quote_ident, quote_ident_mysql, sanitize_identifier};
