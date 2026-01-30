@@ -180,11 +180,11 @@ mod generic_model_tests {
         _type: PhantomData<T>,
     }
 
-    // Test marker type for TypedResponse
-    #[derive(Debug, Clone)]
+    // Test marker types for TypedResponse
+    #[derive(Debug, Clone, Default)]
     struct UserData;
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Default)]
     struct OrderData;
 
     #[test]
@@ -211,9 +211,9 @@ mod generic_model_tests {
 
     #[test]
     fn test_generic_model_table_name() {
-        // Table name should be derived from struct name
-        assert_eq!(<TaggedModel<UserData> as Model>::TABLE_NAME, "tagged_model");
-        assert_eq!(<TypedResponse<UserData> as Model>::TABLE_NAME, "typed_response");
+        // Table name should be derived from struct name (pluralized by default)
+        assert_eq!(<TaggedModel<UserData> as Model>::TABLE_NAME, "tagged_models");
+        assert_eq!(<TypedResponse<UserData> as Model>::TABLE_NAME, "typed_responses");
     }
 
     #[test]
@@ -276,11 +276,11 @@ mod generic_model_tests {
     fn test_generic_model_is_new() {
         let new_model: TaggedModel<UserData> = TaggedModel {
             id: 0,
-            data: "new".to_string(),
-            message: None,
+            name: "new".to_string(),
+            _marker: PhantomData,
         };
         // Note: is_new() depends on the implementation - typically checks if pk is default
-        let _ = new_response.is_new(); // Just verify it compiles
+        let _ = new_model.is_new(); // Just verify it compiles
     }
 }
 
