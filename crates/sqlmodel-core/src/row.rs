@@ -405,16 +405,60 @@ impl FromValue for u64 {
     }
 }
 
-#[allow(clippy::cast_possible_truncation)]
+/// Maximum integer value exactly representable in f32: 2^24 = 16,777,216
+const F32_MAX_EXACT_INT: i64 = 1 << 24;
+
 impl FromValue for f32 {
+    /// Convert a Value reference to f32, returning an error if precision would be lost.
     fn from_value(value: &Value) -> Result<Self> {
         match value {
             Value::Float(v) => Ok(*v),
-            Value::Double(v) => Ok(*v as f32),
+            #[allow(clippy::cast_possible_truncation)]
+            Value::Double(v) => {
+                let converted = *v as f32;
+                // Check round-trip: if converting back doesn't match, we lost precision
+                if (f64::from(converted) - *v).abs() > f64::EPSILON * v.abs().max(1.0) {
+                    return Err(Error::Type(TypeError {
+                        expected: "f32-representable f64",
+                        actual: format!("f64 value {} loses precision as f32", v),
+                        column: None,
+                        rust_type: Some("f32"),
+                    }));
+                }
+                Ok(converted)
+            }
             Value::TinyInt(v) => Ok(f32::from(*v)),
             Value::SmallInt(v) => Ok(f32::from(*v)),
-            Value::Int(v) => Ok(*v as f32),
-            Value::BigInt(v) => Ok(*v as f32),
+            #[allow(clippy::cast_possible_truncation)]
+            Value::Int(v) => {
+                if i64::from(*v).abs() > F32_MAX_EXACT_INT {
+                    return Err(Error::Type(TypeError {
+                        expected: "f32-representable i32",
+                        actual: format!(
+                            "i32 value {} exceeds f32 exact integer range (±{})",
+                            v, F32_MAX_EXACT_INT
+                        ),
+                        column: None,
+                        rust_type: Some("f32"),
+                    }));
+                }
+                Ok(*v as f32)
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            Value::BigInt(v) => {
+                if v.abs() > F32_MAX_EXACT_INT {
+                    return Err(Error::Type(TypeError {
+                        expected: "f32-representable i64",
+                        actual: format!(
+                            "i64 value {} exceeds f32 exact integer range (±{})",
+                            v, F32_MAX_EXACT_INT
+                        ),
+                        column: None,
+                        rust_type: Some("f32"),
+                    }));
+                }
+                Ok(*v as f32)
+            }
             _ => Err(Error::Type(TypeError {
                 expected: "f32",
                 actual: value.type_name().to_string(),
@@ -425,16 +469,41 @@ impl FromValue for f32 {
     }
 }
 
+/// Maximum integer value exactly representable in f64: 2^53 = 9,007,199,254,740,992
+const F64_MAX_EXACT_INT: i64 = 1 << 53;
+
 impl FromValue for f64 {
+    /// Convert a Value reference to f64, returning an error if precision would be lost.
     fn from_value(value: &Value) -> Result<Self> {
-        value.as_f64().ok_or_else(|| {
-            Error::Type(TypeError {
+        match value {
+            Value::Float(v) => Ok(f64::from(*v)),
+            Value::Double(v) => Ok(*v),
+            Value::TinyInt(v) => Ok(f64::from(*v)),
+            Value::SmallInt(v) => Ok(f64::from(*v)),
+            Value::Int(v) => Ok(f64::from(*v)),
+            #[allow(clippy::cast_precision_loss)]
+            Value::BigInt(v) => {
+                if v.abs() > F64_MAX_EXACT_INT {
+                    return Err(Error::Type(TypeError {
+                        expected: "f64-representable i64",
+                        actual: format!(
+                            "i64 value {} exceeds f64 exact integer range (±{})",
+                            v, F64_MAX_EXACT_INT
+                        ),
+                        column: None,
+                        rust_type: Some("f64"),
+                    }));
+                }
+                Ok(*v as f64)
+            }
+            Value::Bool(v) => Ok(if *v { 1.0 } else { 0.0 }),
+            _ => Err(Error::Type(TypeError {
                 expected: "f64",
                 actual: value.type_name().to_string(),
                 column: None,
                 rust_type: None,
-            })
-        })
+            })),
+        }
     }
 }
 

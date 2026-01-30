@@ -185,6 +185,87 @@ impl Value {
             Value::BigInt(i64::MAX)
         }
     }
+
+    /// Convert to f32, allowing precision loss for large values.
+    ///
+    /// This is more lenient than `TryFrom<Value> for f32`, which errors on precision loss.
+    /// Only returns an error for values that cannot be represented at all (infinity, NaN).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqlmodel_core::Value;
+    ///
+    /// // Normal values work
+    /// assert!(Value::Double(1.5).to_f32_lossy().is_ok());
+    ///
+    /// // Large integers are converted with precision loss (no error)
+    /// assert!(Value::BigInt(i64::MAX).to_f32_lossy().is_ok());
+    /// ```
+    #[allow(clippy::cast_possible_truncation, clippy::result_large_err)]
+    pub fn to_f32_lossy(&self) -> crate::Result<f32> {
+        match self {
+            Value::Float(v) => Ok(*v),
+            Value::Double(v) => {
+                let converted = *v as f32;
+                if converted.is_infinite() && !v.is_infinite() {
+                    return Err(Error::Type(TypeError {
+                        expected: "f32-representable value",
+                        actual: format!("f64 value {} overflows f32", v),
+                        column: None,
+                        rust_type: Some("f32"),
+                    }));
+                }
+                Ok(converted)
+            }
+            Value::TinyInt(v) => Ok(f32::from(*v)),
+            Value::SmallInt(v) => Ok(f32::from(*v)),
+            Value::Int(v) => Ok(*v as f32),
+            Value::BigInt(v) => Ok(*v as f32),
+            Value::Bool(v) => Ok(if *v { 1.0 } else { 0.0 }),
+            other => Err(Error::Type(TypeError {
+                expected: "numeric value",
+                actual: other.type_name().to_string(),
+                column: None,
+                rust_type: Some("f32"),
+            })),
+        }
+    }
+
+    /// Convert to f64, allowing precision loss for very large integers.
+    ///
+    /// This is more lenient than `TryFrom<Value> for f64`, which errors on precision loss.
+    /// Only returns an error for non-numeric values.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sqlmodel_core::Value;
+    ///
+    /// // Normal values work
+    /// assert!(Value::BigInt(42).to_f64_lossy().is_ok());
+    ///
+    /// // Large integers are converted with precision loss (no error)
+    /// assert!(Value::BigInt(i64::MAX).to_f64_lossy().is_ok());
+    /// ```
+    #[allow(clippy::cast_precision_loss, clippy::result_large_err)]
+    pub fn to_f64_lossy(&self) -> crate::Result<f64> {
+        match self {
+            Value::Float(v) => Ok(f64::from(*v)),
+            Value::Double(v) => Ok(*v),
+            Value::TinyInt(v) => Ok(f64::from(*v)),
+            Value::SmallInt(v) => Ok(f64::from(*v)),
+            Value::Int(v) => Ok(f64::from(*v)),
+            Value::BigInt(v) => Ok(*v as f64), // May lose precision for |v| > 2^53
+            Value::Bool(v) => Ok(if *v { 1.0 } else { 0.0 }),
+            other => Err(Error::Type(TypeError {
+                expected: "numeric value",
+                actual: other.type_name().to_string(),
+                column: None,
+                rust_type: Some("f64"),
+            })),
+        }
+    }
 }
 
 // Conversion implementations
@@ -445,19 +526,64 @@ impl TryFrom<Value> for i64 {
     }
 }
 
+/// Maximum integer value exactly representable in f32: 2^24 = 16,777,216
+const F32_MAX_EXACT_INT: i64 = 1 << 24;
+
 impl TryFrom<Value> for f32 {
     type Error = Error;
 
-    #[allow(clippy::cast_possible_truncation)]
+    /// Convert a Value to f32, returning an error if precision would be lost.
+    ///
+    /// For lossy conversion (accepting precision loss), use `Value::to_f32_lossy()`.
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
             Value::Float(v) => Ok(v),
-            // Intentional truncation: user explicitly requested f32 from f64
-            Value::Double(v) => Ok(v as f32),
+            #[allow(clippy::cast_possible_truncation)]
+            Value::Double(v) => {
+                let converted = v as f32;
+                // Check round-trip: if converting back doesn't match, we lost precision
+                if (f64::from(converted) - v).abs() > f64::EPSILON * v.abs().max(1.0) {
+                    return Err(Error::Type(TypeError {
+                        expected: "f32-representable f64",
+                        actual: format!("f64 value {} loses precision as f32", v),
+                        column: None,
+                        rust_type: Some("f32"),
+                    }));
+                }
+                Ok(converted)
+            }
             Value::TinyInt(v) => Ok(f32::from(v)),
             Value::SmallInt(v) => Ok(f32::from(v)),
-            Value::Int(v) => Ok(v as f32),
-            Value::BigInt(v) => Ok(v as f32),
+            #[allow(clippy::cast_possible_truncation)]
+            Value::Int(v) => {
+                if i64::from(v).abs() > F32_MAX_EXACT_INT {
+                    return Err(Error::Type(TypeError {
+                        expected: "f32-representable i32",
+                        actual: format!(
+                            "i32 value {} exceeds f32 exact integer range (±{})",
+                            v, F32_MAX_EXACT_INT
+                        ),
+                        column: None,
+                        rust_type: Some("f32"),
+                    }));
+                }
+                Ok(v as f32)
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            Value::BigInt(v) => {
+                if v.abs() > F32_MAX_EXACT_INT {
+                    return Err(Error::Type(TypeError {
+                        expected: "f32-representable i64",
+                        actual: format!(
+                            "i64 value {} exceeds f32 exact integer range (±{})",
+                            v, F32_MAX_EXACT_INT
+                        ),
+                        column: None,
+                        rust_type: Some("f32"),
+                    }));
+                }
+                Ok(v as f32)
+            }
             other => Err(Error::Type(TypeError {
                 expected: "f32",
                 actual: other.type_name().to_string(),
@@ -468,9 +594,15 @@ impl TryFrom<Value> for f32 {
     }
 }
 
+/// Maximum integer value exactly representable in f64: 2^53 = 9,007,199,254,740,992
+const F64_MAX_EXACT_INT: i64 = 1 << 53;
+
 impl TryFrom<Value> for f64 {
     type Error = Error;
 
+    /// Convert a Value to f64, returning an error if precision would be lost.
+    ///
+    /// For lossy conversion (accepting precision loss), use `Value::to_f64_lossy()`.
     fn try_from(value: Value) -> Result<Self, Self::Error> {
         match value {
             Value::Float(v) => Ok(f64::from(v)),
@@ -478,7 +610,21 @@ impl TryFrom<Value> for f64 {
             Value::TinyInt(v) => Ok(f64::from(v)),
             Value::SmallInt(v) => Ok(f64::from(v)),
             Value::Int(v) => Ok(f64::from(v)),
-            Value::BigInt(v) => Ok(v as f64),
+            #[allow(clippy::cast_precision_loss)]
+            Value::BigInt(v) => {
+                if v.abs() > F64_MAX_EXACT_INT {
+                    return Err(Error::Type(TypeError {
+                        expected: "f64-representable i64",
+                        actual: format!(
+                            "i64 value {} exceeds f64 exact integer range (±{})",
+                            v, F64_MAX_EXACT_INT
+                        ),
+                        column: None,
+                        rust_type: Some("f64"),
+                    }));
+                }
+                Ok(v as f64)
+            }
             other => Err(Error::Type(TypeError {
                 expected: "f64",
                 actual: other.type_name().to_string(),
@@ -971,5 +1117,107 @@ mod tests {
             Value::from_u64_clamped((i64::MAX as u64) + 1),
             Value::BigInt(i64::MAX)
         );
+    }
+
+    // ==================== Precision Loss Detection Tests ====================
+
+    const F32_MAX_EXACT: i64 = 1 << 24; // 16,777,216
+    const F64_MAX_EXACT: i64 = 1 << 53; // 9,007,199,254,740,992
+
+    #[test]
+    fn test_f32_from_double_precision_ok() {
+        // Values exactly representable in f32
+        let v: f32 = Value::Double(1.5).try_into().unwrap();
+        assert!((v - 1.5).abs() < f32::EPSILON);
+
+        let v: f32 = Value::Double(0.0).try_into().unwrap();
+        assert!((v - 0.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_f32_from_double_precision_loss() {
+        // f64 value that cannot be exactly represented in f32
+        // 1e20 as f64 cannot round-trip through f32 exactly
+        let high_precision = 1e20_f64;
+        let result = f32::try_from(Value::Double(high_precision));
+        assert!(result.is_err());
+
+        // A more subtle case: numbers with more precision than f32 mantissa can hold
+        // f64 has 52 mantissa bits, f32 has 23, so values with >23 bits of precision lose info
+        let precise_value = 16_777_217.0_f64; // 2^24 + 1, needs 25 bits, loses precision as f32
+        let result2 = f32::try_from(Value::Double(precise_value));
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn test_f32_from_int_boundary() {
+        // At boundary: exactly representable (F32_MAX_EXACT = 2^24 = 16,777,216 fits in i32)
+        let boundary = F32_MAX_EXACT as i32;
+        let v: f32 = Value::Int(boundary).try_into().unwrap();
+        assert!((v - F32_MAX_EXACT as f32).abs() < 1.0);
+
+        // Just over boundary: error
+        let over_boundary = (F32_MAX_EXACT + 1) as i32;
+        let result = f32::try_from(Value::Int(over_boundary));
+        assert!(result.is_err());
+
+        // Negative boundary
+        let v: f32 = Value::Int(-boundary).try_into().unwrap();
+        assert!((v - -(F32_MAX_EXACT as f32)).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_f32_from_bigint_boundary() {
+        // At boundary: exactly representable
+        let v: f32 = Value::BigInt(F32_MAX_EXACT).try_into().unwrap();
+        assert!((v - F32_MAX_EXACT as f32).abs() < 1.0);
+
+        // Just over boundary: error
+        let result = f32::try_from(Value::BigInt(F32_MAX_EXACT + 1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_f64_from_bigint_boundary() {
+        // At boundary: exactly representable
+        let v: f64 = Value::BigInt(F64_MAX_EXACT).try_into().unwrap();
+        assert!((v - F64_MAX_EXACT as f64).abs() < 1.0);
+
+        // Just over boundary: error
+        let result = f64::try_from(Value::BigInt(F64_MAX_EXACT + 1));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_f32_lossy_accepts_large_values() {
+        // Lossy conversion accepts values that strict conversion rejects
+        assert!(Value::BigInt(i64::MAX).to_f32_lossy().is_ok());
+        assert!(
+            Value::Double(1.000_000_119_209_289_6)
+                .to_f32_lossy()
+                .is_ok()
+        );
+        assert!(Value::Int(i32::MAX).to_f32_lossy().is_ok());
+    }
+
+    #[test]
+    fn test_f32_lossy_rejects_overflow() {
+        // But rejects truly unrepresentable values (overflow to infinity)
+        let result = Value::Double(f64::MAX).to_f32_lossy();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_f64_lossy_accepts_large_integers() {
+        // Lossy conversion accepts values that strict conversion rejects
+        assert!(Value::BigInt(i64::MAX).to_f64_lossy().is_ok());
+        assert!(Value::BigInt(i64::MIN).to_f64_lossy().is_ok());
+    }
+
+    #[test]
+    fn test_f64_lossy_rejects_non_numeric() {
+        let result = Value::Text("not a number".to_string()).to_f64_lossy();
+        assert!(result.is_err());
     }
 }
