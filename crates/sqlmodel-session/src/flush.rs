@@ -9,7 +9,7 @@
 
 use crate::ObjectKey;
 use asupersync::{Cx, Outcome};
-use sqlmodel_core::{Connection, Error, Model, Value};
+use sqlmodel_core::{Connection, Error, Model, Value, quote_ident};
 use std::collections::HashMap;
 
 /// A pending database operation.
@@ -150,8 +150,10 @@ impl LinkTableOp {
                 remote_value,
             } => {
                 let sql = format!(
-                    "INSERT INTO \"{}\" (\"{}\", \"{}\") VALUES ($1, $2)",
-                    table, local_column, remote_column
+                    "INSERT INTO {} ({}, {}) VALUES ($1, $2)",
+                    quote_ident(table),
+                    quote_ident(local_column),
+                    quote_ident(remote_column)
                 );
                 tracing::trace!(sql = %sql, "Executing link INSERT");
                 conn.execute(cx, &sql, &[local_value.clone(), remote_value.clone()])
@@ -166,8 +168,10 @@ impl LinkTableOp {
                 remote_value,
             } => {
                 let sql = format!(
-                    "DELETE FROM \"{}\" WHERE \"{}\" = $1 AND \"{}\" = $2",
-                    table, local_column, remote_column
+                    "DELETE FROM {} WHERE {} = $1 AND {} = $2",
+                    quote_ident(table),
+                    quote_ident(local_column),
+                    quote_ident(remote_column)
                 );
                 tracing::trace!(sql = %sql, "Executing link DELETE");
                 conn.execute(cx, &sql, &[local_value.clone(), remote_value.clone()])
@@ -454,11 +458,11 @@ impl FlushPlan {
         // INSERT INTO table ("col1", "col2") VALUES ($1, $2), ($3, $4), ...
         let col_list: String = columns
             .iter()
-            .map(|c| format!("\"{}\"", c))
+            .map(|c| quote_ident(c))
             .collect::<Vec<_>>()
             .join(", ");
 
-        let mut sql = format!("INSERT INTO \"{}\" ({}) VALUES ", table, col_list);
+        let mut sql = format!("INSERT INTO {} ({}) VALUES ", quote_ident(table), col_list);
         let mut params: Vec<Value> = Vec::new();
         let mut param_idx = 1;
 
@@ -542,9 +546,9 @@ impl FlushPlan {
 
             let actual_count = params.len();
             let sql = format!(
-                "DELETE FROM \"{}\" WHERE \"{}\" IN ({})",
-                table,
-                pk_col,
+                "DELETE FROM {} WHERE {} IN ({})",
+                quote_ident(table),
+                quote_ident(pk_col),
                 placeholders.join(", ")
             );
 
@@ -578,11 +582,11 @@ impl FlushPlan {
                     let where_clause: String = pk_columns
                         .iter()
                         .enumerate()
-                        .map(|(i, col)| format!("\"{}\" = ${}", col, i + 1))
+                        .map(|(i, col)| format!("{} = ${}", quote_ident(col), i + 1))
                         .collect::<Vec<_>>()
                         .join(" AND ");
 
-                    let sql = format!("DELETE FROM \"{}\" WHERE {}", table, where_clause);
+                    let sql = format!("DELETE FROM {} WHERE {}", quote_ident(table), where_clause);
 
                     match conn.execute(cx, &sql, pk_values).await {
                         Outcome::Ok(_) => deleted += 1,
@@ -639,7 +643,7 @@ impl FlushPlan {
         let set_clause: String = set_columns
             .iter()
             .map(|col| {
-                let clause = format!("\"{}\" = ${}", col, param_idx);
+                let clause = format!("{} = ${}", quote_ident(col), param_idx);
                 param_idx += 1;
                 clause
             })
@@ -649,7 +653,7 @@ impl FlushPlan {
         let where_clause: String = pk_columns
             .iter()
             .map(|col| {
-                let clause = format!("\"{}\" = ${}", col, param_idx);
+                let clause = format!("{} = ${}", quote_ident(col), param_idx);
                 param_idx += 1;
                 clause
             })
@@ -657,8 +661,10 @@ impl FlushPlan {
             .join(" AND ");
 
         let sql = format!(
-            "UPDATE \"{}\" SET {} WHERE {}",
-            table, set_clause, where_clause
+            "UPDATE {} SET {} WHERE {}",
+            quote_ident(table),
+            set_clause,
+            where_clause
         );
 
         let mut params: Vec<Value> = set_values.clone();
