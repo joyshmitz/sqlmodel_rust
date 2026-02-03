@@ -336,8 +336,11 @@ impl SqliteConnection {
         unsafe { ffi::sqlite3_changes(inner.db) }
     }
 
-    /// Prepare and execute a query, returning all rows.
-    fn query_sync(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>, Error> {
+    /// Prepare and execute a query synchronously, returning all rows.
+    ///
+    /// This is a blocking operation suitable for simple use cases.
+    /// For async usage, use the `Connection` trait methods instead.
+    pub fn query_sync(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>, Error> {
         #[cfg(feature = "console")]
         let start = std::time::Instant::now();
 
@@ -403,8 +406,11 @@ impl SqliteConnection {
         Ok(rows)
     }
 
-    /// Prepare and execute a statement, returning rows affected.
-    fn execute_sync(&self, sql: &str, params: &[Value]) -> Result<u64, Error> {
+    /// Prepare and execute a statement synchronously, returning rows affected.
+    ///
+    /// This is a blocking operation suitable for simple use cases.
+    /// For async usage, use the `Connection` trait methods instead.
+    pub fn execute_sync(&self, sql: &str, params: &[Value]) -> Result<u64, Error> {
         #[cfg(feature = "console")]
         let start = std::time::Instant::now();
 
