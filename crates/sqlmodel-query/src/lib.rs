@@ -21,6 +21,7 @@ pub mod expr;
 pub mod join;
 pub mod select;
 pub mod set_ops;
+pub mod subquery;
 
 pub use builder::{
     DeleteBuilder, InsertBuilder, InsertManyBuilder, OnConflict, QueryBuilder, SetClause,
@@ -38,6 +39,7 @@ pub use select::Select;
 pub use set_ops::{
     SetOpType, SetOperation, except, except_all, intersect, intersect_all, union, union_all,
 };
+pub use subquery::SelectQuery;
 
 use asupersync::{Cx, Outcome};
 use sqlmodel_core::{Connection, Row, Value};

@@ -1,6 +1,7 @@
 //! JOIN clause types.
 
-use crate::expr::{Dialect, Expr};
+use crate::expr::{Dialect, Expr, adjust_placeholder_indices};
+use crate::subquery::SelectQuery;
 use sqlmodel_core::Value;
 
 /// A JOIN clause.
@@ -22,6 +23,8 @@ pub struct Join {
     pub is_subquery: bool,
     /// Parameters from a subquery table expression.
     pub subquery_params: Vec<Value>,
+    /// Deferred subquery builder (dialect-aware).
+    pub subquery: Option<Box<SelectQuery>>,
 }
 
 /// Types of SQL joins.
@@ -58,6 +61,7 @@ impl Join {
             lateral: false,
             is_subquery: false,
             subquery_params: Vec::new(),
+            subquery: None,
         }
     }
 
@@ -71,6 +75,7 @@ impl Join {
             lateral: false,
             is_subquery: false,
             subquery_params: Vec::new(),
+            subquery: None,
         }
     }
 
@@ -84,6 +89,7 @@ impl Join {
             lateral: false,
             is_subquery: false,
             subquery_params: Vec::new(),
+            subquery: None,
         }
     }
 
@@ -97,6 +103,7 @@ impl Join {
             lateral: false,
             is_subquery: false,
             subquery_params: Vec::new(),
+            subquery: None,
         }
     }
 
@@ -110,6 +117,7 @@ impl Join {
             lateral: false,
             is_subquery: false,
             subquery_params: Vec::new(),
+            subquery: None,
         }
     }
 
@@ -140,6 +148,26 @@ impl Join {
             lateral: true,
             is_subquery: true,
             subquery_params: params,
+            subquery: None,
+        }
+    }
+
+    /// Create a LATERAL JOIN with a deferred subquery builder.
+    pub fn lateral_query(
+        join_type: JoinType,
+        subquery: SelectQuery,
+        alias: impl Into<String>,
+        on: Expr,
+    ) -> Self {
+        Self {
+            join_type,
+            table: String::new(),
+            alias: Some(alias.into()),
+            on,
+            lateral: true,
+            is_subquery: true,
+            subquery_params: Vec::new(),
+            subquery: Some(Box::new(subquery)),
         }
     }
 
@@ -179,6 +207,7 @@ impl Join {
             lateral: true,
             is_subquery: true,
             subquery_params: params,
+            subquery: None,
         }
     }
 
@@ -229,10 +258,28 @@ impl Join {
     fn build_sql(&self, dialect: Dialect, params: &mut Vec<Value>, offset: usize) -> String {
         let lateral_keyword = if self.lateral { " LATERAL" } else { "" };
 
-        let table_ref = if self.is_subquery {
-            format!("({})", self.table)
+        let (table_ref, subquery_params) = if let Some(subquery) = &self.subquery {
+            let start_idx = offset + params.len();
+            let (subquery_sql, subquery_params) = subquery.build_with_dialect(dialect);
+            let adjusted_subquery = if subquery_params.is_empty() {
+                subquery_sql
+            } else {
+                adjust_placeholder_indices(&subquery_sql, start_idx, dialect)
+            };
+            (format!("({})", adjusted_subquery), subquery_params)
+        } else if self.is_subquery {
+            let start_idx = offset + params.len();
+            let adjusted_subquery = if self.subquery_params.is_empty() {
+                self.table.clone()
+            } else {
+                adjust_placeholder_indices(&self.table, start_idx, dialect)
+            };
+            (
+                format!("({})", adjusted_subquery),
+                self.subquery_params.clone(),
+            )
         } else {
-            self.table.clone()
+            (self.table.clone(), Vec::new())
         };
 
         let mut sql = format!(
@@ -247,7 +294,7 @@ impl Join {
         );
 
         // Add subquery params before ON condition params
-        params.extend(self.subquery_params.clone());
+        params.extend(subquery_params);
 
         if let Some(alias) = &self.alias {
             sql.push_str(" AS ");

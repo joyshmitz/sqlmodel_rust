@@ -4,6 +4,7 @@
 //! WHERE clauses, ORDER BY, computed columns, and other SQL expressions.
 
 use crate::clause::{OrderBy, OrderDirection};
+use crate::subquery::SelectQuery;
 use sqlmodel_core::Value;
 
 /// SQL dialect for generating dialect-specific SQL.
@@ -96,6 +97,16 @@ pub enum Expr {
         subquery: String,
         /// Parameters for the subquery
         params: Vec<Value>,
+        /// Whether this is NOT EXISTS
+        negated: bool,
+    },
+
+    /// EXISTS (subquery) / NOT EXISTS (subquery) built from a query builder.
+    ///
+    /// Used to defer SQL generation until a specific dialect is known.
+    ExistsQuery {
+        /// The subquery builder
+        subquery: Box<SelectQuery>,
         /// Whether this is NOT EXISTS
         negated: bool,
     },
@@ -1412,6 +1423,22 @@ impl Expr {
         }
     }
 
+    /// Create an EXISTS subquery expression from a query builder.
+    pub fn exists_query(subquery: SelectQuery) -> Self {
+        Expr::ExistsQuery {
+            subquery: Box::new(subquery),
+            negated: false,
+        }
+    }
+
+    /// Create a NOT EXISTS subquery expression from a query builder.
+    pub fn not_exists_query(subquery: SelectQuery) -> Self {
+        Expr::ExistsQuery {
+            subquery: Box::new(subquery),
+            negated: true,
+        }
+    }
+
     // ==================== JSON Functions ====================
 
     /// Extract a JSON value by key (returns JSON).
@@ -1824,6 +1851,23 @@ impl Expr {
                     // Rewrite $1, $2, etc. to $start_idx+1, $start_idx+2, etc.
                     adjust_placeholder_indices(subquery, start_idx, dialect)
                 };
+
+                let not_str = if *negated { "NOT " } else { "" };
+                format!("{not_str}EXISTS ({adjusted_subquery})")
+            }
+
+            Expr::ExistsQuery { subquery, negated } => {
+                let (subquery_sql, subquery_params) =
+                    subquery.build_exists_subquery_with_dialect(dialect);
+                let start_idx = offset + params.len();
+
+                let adjusted_subquery = if subquery_params.is_empty() {
+                    subquery_sql
+                } else {
+                    adjust_placeholder_indices(&subquery_sql, start_idx, dialect)
+                };
+
+                params.extend(subquery_params.iter().cloned());
 
                 let not_str = if *negated { "NOT " } else { "" };
                 format!("{not_str}EXISTS ({adjusted_subquery})")
@@ -2325,7 +2369,7 @@ impl From<f32> for Expr {
 ///
 /// Rewrites $1, $2, etc. to $offset+1, $offset+2, etc. for PostgreSQL,
 /// or ?1, ?2, etc. for SQLite. MySQL always uses ? so no adjustment needed.
-fn adjust_placeholder_indices(sql: &str, offset: usize, dialect: Dialect) -> String {
+pub(crate) fn adjust_placeholder_indices(sql: &str, offset: usize, dialect: Dialect) -> String {
     if offset == 0 {
         return sql.to_string();
     }

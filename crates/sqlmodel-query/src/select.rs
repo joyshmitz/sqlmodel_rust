@@ -4,6 +4,7 @@ use crate::clause::{Limit, Offset, OrderBy, Where};
 use crate::eager::{EagerLoader, IncludePath, build_join_clause, find_relationship};
 use crate::expr::{Dialect, Expr};
 use crate::join::Join;
+use crate::subquery::SelectQuery;
 use asupersync::{Cx, Outcome};
 use sqlmodel_core::{Connection, Model, RelationshipKind, Value};
 use std::marker::PhantomData;
@@ -500,9 +501,7 @@ impl<M: Model> Select<M> {
     /// // Generates: SELECT * FROM customers WHERE EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = customers.id)
     /// ```
     pub fn into_exists(self) -> Expr {
-        // Build the SELECT 1 version for optimal EXISTS
-        let (sql, params) = self.build_exists_subquery();
-        Expr::exists(sql, params)
+        Expr::exists_query(self.into_query())
     }
 
     /// Convert this SELECT query to an EXISTS expression using a specific dialect.
@@ -534,8 +533,7 @@ impl<M: Model> Select<M> {
     /// // Generates: SELECT * FROM customers WHERE NOT EXISTS (SELECT 1 FROM orders WHERE orders.customer_id = customers.id)
     /// ```
     pub fn into_not_exists(self) -> Expr {
-        let (sql, params) = self.build_exists_subquery();
-        Expr::not_exists(sql, params)
+        Expr::not_exists_query(self.into_query())
     }
 
     /// Convert this SELECT query to a NOT EXISTS expression using a specific dialect.
@@ -575,8 +573,7 @@ impl<M: Model> Select<M> {
         join_type: crate::JoinType,
         on: Expr,
     ) -> crate::Join {
-        let (sql, params) = self.build();
-        crate::Join::lateral(join_type, sql, alias, on, params)
+        crate::Join::lateral_query(join_type, self.into_query(), alias, on)
     }
 
     /// Convert this SELECT into a LATERAL JOIN using a specific dialect.
@@ -587,13 +584,40 @@ impl<M: Model> Select<M> {
         on: Expr,
         dialect: Dialect,
     ) -> crate::Join {
-        let (sql, params) = self.build_with_dialect(dialect);
+        let (sql, params) = self.into_query().build_with_dialect(dialect);
         crate::Join::lateral(join_type, sql, alias, on, params)
     }
 
     /// Build an optimized EXISTS subquery (SELECT 1 instead of SELECT *).
-    fn build_exists_subquery(&self) -> (String, Vec<Value>) {
-        self.build_exists_subquery_with_dialect(Dialect::default())
+    fn into_query(self) -> SelectQuery {
+        let Select {
+            columns,
+            where_clause,
+            order_by,
+            joins,
+            limit,
+            offset,
+            group_by,
+            having,
+            distinct,
+            for_update,
+            eager_loader: _,
+            _marker: _,
+        } = self;
+
+        SelectQuery {
+            table: M::TABLE_NAME.to_string(),
+            columns,
+            where_clause,
+            order_by,
+            joins,
+            limit,
+            offset,
+            group_by,
+            having,
+            distinct,
+            for_update,
+        }
     }
 
     fn build_exists_subquery_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
@@ -733,6 +757,7 @@ impl<M: Model> Default for Select<M> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::JoinType;
     use sqlmodel_core::{Error, FieldInfo, Result, Row, Value};
 
     #[derive(Debug, Clone)]
@@ -1240,6 +1265,19 @@ mod tests {
     }
 
     #[test]
+    fn test_select_into_exists_propagates_dialect_mysql() {
+        let exists_expr = Select::<Hero>::new()
+            .filter(Expr::col("status").eq("active"))
+            .into_exists();
+
+        let mut params = Vec::new();
+        let sql = exists_expr.build_with_dialect(Dialect::Mysql, &mut params, 0);
+
+        assert_eq!(sql, "EXISTS (SELECT 1 FROM heroes WHERE `status` = ?)");
+        assert_eq!(params, vec![Value::Text("active".to_string())]);
+    }
+
+    #[test]
     fn test_select_into_exists_with_join() {
         // EXISTS subquery with JOIN
         let exists_expr = Select::<Hero>::new()
@@ -1297,5 +1335,26 @@ mod tests {
             sql,
             "\"active\" = $1 AND EXISTS (SELECT 1 FROM heroes WHERE heroes.team_id = teams.id)"
         );
+    }
+
+    #[test]
+    fn test_lateral_join_propagates_dialect_sqlite() {
+        let lateral = Select::<Hero>::new()
+            .filter(Expr::col("status").eq("active"))
+            .into_lateral_join("recent", JoinType::Left, Expr::raw("TRUE"));
+
+        let query = Select::<Hero>::new()
+            .filter(Expr::col("active").eq(true))
+            .join(lateral);
+
+        let (sql, params) = query.build_with_dialect(Dialect::Sqlite);
+
+        assert!(sql.contains(
+            "LEFT JOIN LATERAL (SELECT * FROM heroes WHERE \"status\" = ?1) AS recent ON TRUE"
+        ));
+        assert!(sql.contains("WHERE \"active\" = ?2"));
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], Value::Text("active".to_string()));
+        assert_eq!(params[1], Value::Bool(true));
     }
 }
