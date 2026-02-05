@@ -166,11 +166,14 @@ impl<M: Model> Select<M> {
         self
     }
 
-    /// Build SQL for eager loading with JOINs.
+    /// Build SQL for eager loading with JOINs using a specific dialect.
     ///
     /// Generates SELECT with aliased columns and LEFT JOINs for included relationships.
     #[tracing::instrument(level = "trace", skip(self))]
-    fn build_eager(&self) -> (String, Vec<Value>, Vec<EagerJoinInfo>) {
+    fn build_eager_with_dialect(
+        &self,
+        dialect: Dialect,
+    ) -> (String, Vec<Value>, Vec<EagerJoinInfo>) {
         let mut sql = String::new();
         let mut params = Vec::new();
         let mut join_info = Vec::new();
@@ -236,12 +239,12 @@ impl<M: Model> Select<M> {
 
         // Additional explicit JOINs
         for join in &self.joins {
-            sql.push_str(&join.build(&mut params, 0));
+            sql.push_str(&join.build_with_dialect(dialect, &mut params, 0));
         }
 
         // WHERE
         if let Some(where_clause) = &self.where_clause {
-            let (where_sql, where_params) = where_clause.build_with_offset(params.len());
+            let (where_sql, where_params) = where_clause.build_with_dialect(dialect, params.len());
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
             params.extend(where_params);
@@ -255,7 +258,7 @@ impl<M: Model> Select<M> {
 
         // HAVING
         if let Some(having) = &self.having {
-            let (having_sql, having_params) = having.build_with_offset(params.len());
+            let (having_sql, having_params) = having.build_with_dialect(dialect, params.len());
             sql.push_str(" HAVING ");
             sql.push_str(&having_sql);
             params.extend(having_params);
@@ -267,7 +270,7 @@ impl<M: Model> Select<M> {
             let order_strs: Vec<_> = self
                 .order_by
                 .iter()
-                .map(|o| o.build(Dialect::default(), &mut params, 0))
+                .map(|o| o.build(dialect, &mut params, 0))
                 .collect();
             sql.push_str(&order_strs.join(", "));
         }
@@ -320,7 +323,7 @@ impl<M: Model> Select<M> {
             return self.all(cx, conn).await;
         }
 
-        let (sql, params, join_info) = self.build_eager();
+        let (sql, params, join_info) = self.build_eager_with_dialect(conn.dialect());
 
         tracing::debug!(
             table = M::TABLE_NAME,
@@ -395,6 +398,11 @@ impl<M: Model> Select<M> {
 
     /// Build the SQL query and parameters.
     pub fn build(&self) -> (String, Vec<Value>) {
+        self.build_with_dialect(Dialect::default())
+    }
+
+    /// Build the SQL query and parameters with a specific dialect.
+    pub fn build_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
         let mut sql = String::new();
         let mut params = Vec::new();
 
@@ -416,12 +424,12 @@ impl<M: Model> Select<M> {
 
         // JOINs
         for join in &self.joins {
-            sql.push_str(&join.build(&mut params, 0));
+            sql.push_str(&join.build_with_dialect(dialect, &mut params, 0));
         }
 
         // WHERE
         if let Some(where_clause) = &self.where_clause {
-            let (where_sql, where_params) = where_clause.build_with_offset(params.len());
+            let (where_sql, where_params) = where_clause.build_with_dialect(dialect, params.len());
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
             params.extend(where_params);
@@ -435,7 +443,7 @@ impl<M: Model> Select<M> {
 
         // HAVING
         if let Some(having) = &self.having {
-            let (having_sql, having_params) = having.build_with_offset(params.len());
+            let (having_sql, having_params) = having.build_with_dialect(dialect, params.len());
             sql.push_str(" HAVING ");
             sql.push_str(&having_sql);
             params.extend(having_params);
@@ -447,7 +455,7 @@ impl<M: Model> Select<M> {
             let order_strs: Vec<_> = self
                 .order_by
                 .iter()
-                .map(|o| o.build(Dialect::default(), &mut params, 0))
+                .map(|o| o.build(dialect, &mut params, 0))
                 .collect();
             sql.push_str(&order_strs.join(", "));
         }
@@ -497,6 +505,14 @@ impl<M: Model> Select<M> {
         Expr::exists(sql, params)
     }
 
+    /// Convert this SELECT query to an EXISTS expression using a specific dialect.
+    ///
+    /// Use this when embedding the EXISTS in a query for a non-default dialect.
+    pub fn into_exists_with_dialect(self, dialect: Dialect) -> Expr {
+        let (sql, params) = self.build_exists_subquery_with_dialect(dialect);
+        Expr::exists(sql, params)
+    }
+
     /// Convert this SELECT query to a NOT EXISTS expression.
     ///
     /// Creates an `Expr::Exists` (negated) that can be used in WHERE clauses.
@@ -519,6 +535,12 @@ impl<M: Model> Select<M> {
     /// ```
     pub fn into_not_exists(self) -> Expr {
         let (sql, params) = self.build_exists_subquery();
+        Expr::not_exists(sql, params)
+    }
+
+    /// Convert this SELECT query to a NOT EXISTS expression using a specific dialect.
+    pub fn into_not_exists_with_dialect(self, dialect: Dialect) -> Expr {
+        let (sql, params) = self.build_exists_subquery_with_dialect(dialect);
         Expr::not_exists(sql, params)
     }
 
@@ -557,8 +579,24 @@ impl<M: Model> Select<M> {
         crate::Join::lateral(join_type, sql, alias, on, params)
     }
 
+    /// Convert this SELECT into a LATERAL JOIN using a specific dialect.
+    pub fn into_lateral_join_with_dialect(
+        self,
+        alias: impl Into<String>,
+        join_type: crate::JoinType,
+        on: Expr,
+        dialect: Dialect,
+    ) -> crate::Join {
+        let (sql, params) = self.build_with_dialect(dialect);
+        crate::Join::lateral(join_type, sql, alias, on, params)
+    }
+
     /// Build an optimized EXISTS subquery (SELECT 1 instead of SELECT *).
     fn build_exists_subquery(&self) -> (String, Vec<Value>) {
+        self.build_exists_subquery_with_dialect(Dialect::default())
+    }
+
+    fn build_exists_subquery_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
         let mut sql = String::new();
         let mut params = Vec::new();
 
@@ -568,12 +606,12 @@ impl<M: Model> Select<M> {
 
         // JOINs (if any)
         for join in &self.joins {
-            sql.push_str(&join.build(&mut params, 0));
+            sql.push_str(&join.build_with_dialect(dialect, &mut params, 0));
         }
 
         // WHERE
         if let Some(where_clause) = &self.where_clause {
-            let (where_sql, where_params) = where_clause.build_with_offset(params.len());
+            let (where_sql, where_params) = where_clause.build_with_dialect(dialect, params.len());
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
             params.extend(where_params);
@@ -587,7 +625,7 @@ impl<M: Model> Select<M> {
 
         // HAVING (rare in EXISTS but supported)
         if let Some(having) = &self.having {
-            let (having_sql, having_params) = having.build_with_offset(params.len());
+            let (having_sql, having_params) = having.build_with_dialect(dialect, params.len());
             sql.push_str(" HAVING ");
             sql.push_str(&having_sql);
             params.extend(having_params);
@@ -604,7 +642,7 @@ impl<M: Model> Select<M> {
         cx: &Cx,
         conn: &C,
     ) -> Outcome<Vec<M>, sqlmodel_core::Error> {
-        let (sql, params) = self.build();
+        let (sql, params) = self.build_with_dialect(conn.dialect());
         let rows = conn.query(cx, &sql, &params).await;
 
         rows.and_then(|rows| {
@@ -626,7 +664,7 @@ impl<M: Model> Select<M> {
         conn: &C,
     ) -> Outcome<Option<M>, sqlmodel_core::Error> {
         let query = self.limit(1);
-        let (sql, params) = query.build();
+        let (sql, params) = query.build_with_dialect(conn.dialect());
         let row = conn.query_one(cx, &sql, &params).await;
 
         row.and_then(|opt_row| match opt_row {
@@ -663,7 +701,7 @@ impl<M: Model> Select<M> {
         count_query.limit = None;
         count_query.offset = None;
 
-        let (sql, params) = count_query.build();
+        let (sql, params) = count_query.build_with_dialect(conn.dialect());
         let row = conn.query_one(cx, &sql, &params).await;
 
         row.and_then(|opt_row| match opt_row {
@@ -1081,7 +1119,7 @@ mod tests {
         let loader = EagerLoader::<EagerHero>::new().include("team");
         let query = Select::<EagerHero>::new().eager(loader);
 
-        let (sql, params, join_info) = query.build_eager();
+        let (sql, params, join_info) = query.build_eager_with_dialect(Dialect::default());
 
         // Should have LEFT JOIN for team relationship
         assert!(sql.contains("LEFT JOIN teams"));
@@ -1104,7 +1142,7 @@ mod tests {
             .eager(loader)
             .filter(Expr::col("active").eq(true));
 
-        let (sql, params, _) = query.build_eager();
+        let (sql, params, _) = query.build_eager_with_dialect(Dialect::default());
 
         assert!(sql.contains("LEFT JOIN teams"));
         assert!(sql.contains("WHERE"));
@@ -1121,7 +1159,7 @@ mod tests {
             .limit(10)
             .offset(5);
 
-        let (sql, _, _) = query.build_eager();
+        let (sql, _, _) = query.build_eager_with_dialect(Dialect::default());
 
         assert!(sql.contains("LEFT JOIN teams"));
         assert!(sql.contains("ORDER BY"));
@@ -1146,7 +1184,7 @@ mod tests {
         let loader = EagerLoader::<EagerHero>::new().include("team");
         let query = Select::<EagerHero>::new().eager(loader).distinct();
 
-        let (sql, _, _) = query.build_eager();
+        let (sql, _, _) = query.build_eager_with_dialect(Dialect::default());
 
         assert!(sql.starts_with("SELECT DISTINCT"));
     }

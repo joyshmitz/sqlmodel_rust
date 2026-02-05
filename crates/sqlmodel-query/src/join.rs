@@ -1,6 +1,6 @@
 //! JOIN clause types.
 
-use crate::expr::Expr;
+use crate::expr::{Dialect, Expr};
 use sqlmodel_core::Value;
 
 /// A JOIN clause.
@@ -200,16 +200,33 @@ impl Join {
     /// literal values that need to be bound as parameters.
     pub fn to_sql(&self) -> (String, Vec<Value>) {
         let mut params = Vec::new();
-        let sql = self.build_sql(&mut params, 0);
+        let sql = self.build_sql(Dialect::default(), &mut params, 0);
+        (sql, params)
+    }
+
+    /// Generate SQL for this JOIN clause with a specific dialect.
+    pub fn to_sql_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
+        let mut params = Vec::new();
+        let sql = self.build_sql(dialect, &mut params, 0);
         (sql, params)
     }
 
     /// Generate SQL and collect parameters.
     pub fn build(&self, params: &mut Vec<Value>, offset: usize) -> String {
-        self.build_sql(params, offset)
+        self.build_sql(Dialect::default(), params, offset)
     }
 
-    fn build_sql(&self, params: &mut Vec<Value>, offset: usize) -> String {
+    /// Generate SQL and collect parameters with a specific dialect.
+    pub fn build_with_dialect(
+        &self,
+        dialect: Dialect,
+        params: &mut Vec<Value>,
+        offset: usize,
+    ) -> String {
+        self.build_sql(dialect, params, offset)
+    }
+
+    fn build_sql(&self, dialect: Dialect, params: &mut Vec<Value>, offset: usize) -> String {
         let lateral_keyword = if self.lateral { " LATERAL" } else { "" };
 
         let table_ref = if self.is_subquery {
@@ -238,7 +255,7 @@ impl Join {
         }
 
         if self.join_type != JoinType::Cross {
-            let on_sql = self.on.build(params, offset);
+            let on_sql = self.on.build_with_dialect(dialect, params, offset);
             sql.push_str(" ON ");
             sql.push_str(&on_sql);
         }

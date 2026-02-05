@@ -321,35 +321,151 @@ impl<'a, M: Model> InsertManyBuilder<'a, M> {
 
     /// Build the bulk INSERT SQL and parameters with specific dialect.
     pub fn build_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
+        let batches = self.build_batches_with_dialect(dialect);
+        match batches.len() {
+            0 => (String::new(), Vec::new()),
+            1 => batches.into_iter().next().unwrap(),
+            _ => {
+                tracing::warn!(
+                    table = M::TABLE_NAME,
+                    "Bulk insert requires multiple statements for this dialect. \
+                     Use build_batches_with_dialect or execute() instead of build_with_dialect."
+                );
+                (String::new(), Vec::new())
+            }
+        }
+    }
+
+    /// Build bulk INSERT statements for the given dialect.
+    ///
+    /// SQLite requires column omission when defaults are used, which can
+    /// produce multiple statements to preserve correct semantics.
+    pub fn build_batches_with_dialect(&self, dialect: Dialect) -> Vec<(String, Vec<Value>)> {
+        enum Batch {
+            Values {
+                columns: Vec<&'static str>,
+                rows: Vec<Vec<Value>>,
+            },
+            DefaultValues,
+        }
+
         if self.models.is_empty() {
-            return (String::new(), Vec::new());
+            return Vec::new();
+        }
+
+        if dialect != Dialect::Sqlite {
+            return vec![self.build_single_with_dialect(dialect)];
         }
 
         let fields = M::fields();
-        let first_row = self.models[0].to_row();
+        let rows: Vec<Vec<(&'static str, Value)>> =
+            self.models.iter().map(|model| model.to_row()).collect();
 
-        // Determine which columns to insert
-        // Always include auto-increment fields to handle mixed states (New vs Existing)
-        // For other fields, we still rely on first_row to filter Nulls (standard behavior)
-        let insert_columns: Vec<_> = first_row
+        // Determine which columns to insert (preserve field order)
+        let insert_columns: Vec<_> = fields
             .iter()
-            .filter(|(name, value)| {
-                let field = fields.iter().find(|f| f.name == *name);
-                if let Some(f) = field {
-                    if f.auto_increment {
-                        return true;
+            .filter_map(|field| {
+                if field.auto_increment {
+                    return Some(field.name);
+                }
+                let has_value = rows.iter().any(|row| {
+                    row.iter()
+                        .find(|(name, _)| name == &field.name)
+                        .is_some_and(|(_, v)| !matches!(v, Value::Null))
+                });
+                if has_value { Some(field.name) } else { None }
+            })
+            .collect();
+
+        let mut batches: Vec<Batch> = Vec::new();
+
+        for row in &rows {
+            let mut columns_for_row = Vec::new();
+            let mut values_for_row = Vec::new();
+
+            for col in &insert_columns {
+                let mut val = row
+                    .iter()
+                    .find(|(name, _)| name == col)
+                    .map_or(Value::Null, |(_, v)| v.clone());
+
+                // Map Null auto-increment fields to DEFAULT
+                if let Some(f) = fields.iter().find(|f| f.name == *col) {
+                    if f.auto_increment && matches!(val, Value::Null) {
+                        val = Value::Default;
                     }
                 }
-                !matches!(value, Value::Null)
+
+                if matches!(val, Value::Default) {
+                    continue;
+                }
+
+                columns_for_row.push(*col);
+                values_for_row.push(val);
+            }
+
+            if columns_for_row.is_empty() {
+                batches.push(Batch::DefaultValues);
+                continue;
+            }
+
+            match batches.last_mut() {
+                Some(Batch::Values { columns, rows }) if *columns == columns_for_row => {
+                    rows.push(values_for_row);
+                }
+                _ => batches.push(Batch::Values {
+                    columns: columns_for_row,
+                    rows: vec![values_for_row],
+                }),
+            }
+        }
+
+        let mut statements = Vec::new();
+
+        for batch in batches {
+            match batch {
+                Batch::DefaultValues => {
+                    let mut sql = format!("INSERT INTO {} DEFAULT VALUES", M::TABLE_NAME);
+                    self.append_on_conflict(&mut sql, &[]);
+                    self.append_returning(&mut sql);
+                    statements.push((sql, Vec::new()));
+                }
+                Batch::Values { columns, rows } => {
+                    let (sql, params) = self.build_values_batch_sql(dialect, &columns, &rows);
+                    statements.push((sql, params));
+                }
+            }
+        }
+
+        statements
+    }
+
+    fn build_single_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
+        let fields = M::fields();
+        let rows: Vec<Vec<(&'static str, Value)>> =
+            self.models.iter().map(|model| model.to_row()).collect();
+
+        // Determine which columns to insert
+        // Always include auto-increment fields, include non-null values seen in any row.
+        let insert_columns: Vec<_> = fields
+            .iter()
+            .filter_map(|field| {
+                if field.auto_increment {
+                    return Some(field.name);
+                }
+                let has_value = rows.iter().any(|row| {
+                    row.iter()
+                        .find(|(name, _)| name == &field.name)
+                        .is_some_and(|(_, v)| !matches!(v, Value::Null))
+                });
+                if has_value { Some(field.name) } else { None }
             })
-            .map(|(name, _)| *name)
             .collect();
 
         let mut all_values = Vec::new();
         let mut value_groups = Vec::new();
 
-        for model in self.models {
-            let row = model.to_row();
+        for row in &rows {
             let values: Vec<_> = insert_columns
                 .iter()
                 .map(|col| {
@@ -372,12 +488,7 @@ impl<'a, M: Model> InsertManyBuilder<'a, M> {
             let mut placeholders = Vec::new();
             for v in &values {
                 if matches!(v, Value::Default) {
-                    if dialect == Dialect::Sqlite {
-                        all_values.push(Value::Null);
-                        placeholders.push(dialect.placeholder(all_values.len()));
-                    } else {
-                        placeholders.push("DEFAULT".to_string());
-                    }
+                    placeholders.push("DEFAULT".to_string());
                 } else {
                     all_values.push(v.clone());
                     placeholders.push(dialect.placeholder(all_values.len()));
@@ -393,7 +504,53 @@ impl<'a, M: Model> InsertManyBuilder<'a, M> {
             insert_columns.join(", "),
             value_groups.join(", ")
         );
-        // Add ON CONFLICT clause if specified
+
+        self.append_on_conflict(&mut sql, &insert_columns);
+        self.append_returning(&mut sql);
+
+        (sql, all_values)
+    }
+
+    fn build_values_batch_sql(
+        &self,
+        dialect: Dialect,
+        columns: &[&'static str],
+        rows: &[Vec<Value>],
+    ) -> (String, Vec<Value>) {
+        let mut params = Vec::new();
+        let mut value_groups = Vec::new();
+
+        for row in rows {
+            let mut placeholders = Vec::new();
+            for value in row {
+                if matches!(value, Value::Default) {
+                    placeholders.push("DEFAULT".to_string());
+                } else {
+                    params.push(value.clone());
+                    placeholders.push(dialect.placeholder(params.len()));
+                }
+            }
+            value_groups.push(format!("({})", placeholders.join(", ")));
+        }
+
+        let mut sql = if columns.is_empty() {
+            format!("INSERT INTO {} DEFAULT VALUES", M::TABLE_NAME)
+        } else {
+            format!(
+                "INSERT INTO {} ({}) VALUES {}",
+                M::TABLE_NAME,
+                columns.join(", "),
+                value_groups.join(", ")
+            )
+        };
+
+        self.append_on_conflict(&mut sql, columns);
+        self.append_returning(&mut sql);
+
+        (sql, params)
+    }
+
+    fn append_on_conflict(&self, sql: &mut String, insert_columns: &[&'static str]) {
         if let Some(on_conflict) = &self.on_conflict {
             match on_conflict {
                 OnConflict::DoNothing => {
@@ -453,12 +610,12 @@ impl<'a, M: Model> InsertManyBuilder<'a, M> {
                 }
             }
         }
+    }
 
+    fn append_returning(&self, sql: &mut String) {
         if self.returning {
             sql.push_str(" RETURNING *");
         }
-
-        (sql, all_values)
     }
 
     /// Execute the bulk INSERT and return rows affected.
@@ -467,11 +624,18 @@ impl<'a, M: Model> InsertManyBuilder<'a, M> {
         cx: &Cx,
         conn: &C,
     ) -> Outcome<u64, sqlmodel_core::Error> {
-        if self.models.is_empty() {
+        let batches = self.build_batches_with_dialect(conn.dialect());
+        if batches.is_empty() {
             return Outcome::Ok(0);
         }
-        let (sql, params) = self.build();
-        conn.execute(cx, &sql, &params).await
+
+        if batches.len() == 1 {
+            let (sql, params) = &batches[0];
+            return conn.execute(cx, sql, params).await;
+        }
+
+        let outcome = conn.batch(cx, &batches).await;
+        outcome.map(|counts| counts.into_iter().sum())
     }
 
     /// Execute the bulk INSERT with RETURNING and get the inserted rows.
@@ -480,12 +644,23 @@ impl<'a, M: Model> InsertManyBuilder<'a, M> {
         cx: &Cx,
         conn: &C,
     ) -> Outcome<Vec<Row>, sqlmodel_core::Error> {
-        if self.models.is_empty() {
+        self.returning = true;
+        let batches = self.build_batches_with_dialect(conn.dialect());
+        if batches.is_empty() {
             return Outcome::Ok(Vec::new());
         }
-        self.returning = true;
-        let (sql, params) = self.build();
-        conn.query(cx, &sql, &params).await
+
+        let mut all_rows = Vec::new();
+        for (sql, params) in batches {
+            match conn.query(cx, &sql, &params).await {
+                Outcome::Ok(mut rows) => all_rows.append(&mut rows),
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            }
+        }
+
+        Outcome::Ok(all_rows)
     }
 }
 
@@ -682,7 +857,7 @@ impl<'a, M: Model> UpdateBuilder<'a, M> {
         cx: &Cx,
         conn: &C,
     ) -> Outcome<u64, sqlmodel_core::Error> {
-        let (sql, params) = self.build();
+        let (sql, params) = self.build_with_dialect(conn.dialect());
         if sql.is_empty() {
             return Outcome::Ok(0);
         }
@@ -696,7 +871,7 @@ impl<'a, M: Model> UpdateBuilder<'a, M> {
         conn: &C,
     ) -> Outcome<Vec<Row>, sqlmodel_core::Error> {
         self.returning = true;
-        let (sql, params) = self.build();
+        let (sql, params) = self.build_with_dialect(conn.dialect());
         if sql.is_empty() {
             return Outcome::Ok(Vec::new());
         }
@@ -817,7 +992,7 @@ impl<'a, M: Model> DeleteBuilder<'a, M> {
         cx: &Cx,
         conn: &C,
     ) -> Outcome<u64, sqlmodel_core::Error> {
-        let (sql, params) = self.build();
+        let (sql, params) = self.build_with_dialect(conn.dialect());
         conn.execute(cx, &sql, &params).await
     }
 
@@ -828,7 +1003,7 @@ impl<'a, M: Model> DeleteBuilder<'a, M> {
         conn: &C,
     ) -> Outcome<Vec<Row>, sqlmodel_core::Error> {
         self.returning = true;
-        let (sql, params) = self.build();
+        let (sql, params) = self.build_with_dialect(conn.dialect());
         conn.query(cx, &sql, &params).await
     }
 }
@@ -924,6 +1099,39 @@ mod tests {
         }
     }
 
+    struct TestOnlyId {
+        id: Option<i64>,
+    }
+
+    impl Model for TestOnlyId {
+        const TABLE_NAME: &'static str = "only_ids";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            static FIELDS: &[FieldInfo] = &[FieldInfo::new("id", "id", SqlType::BigInt)
+                .primary_key(true)
+                .auto_increment(true)
+                .nullable(true)];
+            FIELDS
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![("id", self.id.map_or(Value::Null, Value::BigInt))]
+        }
+
+        fn from_row(_row: &Row) -> sqlmodel_core::Result<Self> {
+            unimplemented!()
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            vec![self.id.map_or(Value::Null, Value::BigInt)]
+        }
+
+        fn is_new(&self) -> bool {
+            self.id.is_none()
+        }
+    }
+
     #[test]
     fn test_insert_basic() {
         let hero = TestHero {
@@ -1001,6 +1209,92 @@ mod tests {
         assert!(sql.starts_with("INSERT INTO heroes (id, name, age) VALUES"));
         assert!(sql.contains("(DEFAULT, $1, $2), (DEFAULT, $3, $4)"));
         assert_eq!(params.len(), 4);
+    }
+
+    #[test]
+    fn test_insert_sqlite_omits_default_columns() {
+        let hero = TestHero {
+            id: None,
+            name: "Spider-Man".to_string(),
+            age: 25,
+        };
+        let (sql, params) = InsertBuilder::new(&hero).build_with_dialect(Dialect::Sqlite);
+
+        assert_eq!(sql, "INSERT INTO heroes (name, age) VALUES (?1, ?2)");
+        assert_eq!(params.len(), 2);
+    }
+
+    #[test]
+    fn test_insert_sqlite_default_values_only() {
+        let model = TestOnlyId { id: None };
+        let (sql, params) = InsertBuilder::new(&model).build_with_dialect(Dialect::Sqlite);
+
+        assert_eq!(sql, "INSERT INTO only_ids DEFAULT VALUES");
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_insert_many_sqlite_omits_auto_increment() {
+        let heroes = vec![
+            TestHero {
+                id: None,
+                name: "Spider-Man".to_string(),
+                age: 25,
+            },
+            TestHero {
+                id: None,
+                name: "Iron Man".to_string(),
+                age: 45,
+            },
+        ];
+        let batches = InsertManyBuilder::new(&heroes).build_batches_with_dialect(Dialect::Sqlite);
+
+        assert_eq!(batches.len(), 1);
+        let (sql, params) = &batches[0];
+        assert!(sql.starts_with("INSERT INTO heroes (name, age) VALUES"));
+        assert!(sql.contains("(?1, ?2), (?3, ?4)"));
+        assert_eq!(params.len(), 4);
+    }
+
+    #[test]
+    fn test_insert_many_sqlite_mixed_defaults_split() {
+        let heroes = vec![
+            TestHero {
+                id: Some(1),
+                name: "Spider-Man".to_string(),
+                age: 25,
+            },
+            TestHero {
+                id: None,
+                name: "Iron Man".to_string(),
+                age: 45,
+            },
+        ];
+        let batches = InsertManyBuilder::new(&heroes).build_batches_with_dialect(Dialect::Sqlite);
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(
+            batches[0].0,
+            "INSERT INTO heroes (id, name, age) VALUES (?1, ?2, ?3)"
+        );
+        assert_eq!(
+            batches[1].0,
+            "INSERT INTO heroes (name, age) VALUES (?1, ?2)"
+        );
+        assert_eq!(batches[0].1.len(), 3);
+        assert_eq!(batches[1].1.len(), 2);
+    }
+
+    #[test]
+    fn test_insert_many_sqlite_default_values_only() {
+        let rows = vec![TestOnlyId { id: None }, TestOnlyId { id: None }];
+        let batches = InsertManyBuilder::new(&rows).build_batches_with_dialect(Dialect::Sqlite);
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].0, "INSERT INTO only_ids DEFAULT VALUES");
+        assert_eq!(batches[1].0, "INSERT INTO only_ids DEFAULT VALUES");
+        assert!(batches[0].1.is_empty());
+        assert!(batches[1].1.is_empty());
     }
 
     #[test]

@@ -2550,13 +2550,7 @@ impl<C: Connection> Session<C> {
 
         for chunk in models.chunks(batch_size) {
             let builder = sqlmodel_query::InsertManyBuilder::new(chunk);
-            let (sql, params) = builder.build();
-
-            if sql.is_empty() {
-                continue;
-            }
-
-            match self.connection.execute(cx, &sql, &params).await {
+            match builder.execute(cx, &self.connection).await {
                 Outcome::Ok(count) => total_inserted += count,
                 Outcome::Err(e) => return Outcome::Err(e),
                 Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -2587,7 +2581,7 @@ impl<C: Connection> Session<C> {
 
         for model in models {
             let builder = sqlmodel_query::UpdateBuilder::new(model);
-            let (sql, params) = builder.build();
+            let (sql, params) = builder.build_with_dialect(self.connection.dialect());
 
             if sql.is_empty() {
                 continue;
