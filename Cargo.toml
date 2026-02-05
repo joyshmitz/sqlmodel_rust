@@ -54,7 +54,7 @@ format_push_string = "allow"
 
 [workspace.dependencies]
 # Core async runtime - our custom cancel-correct runtime
-asupersync = { version = "0.1.0", git = "https://github.com/Dicklesworthstone/asupersync", rev = "393d13e134ba5908f03fde1e5cbc24e62de8f807" }
+asupersync = { version = "0.1.0" }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

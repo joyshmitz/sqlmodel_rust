@@ -26,7 +26,8 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "asupersync"
 version = "0.1.0"
-source = "git+https://github.com/Dicklesworthstone/asupersync?rev=393d13e134ba5908f03fde1e5cbc24e62de8f807#393d13e134ba5908f03fde1e5cbc24e62de8f807"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "45551c816d1bb377e94e2633e48e6ab3cedfba821fa1d0eee52f1f2164b17db8"
 dependencies = [
  "base64",
  "bincode",
