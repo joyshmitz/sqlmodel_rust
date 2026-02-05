@@ -4014,11 +4014,13 @@ mod tests {
 
         // The bound should be captured in generics
         let type_param = def.generics.params.first().unwrap();
+        assert!(
+            matches!(type_param, syn::GenericParam::Type(_)),
+            "Expected type parameter"
+        );
         if let syn::GenericParam::Type(tp) = type_param {
             assert_eq!(tp.ident, "T");
             assert!(!tp.bounds.is_empty()); // Has bounds
-        } else {
-            panic!("Expected type parameter");
         }
     }
 
@@ -4109,10 +4111,13 @@ mod tests {
         assert_eq!(def.generics.params.len(), 1);
 
         // Check default is captured
-        if let syn::GenericParam::Type(tp) = def.generics.params.first().unwrap() {
+        let type_param = def.generics.params.first().unwrap();
+        assert!(
+            matches!(type_param, syn::GenericParam::Type(_)),
+            "Expected type parameter"
+        );
+        if let syn::GenericParam::Type(tp) = type_param {
             assert!(tp.default.is_some());
-        } else {
-            panic!("Expected type parameter");
         }
     }
 
