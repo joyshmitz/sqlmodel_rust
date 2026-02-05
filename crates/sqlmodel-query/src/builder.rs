@@ -1087,7 +1087,9 @@ mod tests {
         }
 
         fn from_row(_row: &Row) -> sqlmodel_core::Result<Self> {
-            unimplemented!()
+            Err(sqlmodel_core::Error::Custom(
+                "from_row not used in tests".to_string(),
+            ))
         }
 
         fn primary_key_value(&self) -> Vec<Value> {
@@ -1120,7 +1122,9 @@ mod tests {
         }
 
         fn from_row(_row: &Row) -> sqlmodel_core::Result<Self> {
-            unimplemented!()
+            Err(sqlmodel_core::Error::Custom(
+                "from_row not used in tests".to_string(),
+            ))
         }
 
         fn primary_key_value(&self) -> Vec<Value> {

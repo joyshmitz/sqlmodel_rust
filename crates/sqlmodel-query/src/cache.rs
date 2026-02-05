@@ -35,8 +35,13 @@ pub struct CachedStatement {
 /// assert_eq!(sql, "SELECT * FROM users WHERE id = $1");
 ///
 /// // Second call returns cached version
-/// let sql2 = cache.get_or_insert(12345, || panic!("should not be called"));
+/// let called = std::cell::Cell::new(false);
+/// let sql2 = cache.get_or_insert(12345, || {
+///     called.set(true);
+///     "SELECT * FROM users WHERE id = $1".to_string()
+/// });
 /// assert_eq!(sql2, "SELECT * FROM users WHERE id = $1");
+/// assert!(!called.get());
 /// ```
 #[derive(Debug)]
 pub struct StatementCache {
@@ -128,10 +133,15 @@ mod tests {
         assert_eq!(sql, "SELECT 1");
 
         // Should return cached value
+        let called = std::cell::Cell::new(false);
         let sql2 = cache
-            .get_or_insert(1, || panic!("should not be called"))
+            .get_or_insert(1, || {
+                called.set(true);
+                "SELECT 1".to_string()
+            })
             .to_string();
         assert_eq!(sql2, "SELECT 1");
+        assert!(!called.get());
     }
 
     #[test]
@@ -169,7 +179,12 @@ mod tests {
         cache.get_or_insert(2, || "SELECT 2".to_string());
 
         // Access key 1 to make it recently used
-        cache.get_or_insert(1, || panic!("should not rebuild"));
+        let called = std::cell::Cell::new(false);
+        cache.get_or_insert(1, || {
+            called.set(true);
+            "SELECT 1".to_string()
+        });
+        assert!(!called.get());
 
         // Eviction should remove key 2 (now LRU)
         cache.get_or_insert(3, || "SELECT 3".to_string());
