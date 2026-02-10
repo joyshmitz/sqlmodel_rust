@@ -118,6 +118,11 @@ pub struct FieldDef {
     pub skip_update: bool,
     /// Relationship definition (if this is a relationship field).
     pub relationship: Option<RelationshipAttr>,
+    /// Joined-table inheritance parent field (embedded parent model).
+    ///
+    /// When true, this field is not a database column. It is populated from a joined query
+    /// and is excluded from insert/update/select column lists.
+    pub parent: bool,
     /// Alias for both input and output (like serde rename).
     pub alias: Option<String>,
     /// Alias used only during deserialization/validation (input-only).
@@ -308,7 +313,9 @@ impl ModelDef {
     pub fn insert_fields(&self) -> Vec<&FieldDef> {
         self.fields
             .iter()
-            .filter(|f| !f.skip && !f.skip_insert && !f.computed && f.relationship.is_none())
+            .filter(|f| {
+                !f.skip && !f.skip_insert && !f.computed && !f.parent && f.relationship.is_none()
+            })
             .collect()
     }
 
@@ -323,6 +330,7 @@ impl ModelDef {
                     && !f.skip_update
                     && !f.computed
                     && !f.primary_key
+                    && !f.parent
                     && f.relationship.is_none()
             })
             .collect()
@@ -333,7 +341,7 @@ impl ModelDef {
     pub fn select_fields(&self) -> Vec<&FieldDef> {
         self.fields
             .iter()
-            .filter(|f| !f.skip && !f.computed && f.relationship.is_none())
+            .filter(|f| !f.skip && !f.computed && !f.parent && f.relationship.is_none())
             .collect()
     }
 
@@ -343,7 +351,7 @@ impl ModelDef {
     pub fn data_fields(&self) -> Vec<&FieldDef> {
         self.fields
             .iter()
-            .filter(|f| !f.skip && f.relationship.is_none())
+            .filter(|f| !f.skip && !f.parent && f.relationship.is_none())
             .collect()
     }
 
@@ -882,6 +890,7 @@ fn parse_field(field: &Field) -> Result<FieldDef> {
         skip_insert: attrs.skip_insert,
         skip_update: attrs.skip_update,
         relationship: attrs.relationship,
+        parent: attrs.parent,
         alias: attrs.alias,
         validation_alias: attrs.validation_alias,
         serialization_alias: attrs.serialization_alias,
@@ -960,6 +969,8 @@ struct FieldAttrs {
     hybrid_sql: Option<String>,
     /// Discriminator field name for union types.
     discriminator: Option<String>,
+    /// Joined-table inheritance parent field (embedded parent model).
+    parent: bool,
 }
 
 /// Detect the relationship kind from a field's Rust type.
@@ -1303,6 +1314,9 @@ fn parse_field_attrs(
                         "expected string literal for discriminator",
                     ));
                 }
+            } else if path.is_ident("parent") {
+                // Joined-table inheritance embedded parent field (flag).
+                result.parent = true;
             } else {
                 // Unknown attribute
                 let attr_name = path.to_token_stream().to_string();
@@ -1315,7 +1329,7 @@ fn parse_field_attrs(
                          skip, skip_insert, skip_update, relationship, alias, validation_alias, \
                          serialization_alias, computed, max_digits, decimal_places, default_json, repr, \
                          const_field, column_constraints, column_comment, column_info, sa_column, \
-                         hybrid, sql, discriminator"
+                         hybrid, sql, discriminator, parent"
                     ),
                 ));
             }
@@ -1767,6 +1781,31 @@ fn validate_field_attrs(attrs: &FieldAttrs, field_name: &Ident, field_type: &Typ
             return Err(Error::new_spanned(
                 field_name,
                 "relationship attribute can only be used on Related<T>, RelatedMany<T>, or Lazy<T> fields",
+            ));
+        }
+    }
+
+    if attrs.parent {
+        // Parent field is an embedded model, not a DB column.
+        if attrs.skip
+            || attrs.primary_key
+            || attrs.auto_increment
+            || attrs.unique
+            || attrs.foreign_key.is_some()
+            || attrs.on_delete.is_some()
+            || attrs.on_update.is_some()
+            || attrs.default.is_some()
+            || attrs.sql_type.is_some()
+            || attrs.index.is_some()
+            || attrs.nullable.is_some()
+            || attrs.relationship.is_some()
+            || attrs.computed
+            || attrs.hybrid
+            || attrs.hybrid_sql.is_some()
+        {
+            return Err(Error::new_spanned(
+                field_name,
+                "`parent` cannot be combined with column/relationship attributes; it is an embedded joined-inheritance parent model field",
             ));
         }
     }

@@ -30,6 +30,7 @@ pub fn validate_model(model: &ModelDef) -> Result<(), Error> {
 
     // Cross-field validations
     validate_auto_increment_has_pk(model, &mut errors);
+    validate_joined_inheritance_parent_field(model, &mut errors);
 
     // Combine all errors
     if errors.is_empty() {
@@ -40,6 +41,32 @@ pub fn validate_model(model: &ModelDef) -> Result<(), Error> {
             combined.combine(err);
         }
         Err(combined)
+    }
+}
+
+fn validate_joined_inheritance_parent_field(model: &ModelDef, errors: &mut Vec<Error>) {
+    // Joined inheritance child: `#[sqlmodel(table, inherits = "...")]` (inferred as joined)
+    if !model.config.table {
+        return;
+    }
+    if model.config.inherits.is_none() {
+        return;
+    }
+    if model.config.discriminator_value.is_some() {
+        // STI child: not a joined-table inheritance child.
+        return;
+    }
+    if model.config.inheritance != crate::parse::InheritanceStrategy::Joined {
+        return;
+    }
+
+    let parent_fields: Vec<_> = model.fields.iter().filter(|f| f.parent).collect();
+    if parent_fields.len() != 1 {
+        errors.push(Error::new(
+            model.name.span(),
+            "joined-table inheritance child models must include exactly one `#[sqlmodel(parent)]` field to embed the parent model",
+        ));
+        return;
     }
 }
 

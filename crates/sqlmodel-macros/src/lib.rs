@@ -554,6 +554,10 @@ fn generate_from_row(model: &ModelDef) -> proc_macro2::TokenStream {
     let name = &model.name;
     let mut field_extractions = Vec::new();
 
+    // Support both "plain" rows (SELECT *) and prefixed/aliased rows (e.g. eager loading,
+    // joined inheritance) by looking for `table__col` prefixes.
+    let row_ident = quote::format_ident!("local_row");
+
     for field in model.select_fields() {
         let field_name = &field.name;
         let column_name = &field.column_name;
@@ -561,12 +565,12 @@ fn generate_from_row(model: &ModelDef) -> proc_macro2::TokenStream {
         if parse::is_option_type(&field.ty) {
             // For Option<T> fields, handle NULL gracefully
             field_extractions.push(quote::quote! {
-                #field_name: row.get_named(#column_name).ok()
+                #field_name: #row_ident.get_named(#column_name).ok()
             });
         } else {
             // For required fields, propagate errors
             field_extractions.push(quote::quote! {
-                #field_name: row.get_named(#column_name)?
+                #field_name: #row_ident.get_named(#column_name)?
             });
         }
     }
@@ -593,6 +597,35 @@ fn generate_from_row(model: &ModelDef) -> proc_macro2::TokenStream {
         })
         .collect();
 
+    // Joined-table inheritance parent field hydration.
+    let parent_fields: Vec<_> = model
+        .fields
+        .iter()
+        .filter(|f| f.parent)
+        .map(|f| {
+            let field_name = &f.name;
+            let ty = &f.ty;
+            quote::quote! {
+                #field_name: {
+                    let inh = <Self as sqlmodel_core::Model>::inheritance();
+                    let parent_table = inh.parent.ok_or_else(|| {
+                        sqlmodel_core::Error::Custom(
+                            "joined inheritance parent_table missing in inheritance metadata".to_string(),
+                        )
+                    })?;
+                    if !row.has_prefix(parent_table) {
+                        return Err(sqlmodel_core::Error::Custom(format!(
+                            "expected prefixed parent columns for joined inheritance: {}__*",
+                            parent_table
+                        )));
+                    }
+                    let prow = row.subset_by_prefix(parent_table);
+                    <#ty as sqlmodel_core::Model>::from_row(&prow)?
+                }
+            }
+        })
+        .collect();
+
     // Handle computed fields with Default (they're not in the DB row)
     let computed_fields: Vec<_> = model
         .computed_fields()
@@ -604,10 +637,17 @@ fn generate_from_row(model: &ModelDef) -> proc_macro2::TokenStream {
         .collect();
 
     quote::quote! {
+        let #row_ident = if row.has_prefix(<Self as sqlmodel_core::Model>::TABLE_NAME) {
+            row.subset_by_prefix(<Self as sqlmodel_core::Model>::TABLE_NAME)
+        } else {
+            row.clone()
+        };
+
         Ok(#name {
             #(#field_extractions,)*
             #(#skipped_fields,)*
             #(#relationship_fields,)*
+            #(#parent_fields,)*
             #(#computed_fields,)*
         })
     }
