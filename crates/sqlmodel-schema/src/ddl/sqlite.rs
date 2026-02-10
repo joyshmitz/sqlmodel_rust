@@ -59,64 +59,53 @@ impl DdlGenerator for SqliteDdlGenerator {
                 table,
                 column,
                 to_type,
+                table_info,
                 ..
             } => {
-                // SQLite doesn't support ALTER COLUMN TYPE
-                // This requires table recreation
-                tracing::warn!(
-                    table = %table,
-                    column = %column,
-                    to_type = %to_type,
-                    "SQLite does not support ALTER COLUMN TYPE - requires table recreation"
-                );
-                vec![format!(
-                    "-- SQLite: Cannot change column type directly. Requires table recreation.\n\
-                     -- Changing {}.{} to type {}",
-                    table, column, to_type
-                )]
+                if let Some(table_info) = table_info {
+                    sqlite_alter_column_type_recreate(table_info, column, to_type)
+                } else {
+                    vec![format!(
+                        "SELECT __sqlmodel_error__('SQLite ALTER COLUMN TYPE requires table_info: {}.{} -> {}')",
+                        sanitize_temp_ident(table),
+                        sanitize_temp_ident(column),
+                        sanitize_temp_ident(to_type)
+                    )]
+                }
             }
             SchemaOperation::AlterColumnNullable {
                 table,
                 column,
                 to_nullable,
+                table_info,
                 ..
             } => {
-                // SQLite doesn't support altering nullability
-                tracing::warn!(
-                    table = %table,
-                    column = %column.name,
-                    to_nullable = %to_nullable,
-                    "SQLite does not support ALTER COLUMN nullability - requires table recreation"
-                );
-                let action = if *to_nullable {
-                    "allow NULL"
+                if let Some(table_info) = table_info {
+                    sqlite_alter_column_nullable_recreate(table_info, &column.name, *to_nullable)
                 } else {
-                    "NOT NULL"
-                };
-                vec![format!(
-                    "-- SQLite: Cannot change column nullability directly. Requires table recreation.\n\
-                     -- Setting {}.{} to {}",
-                    table, column.name, action
-                )]
+                    vec![format!(
+                        "SELECT __sqlmodel_error__('SQLite ALTER COLUMN NULLABILITY requires table_info: {}.{}')",
+                        sanitize_temp_ident(table),
+                        sanitize_temp_ident(&column.name)
+                    )]
+                }
             }
             SchemaOperation::AlterColumnDefault {
                 table,
                 column,
                 to_default,
+                table_info,
                 ..
             } => {
-                // SQLite doesn't support altering defaults
-                tracing::warn!(
-                    table = %table,
-                    column = %column,
-                    "SQLite does not support ALTER COLUMN DEFAULT - requires table recreation"
-                );
-                let default_str = to_default.as_deref().unwrap_or("NULL");
-                vec![format!(
-                    "-- SQLite: Cannot change column default directly. Requires table recreation.\n\
-                     -- Setting {}.{} DEFAULT to {}",
-                    table, column, default_str
-                )]
+                if let Some(table_info) = table_info {
+                    sqlite_alter_column_default_recreate(table_info, column, to_default.as_deref())
+                } else {
+                    vec![format!(
+                        "SELECT __sqlmodel_error__('SQLite ALTER COLUMN DEFAULT requires table_info: {}.{}')",
+                        sanitize_temp_ident(table),
+                        sanitize_temp_ident(column)
+                    )]
+                }
             }
             SchemaOperation::RenameColumn { table, from, to } => {
                 vec![generate_rename_column(table, from, to, Dialect::Sqlite)]
@@ -232,6 +221,43 @@ fn sanitize_temp_ident(s: &str) -> String {
     out
 }
 
+fn sqlite_recreate_table(
+    new_table: &TableInfo,
+    tmp_old: &str,
+    insert_cols: &[String],
+    select_exprs: &[String],
+) -> Vec<String> {
+    let table_name = new_table.name.as_str();
+
+    let mut stmts = vec![
+        "PRAGMA foreign_keys=OFF".to_string(),
+        "BEGIN".to_string(),
+        generate_rename_table(table_name, tmp_old, Dialect::Sqlite),
+        super::generate_create_table_with_if_not_exists(new_table, Dialect::Sqlite, false),
+    ];
+
+    stmts.push(format!(
+        "INSERT INTO {} ({}) SELECT {} FROM {}",
+        quote_identifier(table_name, Dialect::Sqlite),
+        insert_cols.join(", "),
+        select_exprs.join(", "),
+        quote_identifier(tmp_old, Dialect::Sqlite)
+    ));
+
+    stmts.push(generate_drop_table(tmp_old, Dialect::Sqlite));
+
+    for idx in &new_table.indexes {
+        if idx.primary {
+            continue;
+        }
+        stmts.push(generate_create_index(table_name, idx, Dialect::Sqlite));
+    }
+
+    stmts.push("COMMIT".to_string());
+    stmts.push("PRAGMA foreign_keys=ON".to_string());
+    stmts
+}
+
 fn sqlite_drop_column_recreate(table: &TableInfo, drop_column: &str) -> Vec<String> {
     let table_name = table.name.as_str();
     let drop_column = drop_column.to_string();
@@ -268,40 +294,110 @@ fn sqlite_drop_column_recreate(table: &TableInfo, drop_column: &str) -> Vec<Stri
         sanitize_temp_ident(&drop_column)
     );
 
-    let mut stmts = vec![
-        "PRAGMA foreign_keys=OFF".to_string(),
-        "BEGIN".to_string(),
-        generate_rename_table(table_name, &tmp_old, Dialect::Sqlite),
-        super::generate_create_table_with_if_not_exists(&new_table, Dialect::Sqlite, false),
-    ];
+    let cols: Vec<String> = new_table
+        .columns
+        .iter()
+        .map(|c| quote_identifier(&c.name, Dialect::Sqlite))
+        .collect();
+    sqlite_recreate_table(&new_table, &tmp_old, &cols, &cols)
+}
+
+fn sqlite_alter_column_type_recreate(
+    table: &TableInfo,
+    column: &str,
+    to_type: &str,
+) -> Vec<String> {
+    let table_name = table.name.as_str();
+    let tmp_old = format!(
+        "__sqlmodel_old_{}_type_{}",
+        sanitize_temp_ident(table_name),
+        sanitize_temp_ident(column)
+    );
+
+    let mut new_table = table.clone();
+    for col in &mut new_table.columns {
+        if col.name == column {
+            col.sql_type = to_type.to_string();
+            col.parsed_type = crate::introspect::ParsedSqlType::parse(to_type);
+        }
+    }
+
+    let insert_cols: Vec<String> = new_table
+        .columns
+        .iter()
+        .map(|c| quote_identifier(&c.name, Dialect::Sqlite))
+        .collect();
+
+    let select_exprs: Vec<String> = new_table
+        .columns
+        .iter()
+        .map(|c| {
+            let q = quote_identifier(&c.name, Dialect::Sqlite);
+            if c.name == column {
+                format!("CAST({} AS {})", q, to_type)
+            } else {
+                q
+            }
+        })
+        .collect();
+
+    sqlite_recreate_table(&new_table, &tmp_old, &insert_cols, &select_exprs)
+}
+
+fn sqlite_alter_column_nullable_recreate(
+    table: &TableInfo,
+    column: &str,
+    to_nullable: bool,
+) -> Vec<String> {
+    let table_name = table.name.as_str();
+    let tmp_old = format!(
+        "__sqlmodel_old_{}_nullable_{}",
+        sanitize_temp_ident(table_name),
+        sanitize_temp_ident(column)
+    );
+
+    let mut new_table = table.clone();
+    for col in &mut new_table.columns {
+        if col.name == column {
+            col.nullable = to_nullable;
+        }
+    }
 
     let cols: Vec<String> = new_table
         .columns
         .iter()
         .map(|c| quote_identifier(&c.name, Dialect::Sqlite))
         .collect();
-    let cols_joined = cols.join(", ");
 
-    stmts.push(format!(
-        "INSERT INTO {} ({}) SELECT {} FROM {}",
-        quote_identifier(table_name, Dialect::Sqlite),
-        cols_joined,
-        cols_joined,
-        quote_identifier(&tmp_old, Dialect::Sqlite)
-    ));
+    sqlite_recreate_table(&new_table, &tmp_old, &cols, &cols)
+}
 
-    stmts.push(generate_drop_table(&tmp_old, Dialect::Sqlite));
+fn sqlite_alter_column_default_recreate(
+    table: &TableInfo,
+    column: &str,
+    to_default: Option<&str>,
+) -> Vec<String> {
+    let table_name = table.name.as_str();
+    let tmp_old = format!(
+        "__sqlmodel_old_{}_default_{}",
+        sanitize_temp_ident(table_name),
+        sanitize_temp_ident(column)
+    );
 
-    for idx in &new_table.indexes {
-        if idx.primary {
-            continue;
+    let mut new_table = table.clone();
+    for col in &mut new_table.columns {
+        if col.name == column {
+            col.default = to_default.map(|s| s.to_string());
         }
-        stmts.push(generate_create_index(table_name, idx, Dialect::Sqlite));
     }
 
-    stmts.push("COMMIT".to_string());
-    stmts.push("PRAGMA foreign_keys=ON".to_string());
-    stmts
+    let cols: Vec<String> = new_table
+        .columns
+        .iter()
+        .map(|c| quote_identifier(&c.name, Dialect::Sqlite))
+        .collect();
+
+    sqlite_recreate_table(&new_table, &tmp_old, &cols, &cols)
 }
 
 // ============================================================================
@@ -466,19 +562,32 @@ mod tests {
     }
 
     #[test]
-    fn test_alter_column_type_unsupported() {
+    fn test_alter_column_type_via_recreate() {
         let ddl = SqliteDdlGenerator;
+        let table = make_table(
+            "heroes",
+            vec![
+                make_column("id", "INTEGER", false),
+                make_column("age", "INTEGER", false),
+            ],
+            vec!["id"],
+        );
         let op = SchemaOperation::AlterColumnType {
             table: "heroes".to_string(),
             column: "age".to_string(),
             from_type: "INTEGER".to_string(),
             to_type: "TEXT".to_string(),
+            table_info: Some(table),
         };
         let stmts = ddl.generate(&op);
 
-        assert_eq!(stmts.len(), 1);
-        assert!(stmts[0].contains("--")); // Comment indicating unsupported
-        assert!(stmts[0].contains("table recreation"));
+        assert!(stmts.iter().any(|s| s.contains("CREATE TABLE \"heroes\"")));
+        assert!(!stmts.iter().any(|s| s.contains("IF NOT EXISTS")));
+        assert!(
+            stmts
+                .iter()
+                .any(|s| s.contains("INSERT INTO") && s.contains("CAST"))
+        );
     }
 
     #[test]

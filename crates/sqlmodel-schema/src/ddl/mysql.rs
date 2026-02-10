@@ -301,6 +301,7 @@ mod tests {
             column: "age".to_string(),
             from_type: "INT".to_string(),
             to_type: "BIGINT".to_string(),
+            table_info: None,
         };
         let stmts = ddl.generate(&op);
 
@@ -317,6 +318,7 @@ mod tests {
             column: "status".to_string(),
             from_default: None,
             to_default: Some("'active'".to_string()),
+            table_info: None,
         };
         let stmts = ddl.generate(&op);
 
@@ -333,6 +335,7 @@ mod tests {
             column: "status".to_string(),
             from_default: Some("'active'".to_string()),
             to_default: None,
+            table_info: None,
         };
         let stmts = ddl.generate(&op);
 

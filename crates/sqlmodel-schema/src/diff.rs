@@ -56,6 +56,7 @@ pub enum SchemaOperation {
         column: String,
         from_type: String,
         to_type: String,
+        table_info: Option<TableInfo>,
     },
     /// Change a column's nullability.
     AlterColumnNullable {
@@ -63,6 +64,7 @@ pub enum SchemaOperation {
         column: ColumnInfo,
         from_nullable: bool,
         to_nullable: bool,
+        table_info: Option<TableInfo>,
     },
     /// Change a column's default value.
     AlterColumnDefault {
@@ -70,6 +72,7 @@ pub enum SchemaOperation {
         column: String,
         from_default: Option<String>,
         to_default: Option<String>,
+        table_info: Option<TableInfo>,
     },
     /// Rename a column.
     RenameColumn {
@@ -142,17 +145,20 @@ impl SchemaOperation {
                 column,
                 from_type,
                 to_type,
+                ..
             } => Some(SchemaOperation::AlterColumnType {
                 table: table.clone(),
                 column: column.clone(),
                 from_type: to_type.clone(),
                 to_type: from_type.clone(),
+                table_info: None,
             }),
             SchemaOperation::AlterColumnNullable {
                 table,
                 column,
                 from_nullable,
                 to_nullable,
+                ..
             } => Some(SchemaOperation::AlterColumnNullable {
                 table: table.clone(),
                 column: {
@@ -162,17 +168,20 @@ impl SchemaOperation {
                 },
                 from_nullable: *to_nullable,
                 to_nullable: *from_nullable,
+                table_info: None,
             }),
             SchemaOperation::AlterColumnDefault {
                 table,
                 column,
                 from_default,
                 to_default,
+                ..
             } => Some(SchemaOperation::AlterColumnDefault {
                 table: table.clone(),
                 column: column.clone(),
                 from_default: to_default.clone(),
                 to_default: from_default.clone(),
+                table_info: None,
             }),
             SchemaOperation::RenameColumn { table, from, to } => {
                 Some(SchemaOperation::RenameColumn {
@@ -604,19 +613,20 @@ fn diff_columns(
     // Changed columns
     for (name, expected_col) in &expected_map {
         if let Some(current_col) = current_map.get(name) {
-            diff_column_details(table, current_col, expected_col, dialect, diff);
+            diff_column_details(current_table, current_col, expected_col, dialect, diff);
         }
     }
 }
 
 /// Compare column details.
 fn diff_column_details(
-    table: &str,
+    current_table: &TableInfo,
     current: &ColumnInfo,
     expected: &ColumnInfo,
     dialect: Dialect,
     diff: &mut SchemaDiff,
 ) {
+    let table = current_table.name.as_str();
     let col = &current.name;
 
     // Type change (normalize for comparison)
@@ -630,6 +640,7 @@ fn diff_column_details(
                 column: col.clone(),
                 from_type: current.sql_type.clone(),
                 to_type: expected.sql_type.clone(),
+                table_info: Some(current_table.clone()),
             },
             WarningSeverity::Warning,
             format!(
@@ -646,6 +657,7 @@ fn diff_column_details(
             column: (*expected).clone(),
             from_nullable: current.nullable,
             to_nullable: expected.nullable,
+            table_info: Some(current_table.clone()),
         });
 
         if !expected.nullable {
@@ -667,6 +679,7 @@ fn diff_column_details(
             column: col.clone(),
             from_default: current.default.clone(),
             to_default: expected.default.clone(),
+            table_info: Some(current_table.clone()),
         });
     }
 }
@@ -1470,6 +1483,7 @@ mod tests {
                 column: "age".to_string(),
                 from_type: "TEXT".to_string(),
                 to_type: "INTEGER".to_string(),
+                table_info: None,
             }
             .is_destructive()
         );
@@ -1493,6 +1507,7 @@ mod tests {
             column: "age".to_string(),
             from_type: "TEXT".to_string(),
             to_type: "INTEGER".to_string(),
+            table_info: None,
         };
         assert!(
             matches!(op.inverse(), Some(SchemaOperation::AlterColumnType { from_type, to_type, .. }) if from_type == "INTEGER" && to_type == "TEXT")
