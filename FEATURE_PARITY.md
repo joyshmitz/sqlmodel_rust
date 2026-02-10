@@ -62,8 +62,8 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Column name override | `sa_column(name=...)` | `#[sqlmodel(column = "...")]` | ✅ Complete |
 | SQL type override | `Field(sa_type=...)` | `#[sqlmodel(sql_type = "...")]` | ✅ Complete |
 | Max length | `Field(max_length=N)` | `#[sqlmodel(max_length = N)]` | ✅ Complete |
-| Decimal precision | `Field(max_digits=N)` | Use `sql_type = "DECIMAL(p,s)"` | ⚠️ Workaround |
-| Decimal scale | `Field(decimal_places=N)` | Use `sql_type = "DECIMAL(p,s)"` | ⚠️ Workaround |
+| Decimal precision | `Field(max_digits=N)` | `#[sqlmodel(max_digits = N)]` | ✅ Complete |
+| Decimal scale | `Field(decimal_places=N)` | `#[sqlmodel(decimal_places = N)]` | ✅ Complete |
 
 ---
 
@@ -149,8 +149,8 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Primary key constraint | Automatic | Automatic | ✅ Complete |
 | Foreign key constraint | Automatic | Automatic | ✅ Complete |
 | Unique constraint | Automatic | Automatic | ✅ Complete |
-| Migration tracking | Alembic | `MigrationRunner` | ⚠️ Basic |
-| Auto-generate migrations | Alembic | ❌ Not supported | ❌ Excluded |
+| Migration tracking | Alembic | `MigrationRunner` | ✅ Implemented |
+| Auto-generate migrations | Alembic | `schema_diff` + `MigrationWriter` | ✅ Implemented |
 | Database introspection | `inspect(engine)` | Partial | ⚠️ Basic |
 
 ---
@@ -163,7 +163,7 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Model validator | `@model_validator` | `#[validate(model = \"fn_name\")]` | ✅ Complete (explicit, compile-time wired) |
 | Numeric range | `Field(gt=, ge=, lt=, le=)` | `#[validate(min=, max=)]` | ✅ Complete |
 | String length | `Field(min_length=, max_length=)` | `#[validate(min_length=, max_length=)]` | ✅ Complete |
-| Regex pattern | `Field(regex=)` | `#[validate(pattern=)]` (simplified) | ⚠️ Partial |
+| Regex pattern | `Field(regex=)` | `#[validate(pattern=)]` | ✅ Complete |
 | Custom validators | Python functions | `#[validate(custom="fn_name")]` | ✅ Complete |
 
 ---
@@ -277,22 +277,21 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 ### Priority 2 (Nice to Have)
 
 ~~1. **Decimal precision/scale** - For financial applications~~ ✅ **IMPLEMENTED**
-   - `#[sqlmodel(precision = 10, scale = 2)]` is reflected in DDL via `FieldInfo::effective_sql_type()`
+   - `#[sqlmodel(max_digits = 10, decimal_places = 2)]` is reflected in DDL via `FieldInfo::effective_sql_type()`
    - You can still override explicitly via `#[sqlmodel(sql_type = "DECIMAL(10,2)")]`
 
 ~~2. **Full regex validation** - Beyond email/url patterns~~ ✅ **IMPLEMENTED**
    - `#[validate(pattern = "...")]` uses cached runtime compilation + compile-time pattern validation
 
-### Priority 3 (Explicitly Excluded)
+### Priority 3 (No Exclusions)
 
-These features are intentionally NOT being ported:
+This project has **no exclusions** (see `bd-162`). Items previously listed here are either implemented or explicitly tracked as remaining work:
 
-- Lazy loading relationships (use explicit JOINs)
-- Session Unit of Work pattern (explicit transactions)
-- Identity map (no object caching)
-- Generic models
-- Computed fields
-- Auto-migration generation
+- Lazy loading: implemented (`Lazy<T>`, `Session::{load_lazy, load_many}`) (`bd-3lz`)
+- Unit of work + identity map: implemented (`sqlmodel-session`) (`bd-3lz`)
+- Generic models: implemented (see `crates/sqlmodel/src/lib.rs` tests)
+- Computed fields + hybrid properties: implemented (`#[sqlmodel(computed)]`, `Hybrid<T>`) (`bd-1fs`)
+- Migration generation: implemented (`schema_diff` + `MigrationWriter`); remaining gaps tracked under `bd-162`
 
 ---
 
@@ -313,7 +312,7 @@ These features are intentionally NOT being ported:
 
 ## Conclusion
 
-The Rust SQLModel implementation covers the core ORM functionality (Model derive, query building, CRUD operations, transactions, connection pooling, validation) and tracks explicit exclusions separately.
+The Rust SQLModel implementation covers the core ORM functionality (Model derive, query building, CRUD operations, transactions, connection pooling, validation). Remaining parity work is tracked in Beads under `bd-162`.
 
 ### Fully Production-Ready
 
@@ -327,15 +326,9 @@ The Rust SQLModel implementation covers the core ORM functionality (Model derive
 8. **SQL type override** - `#[sqlmodel(sql_type = "...")]` for DDL customization
 9. **Referential actions** - `on_delete` and `on_update` foreign key actions
 
-### Remaining Gaps
+### Remaining Work
 
-1. **Full regex support** - Validation pattern matching is simplified (email, url only)
-2. **Decimal precision/scale** - Use `sql_type` override as workaround
-3. **Model-level validators** - Not planned (use field validators)
-
-### Explicitly Excluded Features
-
-Relationship handling is intentionally different - Rust uses explicit JOINs rather than magic lazy-loading, which provides better performance predictability. See PLAN_TO_PORT_SQLMODEL_TO_RUST.md for the complete list of 15 excluded features.
+All missing/partial features must be represented as explicit Beads tasks under `bd-162`. This document should not list exclusions.
 
 ---
 
