@@ -232,6 +232,7 @@ impl<M: Model> Select<M> {
         let mut params = Vec::new();
         let mut join_info = Vec::new();
         let mut where_clause = self.where_clause.clone();
+        let mut joins = self.joins.clone();
 
         // Single-table inheritance child models should be implicitly filtered by their discriminator.
         if let Some(expr) = sti_discriminator_filter::<M>() {
@@ -239,6 +240,10 @@ impl<M: Model> Select<M> {
                 Some(existing) => existing.and(expr),
                 None => Where::new(expr),
             });
+        }
+
+        if let Some(join) = joined_inheritance_join::<M>() {
+            joins.insert(0, join);
         }
 
         // Collect parent table columns (database column names).
@@ -250,7 +255,7 @@ impl<M: Model> Select<M> {
             sql.push_str("DISTINCT ");
         }
 
-        // Build column list with parent table aliased
+        // Build column list with model's table aliased
         let mut col_parts = Vec::new();
         for col in &parent_cols {
             col_parts.push(format!(
@@ -260,6 +265,14 @@ impl<M: Model> Select<M> {
                 M::TABLE_NAME,
                 col
             ));
+        }
+
+        // For joined inheritance, also project parent-table columns so `#[sqlmodel(parent)]`
+        // hydration can build the embedded parent model from `row.subset_by_prefix(parent_table)`.
+        if let Some((parent_table, parent_fields_fn)) = joined_inheritance_parent::<M>() {
+            let parent_cols: Vec<&str> =
+                parent_fields_fn().iter().map(|f| f.column_name).collect();
+            col_parts.extend(build_aliased_column_parts(parent_table, &parent_cols));
         }
 
         // Add columns for each eagerly loaded relationship
@@ -300,8 +313,8 @@ impl<M: Model> Select<M> {
             }
         }
 
-        // Additional explicit JOINs
-        for join in &self.joins {
+        // Additional explicit JOINs (plus joined-inheritance join if present)
+        for join in &joins {
             sql.push_str(&join.build_with_dialect(dialect, &mut params, 0));
         }
 
@@ -691,6 +704,11 @@ impl<M: Model> Select<M> {
             });
         }
 
+        let mut joins = joins;
+        if let Some(join) = joined_inheritance_join::<M>() {
+            joins.insert(0, join);
+        }
+
         SelectQuery {
             table: M::TABLE_NAME.to_string(),
             columns,
@@ -710,6 +728,7 @@ impl<M: Model> Select<M> {
         let mut sql = String::new();
         let mut params = Vec::new();
         let mut where_clause = self.where_clause.clone();
+        let mut joins = self.joins.clone();
 
         if let Some(expr) = sti_discriminator_filter::<M>() {
             where_clause = Some(match where_clause {
@@ -718,12 +737,16 @@ impl<M: Model> Select<M> {
             });
         }
 
+        if let Some(join) = joined_inheritance_join::<M>() {
+            joins.insert(0, join);
+        }
+
         // SELECT 1 for optimal EXISTS performance
         sql.push_str("SELECT 1 FROM ");
         sql.push_str(M::TABLE_NAME);
 
         // JOINs (if any)
-        for join in &self.joins {
+        for join in &joins {
             sql.push_str(&join.build_with_dialect(dialect, &mut params, 0));
         }
 
