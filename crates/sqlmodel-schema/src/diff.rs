@@ -5,7 +5,8 @@
 //! into alignment.
 
 use crate::introspect::{
-    ColumnInfo, DatabaseSchema, Dialect, ForeignKeyInfo, IndexInfo, TableInfo, UniqueConstraintInfo,
+    ColumnInfo, DatabaseSchema, Dialect, ForeignKeyInfo, IndexInfo, ParsedSqlType, TableInfo,
+    UniqueConstraintInfo,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -392,6 +393,69 @@ impl SchemaDiff {
         self.operations.sort_by_key(|op| op.priority());
     }
 
+    /// SQLite-only: refresh `table_info` snapshots for operations that require table recreation.
+    ///
+    /// The diff can contain multiple SQLite operations for the same table that each require
+    /// recreation (DROP COLUMN / ALTER COLUMN / ADD/DROP PK/FK/UNIQUE). If each op carries the
+    /// original `TableInfo`, later ops become stale once the first recreation is applied.
+    ///
+    /// This pass simulates the operations against an in-memory `TableInfo` per table and updates
+    /// each op's `table_info` to the schema state immediately before that op executes.
+    fn sqlite_refresh_table_infos(&mut self, current: &DatabaseSchema) {
+        let mut state: HashMap<String, TableInfo> = current
+            .tables
+            .iter()
+            .map(|(name, t)| (name.clone(), t.clone()))
+            .collect();
+
+        for op in &mut self.operations {
+            match op {
+                SchemaOperation::CreateTable(t) => {
+                    state.insert(t.name.clone(), t.clone());
+                    continue;
+                }
+                SchemaOperation::DropTable(name) => {
+                    state.remove(name);
+                    continue;
+                }
+                SchemaOperation::RenameTable { from, to } => {
+                    if let Some(mut t) = state.remove(from) {
+                        t.name.clone_from(to);
+                        state.insert(to.clone(), t);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+
+            let Some(table) = op.table().map(str::to_string) else {
+                continue;
+            };
+
+            let before = state.get(&table).cloned();
+
+            match op {
+                SchemaOperation::DropColumn { table_info, .. }
+                | SchemaOperation::AlterColumnType { table_info, .. }
+                | SchemaOperation::AlterColumnNullable { table_info, .. }
+                | SchemaOperation::AlterColumnDefault { table_info, .. }
+                | SchemaOperation::AddPrimaryKey { table_info, .. }
+                | SchemaOperation::DropPrimaryKey { table_info, .. }
+                | SchemaOperation::AddForeignKey { table_info, .. }
+                | SchemaOperation::DropForeignKey { table_info, .. }
+                | SchemaOperation::AddUnique { table_info, .. }
+                | SchemaOperation::DropUnique { table_info, .. } => {
+                    table_info.clone_from(&before);
+                }
+                _ => {}
+            }
+
+            if let Some(table_state) = state.get_mut(&table) {
+                sqlite_apply_op_to_table_info(table_state, op);
+            }
+        }
+    }
+
     /// Add an operation.
     fn add_op(&mut self, op: SchemaOperation) -> usize {
         let index = self.operations.len();
@@ -539,7 +603,129 @@ impl SchemaDiffer {
         // Order operations for safe execution
         diff.order_operations();
 
+        if expected.dialect == Dialect::Sqlite {
+            diff.sqlite_refresh_table_infos(current);
+        }
+
         diff
+    }
+}
+
+fn sqlite_apply_op_to_table_info(table: &mut TableInfo, op: &SchemaOperation) {
+    match op {
+        SchemaOperation::AddColumn { column, .. } => {
+            table.columns.push(column.clone());
+        }
+        SchemaOperation::DropColumn { column, .. } => {
+            table.columns.retain(|c| c.name != *column);
+            table.primary_key.retain(|c| c != column);
+            table.foreign_keys.retain(|fk| fk.column != *column);
+            table
+                .unique_constraints
+                .retain(|uc| !uc.columns.iter().any(|c| c == column));
+            table
+                .indexes
+                .retain(|idx| !idx.columns.iter().any(|c| c == column));
+        }
+        SchemaOperation::AlterColumnType {
+            column, to_type, ..
+        } => {
+            if let Some(col) = table.columns.iter_mut().find(|c| c.name == *column) {
+                col.sql_type.clone_from(to_type);
+                col.parsed_type = ParsedSqlType::parse(to_type);
+            }
+        }
+        SchemaOperation::AlterColumnNullable {
+            column,
+            to_nullable,
+            ..
+        } => {
+            if let Some(col) = table.columns.iter_mut().find(|c| c.name == column.name) {
+                col.nullable = *to_nullable;
+            }
+        }
+        SchemaOperation::AlterColumnDefault {
+            column, to_default, ..
+        } => {
+            if let Some(col) = table.columns.iter_mut().find(|c| c.name == *column) {
+                col.default.clone_from(to_default);
+            }
+        }
+        SchemaOperation::RenameColumn { from, to, .. } => {
+            if let Some(col) = table.columns.iter_mut().find(|c| c.name == *from) {
+                col.name.clone_from(to);
+            }
+            for pk in &mut table.primary_key {
+                if pk == from {
+                    pk.clone_from(to);
+                }
+            }
+            for fk in &mut table.foreign_keys {
+                if fk.column == *from {
+                    fk.column.clone_from(to);
+                }
+            }
+            for uc in &mut table.unique_constraints {
+                for c in &mut uc.columns {
+                    if c == from {
+                        c.clone_from(to);
+                    }
+                }
+            }
+            for idx in &mut table.indexes {
+                for c in &mut idx.columns {
+                    if c == from {
+                        c.clone_from(to);
+                    }
+                }
+            }
+        }
+        SchemaOperation::AddPrimaryKey { columns, .. } => {
+            table.primary_key.clone_from(columns);
+            for col in &mut table.columns {
+                col.primary_key = table.primary_key.iter().any(|c| c == &col.name);
+            }
+        }
+        SchemaOperation::DropPrimaryKey { .. } => {
+            table.primary_key.clear();
+            for col in &mut table.columns {
+                col.primary_key = false;
+            }
+        }
+        SchemaOperation::AddForeignKey { fk, .. } => {
+            let name = fk_effective_name(&table.name, fk);
+            table
+                .foreign_keys
+                .retain(|existing| fk_effective_name(&table.name, existing) != name);
+            table.foreign_keys.push(fk.clone());
+        }
+        SchemaOperation::DropForeignKey { name, .. } => {
+            table
+                .foreign_keys
+                .retain(|fk| fk_effective_name(&table.name, fk) != *name);
+        }
+        SchemaOperation::AddUnique { constraint, .. } => {
+            let name = unique_effective_name(&table.name, constraint);
+            table
+                .unique_constraints
+                .retain(|existing| unique_effective_name(&table.name, existing) != name);
+            table.unique_constraints.push(constraint.clone());
+        }
+        SchemaOperation::DropUnique { name, .. } => {
+            table
+                .unique_constraints
+                .retain(|uc| unique_effective_name(&table.name, uc) != *name);
+        }
+        SchemaOperation::CreateIndex { index, .. } => {
+            table.indexes.retain(|i| i.name != index.name);
+            table.indexes.push(index.clone());
+        }
+        SchemaOperation::DropIndex { name, .. } => {
+            table.indexes.retain(|i| i.name != *name);
+        }
+        SchemaOperation::CreateTable(_)
+        | SchemaOperation::DropTable(_)
+        | SchemaOperation::RenameTable { .. } => {}
     }
 }
 
@@ -1303,6 +1489,65 @@ mod tests {
         assert!(diff.operations.iter().any(
             |op| matches!(op, SchemaOperation::DropColumn { table, column, table_info: Some(_), .. } if table == "heroes" && column == "old_field")
         ));
+    }
+
+    #[test]
+    fn test_sqlite_refreshes_table_info_for_multiple_recreate_ops_on_same_table() {
+        let mut current = DatabaseSchema::new(Dialect::Sqlite);
+        current.tables.insert(
+            "heroes".to_string(),
+            make_table(
+                "heroes",
+                vec![
+                    make_column("id", "INTEGER", false),
+                    make_column("old_field", "TEXT", true),
+                    make_column("name", "TEXT", false),
+                ],
+            ),
+        );
+
+        let mut expected = DatabaseSchema::new(Dialect::Sqlite);
+        let mut name = make_column("name", "TEXT", false);
+        name.default = Some("'anon'".to_string());
+        expected.tables.insert(
+            "heroes".to_string(),
+            make_table("heroes", vec![make_column("id", "INTEGER", false), name]),
+        );
+
+        let diff = schema_diff(&current, &expected);
+
+        // We should have both a DROP COLUMN and an ALTER DEFAULT (both require SQLite recreate).
+        assert!(
+            diff.operations.iter().any(|op| matches!(
+                op,
+                SchemaOperation::DropColumn { table, column, .. } if table == "heroes" && column == "old_field"
+            )),
+            "Expected DropColumn(old_field) op"
+        );
+
+        let alter_default_table_info = diff.operations.iter().find_map(|op| match op {
+            SchemaOperation::AlterColumnDefault {
+                table,
+                column,
+                to_default,
+                table_info,
+                ..
+            } if table == "heroes"
+                && column == "name"
+                && to_default.as_deref() == Some("'anon'") =>
+            {
+                table_info.as_ref()
+            }
+            _ => None,
+        });
+        let table_info =
+            alter_default_table_info.expect("Expected AlterColumnDefault(name) op with table_info");
+
+        // The ALTER op's table_info should reflect the DROP op having already removed old_field.
+        assert!(
+            table_info.column("old_field").is_none(),
+            "Expected stale column to be absent from refreshed table_info"
+        );
     }
 
     #[test]
