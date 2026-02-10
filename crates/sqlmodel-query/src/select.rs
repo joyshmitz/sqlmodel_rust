@@ -19,8 +19,8 @@ fn sti_discriminator_filter<M: Model>() -> Option<Expr> {
     }
 }
 
-fn joined_inheritance_parent<M: Model>() -> Option<(&'static str, fn() -> &'static [sqlmodel_core::FieldInfo])>
-{
+fn joined_inheritance_parent<M: Model>()
+-> Option<(&'static str, fn() -> &'static [sqlmodel_core::FieldInfo])> {
     let inh = M::inheritance();
     if inh.strategy != sqlmodel_core::InheritanceStrategy::Joined {
         return None;
@@ -39,12 +39,9 @@ fn joined_inheritance_join<M: Model>() -> Option<Join> {
         return None;
     }
 
-    let mut on = Expr::qualified(M::TABLE_NAME, pks[0])
-        .eq(Expr::qualified(parent_table, pks[0]));
+    let mut on = Expr::qualified(M::TABLE_NAME, pks[0]).eq(Expr::qualified(parent_table, pks[0]));
     for pk in &pks[1..] {
-        on = on.and(
-            Expr::qualified(M::TABLE_NAME, *pk).eq(Expr::qualified(parent_table, *pk)),
-        );
+        on = on.and(Expr::qualified(M::TABLE_NAME, *pk).eq(Expr::qualified(parent_table, *pk)));
     }
 
     Some(Join::inner(parent_table, on))
@@ -270,8 +267,7 @@ impl<M: Model> Select<M> {
         // For joined inheritance, also project parent-table columns so `#[sqlmodel(parent)]`
         // hydration can build the embedded parent model from `row.subset_by_prefix(parent_table)`.
         if let Some((parent_table, parent_fields_fn)) = joined_inheritance_parent::<M>() {
-            let parent_cols: Vec<&str> =
-                parent_fields_fn().iter().map(|f| f.column_name).collect();
+            let parent_cols: Vec<&str> = parent_fields_fn().iter().map(|f| f.column_name).collect();
             col_parts.extend(build_aliased_column_parts(parent_table, &parent_cols));
         }
 
@@ -288,8 +284,10 @@ impl<M: Model> Select<M> {
 
                     // Add aliased columns for related table so callers can use
                     // `row.subset_by_prefix(rel.related_table)` deterministically.
-                    let related_cols: Vec<&str> =
-                        (rel.related_fields_fn)().iter().map(|f| f.column_name).collect();
+                    let related_cols: Vec<&str> = (rel.related_fields_fn)()
+                        .iter()
+                        .map(|f| f.column_name)
+                        .collect();
                     col_parts.extend(build_aliased_column_parts(rel.related_table, &related_cols));
                 }
             }
@@ -1001,6 +999,96 @@ mod tests {
             params,
             vec![Value::Bool(true), Value::Text("manager".to_string())]
         );
+    }
+
+    #[derive(Debug, Clone)]
+    struct JoinedParent;
+
+    impl Model for JoinedParent {
+        const TABLE_NAME: &'static str = "persons";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            static FIELDS: &[FieldInfo] = &[
+                FieldInfo::new("id", "id", sqlmodel_core::SqlType::BigInt).primary_key(true),
+                FieldInfo::new("name", "name", sqlmodel_core::SqlType::Text),
+            ];
+            FIELDS
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            Vec::new()
+        }
+
+        fn from_row(_row: &Row) -> Result<Self> {
+            Err(Error::Custom("not used in tests".to_string()))
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            Vec::new()
+        }
+
+        fn is_new(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct JoinedChild;
+
+    impl Model for JoinedChild {
+        const TABLE_NAME: &'static str = "employees";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            static FIELDS: &[FieldInfo] = &[
+                FieldInfo::new("id", "id", sqlmodel_core::SqlType::BigInt).primary_key(true),
+                FieldInfo::new("dept", "department", sqlmodel_core::SqlType::Text),
+            ];
+            FIELDS
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            Vec::new()
+        }
+
+        fn from_row(_row: &Row) -> Result<Self> {
+            Err(Error::Custom("not used in tests".to_string()))
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            Vec::new()
+        }
+
+        fn is_new(&self) -> bool {
+            true
+        }
+
+        fn inheritance() -> InheritanceInfo {
+            InheritanceInfo {
+                strategy: InheritanceStrategy::Joined,
+                parent: Some("persons"),
+                parent_fields_fn: Some(<JoinedParent as Model>::fields),
+                discriminator_column: None,
+                discriminator_value: None,
+            }
+        }
+    }
+
+    #[test]
+    fn test_joined_inheritance_child_select_projects_parent_and_joins() {
+        let query = Select::<JoinedChild>::new();
+        let (sql, params) = query.build();
+
+        assert!(params.is_empty());
+        assert!(sql.starts_with("SELECT "));
+        assert!(sql.contains("employees.id AS employees__id"));
+        assert!(sql.contains("employees.department AS employees__department"));
+        assert!(sql.contains("persons.id AS persons__id"));
+        assert!(sql.contains("persons.name AS persons__name"));
+        assert!(sql.contains(
+            "FROM employees INNER JOIN persons ON \"employees\".\"id\" = \"persons\".\"id\""
+        ));
     }
 
     #[test]
