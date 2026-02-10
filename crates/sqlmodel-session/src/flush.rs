@@ -61,27 +61,27 @@ pub enum LinkTableOp {
     Link {
         /// Link table name.
         table: String,
-        /// Local (parent) column name.
-        local_column: String,
-        /// Local (parent) PK value.
-        local_value: Value,
-        /// Remote (child) column name.
-        remote_column: String,
-        /// Remote (child) PK value.
-        remote_value: Value,
+        /// Local (parent) column names.
+        local_columns: Vec<String>,
+        /// Local (parent) PK values (must match local_columns).
+        local_values: Vec<Value>,
+        /// Remote (child) column names.
+        remote_columns: Vec<String>,
+        /// Remote (child) PK values (must match remote_columns).
+        remote_values: Vec<Value>,
     },
     /// Delete a link (relationship).
     Unlink {
         /// Link table name.
         table: String,
-        /// Local (parent) column name.
-        local_column: String,
-        /// Local (parent) PK value.
-        local_value: Value,
-        /// Remote (child) column name.
-        remote_column: String,
-        /// Remote (child) PK value.
-        remote_value: Value,
+        /// Local (parent) column names.
+        local_columns: Vec<String>,
+        /// Local (parent) PK values (must match local_columns).
+        local_values: Vec<Value>,
+        /// Remote (child) column names.
+        remote_columns: Vec<String>,
+        /// Remote (child) PK values (must match remote_columns).
+        remote_values: Vec<Value>,
     },
 }
 
@@ -94,13 +94,13 @@ impl LinkTableOp {
         remote_column: impl Into<String>,
         remote_value: Value,
     ) -> Self {
-        Self::Link {
-            table: table.into(),
-            local_column: local_column.into(),
-            local_value,
-            remote_column: remote_column.into(),
-            remote_value,
-        }
+        Self::link_multi(
+            table,
+            vec![local_column.into()],
+            vec![local_value],
+            vec![remote_column.into()],
+            vec![remote_value],
+        )
     }
 
     /// Create an unlink operation.
@@ -111,12 +111,46 @@ impl LinkTableOp {
         remote_column: impl Into<String>,
         remote_value: Value,
     ) -> Self {
+        Self::unlink_multi(
+            table,
+            vec![local_column.into()],
+            vec![local_value],
+            vec![remote_column.into()],
+            vec![remote_value],
+        )
+    }
+
+    /// Create a link operation for composite keys.
+    pub fn link_multi(
+        table: impl Into<String>,
+        local_columns: Vec<String>,
+        local_values: Vec<Value>,
+        remote_columns: Vec<String>,
+        remote_values: Vec<Value>,
+    ) -> Self {
+        Self::Link {
+            table: table.into(),
+            local_columns,
+            local_values,
+            remote_columns,
+            remote_values,
+        }
+    }
+
+    /// Create an unlink operation for composite keys.
+    pub fn unlink_multi(
+        table: impl Into<String>,
+        local_columns: Vec<String>,
+        local_values: Vec<Value>,
+        remote_columns: Vec<String>,
+        remote_values: Vec<Value>,
+    ) -> Self {
         Self::Unlink {
             table: table.into(),
-            local_column: local_column.into(),
-            local_value,
-            remote_column: remote_column.into(),
-            remote_value,
+            local_columns,
+            local_values,
+            remote_columns,
+            remote_values,
         }
     }
 
@@ -145,25 +179,38 @@ impl LinkTableOp {
         match self {
             LinkTableOp::Link {
                 table,
-                local_column,
-                remote_column,
+                local_columns,
+                remote_columns,
                 ..
             } => format!(
-                "INSERT INTO {} ({}, {}) VALUES ($1, $2)",
+                "INSERT INTO {} ({}) VALUES ({})",
                 quote_ident(table),
-                quote_ident(local_column),
-                quote_ident(remote_column)
+                local_columns
+                    .iter()
+                    .chain(remote_columns.iter())
+                    .map(|c| quote_ident(c))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                (1..=(local_columns.len() + remote_columns.len()))
+                    .map(|i| format!("${}", i))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             LinkTableOp::Unlink {
                 table,
-                local_column,
-                remote_column,
+                local_columns,
+                remote_columns,
                 ..
             } => format!(
-                "DELETE FROM {} WHERE {} = $1 AND {} = $2",
+                "DELETE FROM {} WHERE {}",
                 quote_ident(table),
-                quote_ident(local_column),
-                quote_ident(remote_column)
+                local_columns
+                    .iter()
+                    .chain(remote_columns.iter())
+                    .enumerate()
+                    .map(|(i, c)| format!("{} = ${}", quote_ident(c), i + 1))
+                    .collect::<Vec<_>>()
+                    .join(" AND ")
             ),
         }
     }
@@ -171,42 +218,87 @@ impl LinkTableOp {
     /// Execute this link table operation.
     #[tracing::instrument(level = "debug", skip(cx, conn))]
     pub async fn execute<C: Connection>(&self, cx: &Cx, conn: &C) -> Outcome<(), Error> {
+        let dialect = conn.dialect();
         match self {
             LinkTableOp::Link {
                 table,
-                local_column,
-                local_value,
-                remote_column,
-                remote_value,
+                local_columns,
+                local_values,
+                remote_columns,
+                remote_values,
             } => {
+                if local_columns.len() != local_values.len()
+                    || remote_columns.len() != remote_values.len()
+                {
+                    return Outcome::Err(Error::Custom(
+                        "link op columns/values length mismatch".to_string(),
+                    ));
+                }
+
+                let mut params: Vec<Value> =
+                    Vec::with_capacity(local_values.len() + remote_values.len());
+                params.extend(local_values.iter().cloned());
+                params.extend(remote_values.iter().cloned());
+
+                let col_list = local_columns
+                    .iter()
+                    .chain(remote_columns.iter())
+                    .map(|c| dialect.quote_identifier(c))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let placeholders = (1..=params.len())
+                    .map(|i| dialect.placeholder(i))
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 let sql = format!(
-                    "INSERT INTO {} ({}, {}) VALUES ($1, $2)",
-                    quote_ident(table),
-                    quote_ident(local_column),
-                    quote_ident(remote_column)
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    dialect.quote_identifier(table),
+                    col_list,
+                    placeholders
                 );
                 tracing::trace!(sql = %sql, "Executing link INSERT");
-                conn.execute(cx, &sql, &[local_value.clone(), remote_value.clone()])
-                    .await
-                    .map(|_| ())
+                conn.execute(cx, &sql, &params).await.map(|_| ())
             }
             LinkTableOp::Unlink {
                 table,
-                local_column,
-                local_value,
-                remote_column,
-                remote_value,
+                local_columns,
+                local_values,
+                remote_columns,
+                remote_values,
             } => {
+                if local_columns.len() != local_values.len()
+                    || remote_columns.len() != remote_values.len()
+                {
+                    return Outcome::Err(Error::Custom(
+                        "unlink op columns/values length mismatch".to_string(),
+                    ));
+                }
+
+                let mut params: Vec<Value> =
+                    Vec::with_capacity(local_values.len() + remote_values.len());
+                params.extend(local_values.iter().cloned());
+                params.extend(remote_values.iter().cloned());
+
+                let where_clause = local_columns
+                    .iter()
+                    .chain(remote_columns.iter())
+                    .enumerate()
+                    .map(|(i, c)| {
+                        format!(
+                            "{} = {}",
+                            dialect.quote_identifier(c),
+                            dialect.placeholder(i + 1)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" AND ");
                 let sql = format!(
-                    "DELETE FROM {} WHERE {} = $1 AND {} = $2",
-                    quote_ident(table),
-                    quote_ident(local_column),
-                    quote_ident(remote_column)
+                    "DELETE FROM {} WHERE {}",
+                    dialect.quote_identifier(table),
+                    where_clause
                 );
                 tracing::trace!(sql = %sql, "Executing link DELETE");
-                conn.execute(cx, &sql, &[local_value.clone(), remote_value.clone()])
-                    .await
-                    .map(|_| ())
+                conn.execute(cx, &sql, &params).await.map(|_| ())
             }
         }
     }
@@ -1110,16 +1202,16 @@ mod tests {
         match op {
             LinkTableOp::Link {
                 table,
-                local_column,
-                local_value,
-                remote_column,
-                remote_value,
+                local_columns,
+                local_values,
+                remote_columns,
+                remote_values,
             } => {
                 assert_eq!(table, "hero_powers");
-                assert_eq!(local_column, "hero_id");
-                assert_eq!(local_value, Value::BigInt(1));
-                assert_eq!(remote_column, "power_id");
-                assert_eq!(remote_value, Value::BigInt(5));
+                assert_eq!(local_columns, vec!["hero_id".to_string()]);
+                assert_eq!(local_values, vec![Value::BigInt(1)]);
+                assert_eq!(remote_columns, vec!["power_id".to_string()]);
+                assert_eq!(remote_values, vec![Value::BigInt(5)]);
             }
             LinkTableOp::Unlink { .. } => std::panic::panic_any("Expected Link variant"),
         }
@@ -1138,16 +1230,16 @@ mod tests {
         match op {
             LinkTableOp::Unlink {
                 table,
-                local_column,
-                local_value,
-                remote_column,
-                remote_value,
+                local_columns,
+                local_values,
+                remote_columns,
+                remote_values,
             } => {
                 assert_eq!(table, "hero_powers");
-                assert_eq!(local_column, "hero_id");
-                assert_eq!(local_value, Value::BigInt(1));
-                assert_eq!(remote_column, "power_id");
-                assert_eq!(remote_value, Value::BigInt(5));
+                assert_eq!(local_columns, vec!["hero_id".to_string()]);
+                assert_eq!(local_values, vec![Value::BigInt(1)]);
+                assert_eq!(remote_columns, vec!["power_id".to_string()]);
+                assert_eq!(remote_values, vec![Value::BigInt(5)]);
             }
             LinkTableOp::Link { .. } => std::panic::panic_any("Expected Unlink variant"),
         }
@@ -1203,14 +1295,14 @@ mod tests {
             (
                 LinkTableOp::Link {
                     table: t1,
-                    local_value: lv1,
-                    remote_value: rv1,
+                    local_values: lv1,
+                    remote_values: rv1,
                     ..
                 },
                 LinkTableOp::Link {
                     table: t2,
-                    local_value: lv2,
-                    remote_value: rv2,
+                    local_values: lv2,
+                    remote_values: rv2,
                     ..
                 },
             ) => {
@@ -1281,12 +1373,12 @@ mod tests {
 
         match op_str {
             LinkTableOp::Link {
-                local_value,
-                remote_value,
+                local_values,
+                remote_values,
                 ..
             } => {
-                assert!(matches!(local_value, Value::Text(_)));
-                assert!(matches!(remote_value, Value::Text(_)));
+                assert!(matches!(local_values.first(), Some(Value::Text(_))));
+                assert!(matches!(remote_values.first(), Some(Value::Text(_))));
             }
             LinkTableOp::Unlink { .. } => std::panic::panic_any("Expected Link"),
         }
@@ -1302,12 +1394,12 @@ mod tests {
 
         match op_int {
             LinkTableOp::Link {
-                local_value,
-                remote_value,
+                local_values,
+                remote_values,
                 ..
             } => {
-                assert!(matches!(local_value, Value::Int(_)));
-                assert!(matches!(remote_value, Value::Int(_)));
+                assert!(matches!(local_values.first(), Some(Value::Int(_))));
+                assert!(matches!(remote_values.first(), Some(Value::Int(_))));
             }
             LinkTableOp::Unlink { .. } => std::panic::panic_any("Expected Link"),
         }

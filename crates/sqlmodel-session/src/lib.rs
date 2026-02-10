@@ -1340,7 +1340,9 @@ impl<C: Connection> Session<C> {
             HashMap::new();
         let mut cascade_child_deletes_composite: HashMap<CascadeChildDeleteKey, Vec<Vec<Value>>> =
             HashMap::new();
-        let mut cascade_link_deletes: HashMap<(&'static str, &'static str), Vec<Value>> =
+        let mut cascade_link_deletes_single: HashMap<(&'static str, &'static str), Vec<Value>> =
+            HashMap::new();
+        let mut cascade_link_deletes_composite: HashMap<CascadeChildDeleteKey, Vec<Vec<Value>>> =
             HashMap::new();
 
         for key in &deletes {
@@ -1395,14 +1397,27 @@ impl<C: Connection> Session<C> {
                         let Some(link) = rel.link_table else {
                             continue;
                         };
-                        // Link-table cascades only support single-column parent keys today.
-                        if parent_pk_values.len() != 1 {
+                        let local_cols = link.local_cols();
+                        if local_cols.is_empty() {
                             continue;
                         }
-                        cascade_link_deletes
-                            .entry((link.table_name, link.local_column))
-                            .or_default()
-                            .push(parent_pk_values[0].clone());
+                        if local_cols.len() == 1 && parent_pk_values.len() == 1 {
+                            cascade_link_deletes_single
+                                .entry((link.table_name, local_cols[0]))
+                                .or_default()
+                                .push(parent_pk_values[0].clone());
+                        } else {
+                            if local_cols.len() != parent_pk_values.len() {
+                                continue;
+                            }
+                            cascade_link_deletes_composite
+                                .entry(CascadeChildDeleteKey {
+                                    table: link.table_name,
+                                    fk_cols: local_cols.to_vec(),
+                                })
+                                .or_default()
+                                .push(parent_pk_values.clone());
+                        }
                     }
                     sqlmodel_core::RelationshipKind::ManyToOne => {}
                 }
@@ -1569,7 +1584,7 @@ impl<C: Connection> Session<C> {
         }
 
         // (b) Clean up link-table rows for many-to-many relationships (association rows only).
-        for ((link_table, local_col), mut pks) in cascade_link_deletes {
+        for ((link_table, local_col), mut pks) in cascade_link_deletes_single {
             dedup_by_hash(&mut pks);
             if pks.is_empty() {
                 continue;
@@ -1585,6 +1600,70 @@ impl<C: Connection> Session<C> {
             );
 
             match self.connection.execute(cx, &sql, &pks).await {
+                Outcome::Ok(_) => {}
+                Outcome::Err(e) => {
+                    self.pending_delete = deletes;
+                    return Outcome::Err(e);
+                }
+                Outcome::Cancelled(r) => {
+                    self.pending_delete = deletes;
+                    return Outcome::Cancelled(r);
+                }
+                Outcome::Panicked(p) => {
+                    self.pending_delete = deletes;
+                    return Outcome::Panicked(p);
+                }
+            }
+        }
+
+        // (b2) Clean up link-table rows for composite parent keys using row-value IN.
+        for (key, mut tuples) in cascade_link_deletes_composite {
+            if tuples.is_empty() {
+                continue;
+            }
+
+            let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            tuples.retain(|t| seen.insert(hash_values(t)));
+
+            if tuples.is_empty() {
+                continue;
+            }
+
+            let col_list = key
+                .fk_cols
+                .iter()
+                .map(|c| dialect.quote_identifier(c))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let mut params: Vec<Value> = Vec::with_capacity(tuples.len() * key.fk_cols.len());
+            let mut idx = 1;
+            let tuple_sql: Vec<String> = tuples
+                .iter()
+                .map(|t| {
+                    for v in t {
+                        params.push(v.clone());
+                    }
+                    let inner = (0..key.fk_cols.len())
+                        .map(|_| {
+                            let ph = dialect.placeholder(idx);
+                            idx += 1;
+                            ph
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("({})", inner)
+                })
+                .collect();
+
+            let sql = format!(
+                "DELETE FROM {} WHERE ({}) IN ({})",
+                dialect.quote_identifier(key.table),
+                col_list,
+                tuple_sql.join(", ")
+            );
+
+            match self.connection.execute(cx, &sql, &params).await {
                 Outcome::Ok(_) => {}
                 Outcome::Err(e) => {
                     self.pending_delete = deletes;
@@ -2248,44 +2327,162 @@ impl<C: Connection> Session<C> {
         FA: Fn(&mut P) -> &mut sqlmodel_core::RelatedMany<Child>,
         FP: Fn(&P) -> Value,
     {
-        // Collect all parent PK values
-        let pks: Vec<Value> = objects.iter().map(&parent_pk).collect();
+        self.load_many_to_many_pk(cx, objects, accessor, |p| vec![parent_pk(p)], link_table)
+            .await
+    }
+
+    /// Batch load many-to-many relationships for multiple parent objects using composite keys.
+    ///
+    /// This is the generalized form of `load_many_to_many` that supports composite parent and/or
+    /// child primary keys via `LinkTableInfo::composite(...)`.
+    #[tracing::instrument(level = "debug", skip(self, cx, objects, accessor, parent_pk))]
+    pub async fn load_many_to_many_pk<P, Child, FA, FP>(
+        &mut self,
+        cx: &Cx,
+        objects: &mut [P],
+        accessor: FA,
+        parent_pk: FP,
+        link_table: &sqlmodel_core::LinkTableInfo,
+    ) -> Outcome<usize, Error>
+    where
+        P: Model + 'static,
+        Child: Model + Clone + Send + Sync + Serialize + for<'de> Deserialize<'de> + 'static,
+        FA: Fn(&mut P) -> &mut sqlmodel_core::RelatedMany<Child>,
+        FP: Fn(&P) -> Vec<Value>,
+    {
+        // Collect all parent PK tuples.
+        let mut pk_tuples: Vec<Vec<Value>> = Vec::with_capacity(objects.len());
+        let mut pk_by_index: Vec<(usize, Vec<Value>)> = Vec::new();
+        for (idx, obj) in objects.iter().enumerate() {
+            let pk = parent_pk(obj);
+            pk_tuples.push(pk.clone());
+            pk_by_index.push((idx, pk));
+        }
 
         tracing::info!(
             parent_model = std::any::type_name::<P>(),
             related_model = std::any::type_name::<Child>(),
-            parent_count = pks.len(),
+            parent_count = pk_tuples.len(),
             link_table = link_table.table_name,
             "Batch loading many-to-many relationships"
         );
 
-        if pks.is_empty() {
+        if pk_tuples.is_empty() {
             return Outcome::Ok(0);
         }
 
         // Build query with JOIN through link table (dialect-correct placeholders/quoting):
-        // SELECT child.*, link.local_column as __parent_pk
+        // SELECT child.*, link.<local_cols...> as __parent_pk{N}
         // FROM child
-        // JOIN link ON child.pk = link.remote_column
-        // WHERE link.local_column IN (...)
+        // JOIN link ON child.<pk_cols...> = link.<remote_cols...>
+        // WHERE link.<local_cols...> IN (...)
         let dialect = self.connection.dialect();
-        let child_pk_col = Child::PRIMARY_KEY.first().unwrap_or(&"id");
-        let placeholders: Vec<String> = (1..=pks.len()).map(|i| dialect.placeholder(i)).collect();
+        let local_cols = link_table.local_cols();
+        let remote_cols = link_table.remote_cols();
+        if local_cols.is_empty() || remote_cols.is_empty() {
+            return Outcome::Err(Error::Custom(
+                "link_table must specify local/remote columns".to_string(),
+            ));
+        }
+        if remote_cols.len() != Child::PRIMARY_KEY.len() {
+            return Outcome::Err(Error::Custom(format!(
+                "link_table remote cols count ({}) must match child PRIMARY_KEY len ({})",
+                remote_cols.len(),
+                Child::PRIMARY_KEY.len()
+            )));
+        }
+
         let child_table = dialect.quote_identifier(Child::TABLE_NAME);
         let link_table_q = dialect.quote_identifier(link_table.table_name);
-        let link_local_col = dialect.quote_identifier(link_table.local_column);
-        let link_remote_col = dialect.quote_identifier(link_table.remote_column);
-        let child_pk_q = dialect.quote_identifier(child_pk_col);
+
+        let parent_select_parts: String = local_cols
+            .iter()
+            .enumerate()
+            .map(|(i, col)| {
+                format!(
+                    "{link_table_q}.{} AS __parent_pk{}",
+                    dialect.quote_identifier(col),
+                    i
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        let join_parts: String = remote_cols
+            .iter()
+            .zip(Child::PRIMARY_KEY.iter().copied())
+            .map(|(link_col, child_col)| {
+                format!(
+                    "{child_table}.{} = {link_table_q}.{}",
+                    dialect.quote_identifier(child_col),
+                    dialect.quote_identifier(link_col)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(" AND ");
+
+        let (where_sql, params) = if local_cols.len() == 1 {
+            let mut params: Vec<Value> = Vec::with_capacity(pk_tuples.len());
+            for t in &pk_tuples {
+                if let Some(v) = t.first() {
+                    params.push(v.clone());
+                }
+            }
+            let placeholders: Vec<String> =
+                (1..=params.len()).map(|i| dialect.placeholder(i)).collect();
+            let where_sql = format!(
+                "{link_table_q}.{} IN ({})",
+                dialect.quote_identifier(local_cols[0]),
+                placeholders.join(", ")
+            );
+            (where_sql, params)
+        } else {
+            let mut tuples: Vec<Vec<Value>> = Vec::with_capacity(pk_tuples.len());
+            for t in &pk_tuples {
+                if t.len() == local_cols.len() {
+                    tuples.push(t.clone());
+                }
+            }
+
+            let mut params: Vec<Value> = Vec::with_capacity(tuples.len() * local_cols.len());
+            let mut idx = 1;
+            let tuple_sql: Vec<String> = tuples
+                .iter()
+                .map(|t| {
+                    for v in t {
+                        params.push(v.clone());
+                    }
+                    let inner = (0..local_cols.len())
+                        .map(|_| {
+                            let ph = dialect.placeholder(idx);
+                            idx += 1;
+                            ph
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!("({})", inner)
+                })
+                .collect();
+
+            let col_list = local_cols
+                .iter()
+                .map(|c| format!("{link_table_q}.{}", dialect.quote_identifier(c)))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let where_sql = format!("({}) IN ({})", col_list, tuple_sql.join(", "));
+            (where_sql, params)
+        };
+
         let sql = format!(
-            "SELECT {child_table}.*, {link_table_q}.{link_local_col} AS __parent_pk FROM {child_table} \
-             JOIN {link_table_q} ON {child_table}.{child_pk_q} = {link_table_q}.{link_remote_col} \
-             WHERE {link_table_q}.{link_local_col} IN ({})",
-            placeholders.join(", ")
+            "SELECT {child_table}.*, {parent_select_parts} FROM {child_table} \
+             JOIN {link_table_q} ON {join_parts} \
+             WHERE {where_sql}"
         );
 
         tracing::trace!(sql = %sql, "Many-to-many batch SQL");
 
-        let rows = match self.connection.query(cx, &sql, &pks).await {
+        let rows = match self.connection.query(cx, &sql, &params).await {
             Outcome::Ok(rows) => rows,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -2295,12 +2492,21 @@ impl<C: Connection> Session<C> {
         // Group children by parent PK
         let mut by_parent: HashMap<u64, Vec<Child>> = HashMap::new();
         for row in &rows {
-            // Extract the parent PK from the __parent_pk alias
-            let parent_pk_value: Value = match row.get_by_name("__parent_pk") {
-                Some(v) => v.clone(),
-                None => continue,
-            };
-            let parent_pk_hash = hash_values(std::slice::from_ref(&parent_pk_value));
+            // Extract the parent PK tuple from the __parent_pk{N} aliases.
+            let mut parent_tuple: Vec<Value> = Vec::with_capacity(local_cols.len());
+            let mut missing = false;
+            for i in 0..local_cols.len() {
+                let col = format!("__parent_pk{}", i);
+                let Some(v) = row.get_by_name(&col) else {
+                    missing = true;
+                    break;
+                };
+                parent_tuple.push(v.clone());
+            }
+            if missing {
+                continue;
+            }
+            let parent_pk_hash = hash_values(&parent_tuple);
 
             // Parse the child model
             match Child::from_row(row) {
@@ -2313,15 +2519,18 @@ impl<C: Connection> Session<C> {
 
         // Populate each RelatedMany field
         let mut loaded_count = 0;
-        for obj in objects {
-            let pk = parent_pk(obj);
-            let pk_hash = hash_values(std::slice::from_ref(&pk));
+        for (idx, pk_tuple) in pk_by_index {
+            let pk_hash = hash_values(&pk_tuple);
             // Don't `remove()` here: callers might pass the same parent more than once.
             let children = by_parent.get(&pk_hash).cloned().unwrap_or_default();
             let child_count = children.len();
 
-            let related = accessor(obj);
-            related.set_parent_pk(pk);
+            let related = accessor(&mut objects[idx]);
+            if pk_tuple.len() == 1 {
+                related.set_parent_pk(pk_tuple[0].clone());
+            } else {
+                related.set_parent_pk(Value::Array(pk_tuple.clone()));
+            }
             let _ = related.set_loaded(children);
             loaded_count += child_count;
         }
@@ -2503,37 +2712,81 @@ impl<C: Connection> Session<C> {
         FA: Fn(&mut P) -> &mut sqlmodel_core::RelatedMany<Child>,
         FP: Fn(&P) -> Value,
     {
+        self.flush_related_many_pk(cx, objects, accessor, |p| vec![parent_pk(p)], link_table)
+            .await
+    }
+
+    /// Flush pending link/unlink operations for many-to-many relationships (composite keys).
+    #[tracing::instrument(level = "debug", skip(self, cx, objects, accessor, parent_pk))]
+    pub async fn flush_related_many_pk<P, Child, FA, FP>(
+        &mut self,
+        cx: &Cx,
+        objects: &mut [P],
+        accessor: FA,
+        parent_pk: FP,
+        link_table: &sqlmodel_core::LinkTableInfo,
+    ) -> Outcome<usize, Error>
+    where
+        P: Model + 'static,
+        Child: Model + 'static,
+        FA: Fn(&mut P) -> &mut sqlmodel_core::RelatedMany<Child>,
+        FP: Fn(&P) -> Vec<Value>,
+    {
         let mut ops = Vec::new();
+        let local_cols = link_table.local_cols();
+        let remote_cols = link_table.remote_cols();
+        if local_cols.is_empty() || remote_cols.is_empty() {
+            return Outcome::Err(Error::Custom(
+                "link_table must specify local/remote columns".to_string(),
+            ));
+        }
 
         // Collect pending operations from all objects
         for obj in objects.iter_mut() {
-            let parent_pk_value = parent_pk(obj);
+            let parent_pk_values = parent_pk(obj);
+            if parent_pk_values.len() != local_cols.len() {
+                return Outcome::Err(Error::Custom(format!(
+                    "parent_pk len ({}) must match link_table local cols len ({})",
+                    parent_pk_values.len(),
+                    local_cols.len()
+                )));
+            }
             let related = accessor(obj);
 
             // Collect pending links
             for child_pk_values in related.take_pending_links() {
-                if let Some(child_pk) = child_pk_values.first() {
-                    ops.push(LinkTableOp::link(
-                        link_table.table_name.to_string(),
-                        link_table.local_column.to_string(),
-                        parent_pk_value.clone(),
-                        link_table.remote_column.to_string(),
-                        child_pk.clone(),
-                    ));
+                if child_pk_values.len() != remote_cols.len() {
+                    return Outcome::Err(Error::Custom(format!(
+                        "child pk len ({}) must match link_table remote cols len ({})",
+                        child_pk_values.len(),
+                        remote_cols.len()
+                    )));
                 }
+                ops.push(LinkTableOp::link_multi(
+                    link_table.table_name.to_string(),
+                    local_cols.iter().map(|c| (*c).to_string()).collect(),
+                    parent_pk_values.clone(),
+                    remote_cols.iter().map(|c| (*c).to_string()).collect(),
+                    child_pk_values,
+                ));
             }
 
             // Collect pending unlinks
             for child_pk_values in related.take_pending_unlinks() {
-                if let Some(child_pk) = child_pk_values.first() {
-                    ops.push(LinkTableOp::unlink(
-                        link_table.table_name.to_string(),
-                        link_table.local_column.to_string(),
-                        parent_pk_value.clone(),
-                        link_table.remote_column.to_string(),
-                        child_pk.clone(),
-                    ));
+                if child_pk_values.len() != remote_cols.len() {
+                    return Outcome::Err(Error::Custom(format!(
+                        "child pk len ({}) must match link_table remote cols len ({})",
+                        child_pk_values.len(),
+                        remote_cols.len()
+                    )));
                 }
+                ops.push(LinkTableOp::unlink_multi(
+                    link_table.table_name.to_string(),
+                    local_cols.iter().map(|c| (*c).to_string()).collect(),
+                    parent_pk_values.clone(),
+                    remote_cols.iter().map(|c| (*c).to_string()).collect(),
+                    child_pk_values,
+                ));
             }
         }
 
@@ -4225,6 +4478,289 @@ mod tests {
             !sql0.contains("heroes_composite"),
             "did not expect a child-table delete for passive_deletes"
         );
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct MmChildComposite {
+        id1: i64,
+        id2: i64,
+    }
+
+    impl Model for MmChildComposite {
+        const TABLE_NAME: &'static str = "mm_children";
+        const PRIMARY_KEY: &'static [&'static str] = &["id1", "id2"];
+
+        fn fields() -> &'static [sqlmodel_core::FieldInfo] {
+            &[]
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![
+                ("id1", Value::BigInt(self.id1)),
+                ("id2", Value::BigInt(self.id2)),
+            ]
+        }
+
+        fn from_row(_row: &Row) -> sqlmodel_core::Result<Self> {
+            Ok(Self { id1: 0, id2: 0 })
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            vec![Value::BigInt(self.id1), Value::BigInt(self.id2)]
+        }
+
+        fn is_new(&self) -> bool {
+            false
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct MmParentComposite {
+        id1: i64,
+        id2: i64,
+        children: sqlmodel_core::RelatedMany<MmChildComposite>,
+    }
+
+    impl Model for MmParentComposite {
+        const TABLE_NAME: &'static str = "mm_parents";
+        const PRIMARY_KEY: &'static [&'static str] = &["id1", "id2"];
+        const RELATIONSHIPS: &'static [sqlmodel_core::RelationshipInfo] =
+            &[sqlmodel_core::RelationshipInfo::new(
+                "children",
+                MmChildComposite::TABLE_NAME,
+                sqlmodel_core::RelationshipKind::ManyToMany,
+            )
+            .link_table(sqlmodel_core::LinkTableInfo::composite(
+                "mm_link",
+                &["parent_id1", "parent_id2"],
+                &["child_id1", "child_id2"],
+            ))
+            .cascade_delete(true)];
+
+        fn fields() -> &'static [sqlmodel_core::FieldInfo] {
+            &[]
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![
+                ("id1", Value::BigInt(self.id1)),
+                ("id2", Value::BigInt(self.id2)),
+            ]
+        }
+
+        fn from_row(_row: &Row) -> sqlmodel_core::Result<Self> {
+            Ok(Self {
+                id1: 0,
+                id2: 0,
+                children: sqlmodel_core::RelatedMany::with_link_table(
+                    sqlmodel_core::LinkTableInfo::composite(
+                        "mm_link",
+                        &["parent_id1", "parent_id2"],
+                        &["child_id1", "child_id2"],
+                    ),
+                ),
+            })
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            vec![Value::BigInt(self.id1), Value::BigInt(self.id2)]
+        }
+
+        fn is_new(&self) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn test_flush_cascade_delete_many_to_many_composite_parent_keys_deletes_link_rows_first() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection::new(Arc::clone(&state));
+        let mut session = Session::with_config(
+            conn,
+            SessionConfig {
+                auto_begin: false,
+                auto_flush: false,
+                expire_on_commit: true,
+            },
+        );
+
+        let parent = MmParentComposite {
+            id1: 1,
+            id2: 2,
+            children: sqlmodel_core::RelatedMany::with_link_table(
+                sqlmodel_core::LinkTableInfo::composite(
+                    "mm_link",
+                    &["parent_id1", "parent_id2"],
+                    &["child_id1", "child_id2"],
+                ),
+            ),
+        };
+        let key = ObjectKey::from_model(&parent);
+
+        session.identity_map.insert(
+            key,
+            TrackedObject {
+                object: Box::new(parent.clone()),
+                original_state: None,
+                state: ObjectState::Persistent,
+                table_name: MmParentComposite::TABLE_NAME,
+                column_names: vec!["id1", "id2"],
+                values: vec![Value::BigInt(1), Value::BigInt(2)],
+                pk_columns: vec!["id1", "id2"],
+                pk_values: vec![Value::BigInt(1), Value::BigInt(2)],
+                relationships: MmParentComposite::RELATIONSHIPS,
+                expired_attributes: None,
+            },
+        );
+
+        rt.block_on(async {
+            session.delete(&parent);
+            unwrap_outcome(session.flush(&cx).await);
+            assert_eq!(session.tracked_count(), 0);
+        });
+
+        let guard = state.lock().expect("lock poisoned");
+        assert!(
+            guard.execute_calls >= 2,
+            "expected at least link-table cascade + parent delete"
+        );
+        let (sql0, _params0) = &guard.executed[0];
+        let (sql1, _params1) = &guard.executed[1];
+        assert!(
+            sql0.contains("DELETE") && sql0.contains("mm_link"),
+            "expected first delete to target link table"
+        );
+        assert!(
+            sql0.contains("parent_id1") && sql0.contains("parent_id2"),
+            "expected composite local cols in link delete"
+        );
+        assert!(
+            sql1.contains("DELETE") && sql1.contains("mm_parents"),
+            "expected second delete to target parent table"
+        );
+    }
+
+    #[test]
+    fn test_flush_related_many_composite_link_and_unlink() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection::new(Arc::clone(&state));
+        let mut session = Session::with_config(
+            conn,
+            SessionConfig {
+                auto_begin: false,
+                auto_flush: false,
+                expire_on_commit: true,
+            },
+        );
+
+        let link = sqlmodel_core::LinkTableInfo::composite(
+            "mm_link",
+            &["parent_id1", "parent_id2"],
+            &["child_id1", "child_id2"],
+        );
+
+        let mut parents = vec![MmParentComposite {
+            id1: 1,
+            id2: 2,
+            children: sqlmodel_core::RelatedMany::with_link_table(link),
+        }];
+
+        let child = MmChildComposite { id1: 7, id2: 9 };
+
+        parents[0].children.link(&child);
+        parents[0].children.unlink(&child);
+
+        rt.block_on(async {
+            let n = unwrap_outcome(
+                session
+                    .flush_related_many_pk::<MmParentComposite, MmChildComposite, _, _>(
+                        &cx,
+                        &mut parents,
+                        |p| &mut p.children,
+                        |p| vec![Value::BigInt(p.id1), Value::BigInt(p.id2)],
+                        &link,
+                    )
+                    .await,
+            );
+            assert_eq!(n, 2);
+        });
+
+        let guard = state.lock().expect("lock poisoned");
+        assert_eq!(guard.execute_calls, 2);
+        let (sql0, _params0) = &guard.executed[0];
+        let (sql1, _params1) = &guard.executed[1];
+
+        assert!(sql0.contains("INSERT INTO"));
+        assert!(sql0.contains("mm_link"));
+        assert!(sql0.contains("parent_id1"));
+        assert!(sql0.contains("parent_id2"));
+        assert!(sql0.contains("child_id1"));
+        assert!(sql0.contains("child_id2"));
+        assert!(sql0.contains("$1") && sql0.contains("$4"));
+
+        assert!(sql1.contains("DELETE FROM"));
+        assert!(sql1.contains("mm_link"));
+        assert!(sql1.contains("parent_id1"));
+        assert!(sql1.contains("child_id2"));
+        assert!(sql1.contains("$1") && sql1.contains("$4"));
+    }
+
+    #[test]
+    fn test_load_many_to_many_pk_composite_builds_tuple_where_clause() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection::new(Arc::clone(&state));
+        let mut session = Session::new(conn);
+
+        let link = sqlmodel_core::LinkTableInfo::composite(
+            "mm_link",
+            &["parent_id1", "parent_id2"],
+            &["child_id1", "child_id2"],
+        );
+
+        let mut parents = vec![MmParentComposite {
+            id1: 1,
+            id2: 2,
+            children: sqlmodel_core::RelatedMany::with_link_table(link),
+        }];
+
+        rt.block_on(async {
+            let loaded = unwrap_outcome(
+                session
+                    .load_many_to_many_pk::<MmParentComposite, MmChildComposite, _, _>(
+                        &cx,
+                        &mut parents,
+                        |p| &mut p.children,
+                        |p| vec![Value::BigInt(p.id1), Value::BigInt(p.id2)],
+                        &link,
+                    )
+                    .await,
+            );
+            assert_eq!(loaded, 0);
+        });
+
+        let guard = state.lock().expect("lock poisoned");
+        assert_eq!(guard.query_calls, 1);
+        let sql = guard.last_sql.clone().expect("sql captured");
+        assert!(sql.contains("JOIN"));
+        assert!(sql.contains("mm_link"));
+        assert!(sql.contains("WHERE"));
+        assert!(sql.contains("parent_id1") && sql.contains("parent_id2"));
+        assert!(sql.contains("IN (("), "expected tuple IN clause");
     }
 
     #[test]

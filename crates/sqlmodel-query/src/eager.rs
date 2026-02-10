@@ -182,16 +182,22 @@ pub fn build_join_clause(
             // LEFT JOIN related_table ON link.remote_col = related.pk
             if let Some(link) = &rel.link_table {
                 let local_pk = rel.local_key.unwrap_or("id");
+                let Some(link_local_col) = link.local_cols().first().copied() else {
+                    return (String::new(), params);
+                };
+                let Some(link_remote_col) = link.remote_cols().first().copied() else {
+                    return (String::new(), params);
+                };
                 format!(
                     " LEFT JOIN {} ON {}.{} = {}.{} LEFT JOIN {} ON {}.{} = {}.{}",
                     link.table_name,
                     parent_table,
                     local_pk,
                     link.table_name,
-                    link.local_column,
+                    link_local_col,
                     rel.related_table,
                     link.table_name,
-                    link.remote_column,
+                    link_remote_col,
                     rel.related_table,
                     remote_pk
                 )

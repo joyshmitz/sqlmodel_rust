@@ -37,7 +37,7 @@ Purpose: keep a granular, lossless checklist for parity work (docs, schema, sess
 - [x] Update `Session::flush` cascade planner to handle composite FK tuples for one-to-many/one-to-one child deletes
 - [x] Update passive-deletes orphan detachment to handle composite FK tuples
 - [x] Decide what to do for many-to-many cascades with composite keys
-- [ ] Implement composite link-table support (tracked as `bd-ywnj`)
+- [x] Implement composite link-table support (completed as `bd-ywnj`)
 
 ### 0.3 Tests
 - [x] Add unit test covering composite-key cascade delete ordering (child delete first)
@@ -45,9 +45,40 @@ Purpose: keep a granular, lossless checklist for parity work (docs, schema, sess
 - [x] Audit the new tests to ensure they don't rely on incorrect hardcoded values (IDs, pk values)
 
 ### 0.4 Docs
-- [x] Update `FEATURE_PARITY.md` cascade delete row: composite FK tuples supported for 1-to-many/1-to-1; many-to-many composite still pending
+- [x] Update `FEATURE_PARITY.md` cascade delete row: composite FK tuples + composite many-to-many link-table deletes supported
 
 ### 0.5 Quality Gates (re-run after all edits)
+- [x] `cargo fmt --check`
+- [x] `cargo check --all-targets`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo test -p sqlmodel-session`
+- [x] `ubs --diff --only=rust,toml .` (exit 0)
+
+## 0. Current Focus (2026-02-10): bd-ywnj (composite many-to-many link table keys)
+
+### 0.1 Core Metadata
+- [x] Extend `LinkTableInfo` with composite `local_columns`/`remote_columns` plus `local_cols()`/`remote_cols()` helpers
+- [x] Add `LinkTableInfo::composite(...)` constructor
+
+### 0.2 Session Implementation
+- [x] Update `Session::flush` cascade planner to delete link-table rows for composite parent keys (row-value `IN` tuples)
+- [x] Update `Session::load_many_to_many`:
+- [x] Keep existing single-PK API (backwards compatible)
+- [x] Add `Session::load_many_to_many_pk` supporting composite parent keys and composite child keys (composite JOIN + tuple IN)
+- [x] Update `Session::flush_related_many`:
+- [x] Keep existing single-PK API (backwards compatible)
+- [x] Add `Session::flush_related_many_pk` supporting composite parent keys and composite child keys
+- [x] Make link-table DML dialect-correct: update `LinkTableOp::execute()` to use `conn.dialect()` quoting + placeholders
+
+### 0.3 Tests
+- [x] Unit test: composite many-to-many link-table cascade delete happens before parent delete
+- [x] Unit test: composite `flush_related_many_pk` emits INSERT and DELETE with correct cols/placeholders
+- [x] Unit test: composite `load_many_to_many_pk` builds tuple WHERE + JOIN (SQL assertion only)
+
+### 0.4 Docs
+- [x] Update `FEATURE_PARITY.md`: relationships coverage now 6/6 (cascade delete fully implemented incl composite link tables)
+
+### 0.5 Quality Gates
 - [x] `cargo fmt --check`
 - [x] `cargo check --all-targets`
 - [x] `cargo clippy --all-targets -- -D warnings`

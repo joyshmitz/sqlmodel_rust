@@ -80,6 +80,16 @@ pub struct LinkTableInfo {
 
     /// Column in link table pointing to the remote model (e.g., `"power_id"`).
     pub remote_column: &'static str,
+
+    /// Composite local key columns (for composite PK parents).
+    ///
+    /// If set, this takes precedence over `local_column`.
+    pub local_columns: Option<&'static [&'static str]>,
+
+    /// Composite remote key columns (for composite PK children).
+    ///
+    /// If set, this takes precedence over `remote_column`.
+    pub remote_columns: Option<&'static [&'static str]>,
 }
 
 impl LinkTableInfo {
@@ -94,7 +104,53 @@ impl LinkTableInfo {
             table_name,
             local_column,
             remote_column,
+            local_columns: None,
+            remote_columns: None,
         }
+    }
+
+    /// Create a new composite link-table definition.
+    ///
+    /// Column order matters:
+    /// - `local_columns` must match the parent PK value ordering
+    /// - `remote_columns` must match the child PK value ordering
+    #[must_use]
+    pub const fn composite(
+        table_name: &'static str,
+        local_columns: &'static [&'static str],
+        remote_columns: &'static [&'static str],
+    ) -> Self {
+        Self {
+            table_name,
+            local_column: "",
+            remote_column: "",
+            local_columns: Some(local_columns),
+            remote_columns: Some(remote_columns),
+        }
+    }
+
+    /// Return the local key columns (single or composite).
+    #[must_use]
+    pub fn local_cols(&self) -> &[&'static str] {
+        if let Some(cols) = self.local_columns {
+            return cols;
+        }
+        if self.local_column.is_empty() {
+            return &[];
+        }
+        std::slice::from_ref(&self.local_column)
+    }
+
+    /// Return the remote key columns (single or composite).
+    #[must_use]
+    pub fn remote_cols(&self) -> &[&'static str] {
+        if let Some(cols) = self.remote_columns {
+            return cols;
+        }
+        if self.remote_column.is_empty() {
+            return &[];
+        }
+        std::slice::from_ref(&self.remote_column)
     }
 }
 

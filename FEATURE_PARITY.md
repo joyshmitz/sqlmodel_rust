@@ -2,7 +2,7 @@
 
 This document tracks feature parity between Python SQLModel and Rust SQLModel.
 
-**Last Updated:** 2026-02-10 (Relationships: one-to-many batch loader + cascade delete/orphan tracking + SQLite schema diff/DDL correctness pass)
+**Last Updated:** 2026-02-10 (Relationships: cascade delete/orphan tracking incl composite keys + composite many-to-many link tables)
 
 ---
 
@@ -18,11 +18,11 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Transactions | 6 | 6 | 100% |
 | Schema/DDL | 7 | 8 | 88% |
 | Validation | 5 | 6 | 83% |
-| Relationships | 5 | 6 | 83% (Partial) |
+| Relationships | 6 | 6 | 100% |
 | Serialization | 4 | 4 | 100% |
 | Database Drivers | 3 | 3 | 100% |
 | Connection Pooling | 8 | 8 | 100% |
-| **TOTAL** | **114** | **119** | **96%** |
+| **TOTAL** | **115** | **119** | **97%** |
 
 ---
 
@@ -176,7 +176,7 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Many-to-one | `Relationship()` | `Lazy<T>` / `Related<T>` + `Session::{load_lazy,load_many}` | ✅ Implemented (explicit load/batch-load) |
 | Many-to-many | `Relationship(link_model=)` | `RelatedMany<T>` + `Session::load_many_to_many` + `flush_related_many` | ✅ Implemented |
 | Back populates | `back_populates=` | `Session::{relate_to_one,unrelate_from_one}` helpers + metadata | ✅ Implemented (explicit sync helper) |
-| Cascade delete | `cascade_delete=True` | `Session::flush` uses `RelationshipInfo` to plan explicit dependent DELETEs (Active) and detach loaded children after parent delete (Passive), including composite FK tuples | ⚠️ Partial (many-to-many/link-table composite keys not supported yet) |
+| Cascade delete | `cascade_delete=True` | `Session::flush` uses `RelationshipInfo` to plan explicit dependent DELETEs (Active) and detach loaded children after parent delete (Passive), including composite FK tuples and composite many-to-many link-table deletes | ✅ Implemented (Active emits explicit child/link DELETEs; Passive detaches loaded children) |
 | Lazy loading | Automatic | `Lazy<T>` | ✅ Implemented (explicit, cancel-correct) |
 
 **Note:** Relationships are handled differently in Rust: prefer explicit load/batch-load (`Lazy<T>`, `Session::load_many_to_many`) or explicit JOIN queries rather than implicit N+1 behavior.
