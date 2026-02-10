@@ -127,7 +127,7 @@ impl<'a, M: Model> InsertBuilder<'a, M> {
         let insert_fields: Vec<_> = row
             .iter()
             .map(|(name, value)| {
-                let field = fields.iter().find(|f| f.name == *name);
+                let field = fields.iter().find(|f| f.column_name == *name);
                 if let Some(f) = field {
                     if f.auto_increment && matches!(value, Value::Null) {
                         return (*name, Value::Default);
@@ -366,14 +366,18 @@ impl<'a, M: Model> InsertManyBuilder<'a, M> {
             .iter()
             .filter_map(|field| {
                 if field.auto_increment {
-                    return Some(field.name);
+                    return Some(field.column_name);
                 }
                 let has_value = rows.iter().any(|row| {
                     row.iter()
-                        .find(|(name, _)| name == &field.name)
+                        .find(|(name, _)| name == &field.column_name)
                         .is_some_and(|(_, v)| !matches!(v, Value::Null))
                 });
-                if has_value { Some(field.name) } else { None }
+                if has_value {
+                    Some(field.column_name)
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -390,7 +394,7 @@ impl<'a, M: Model> InsertManyBuilder<'a, M> {
                     .map_or(Value::Null, |(_, v)| v.clone());
 
                 // Map Null auto-increment fields to DEFAULT
-                if let Some(f) = fields.iter().find(|f| f.name == *col) {
+                if let Some(f) = fields.iter().find(|f| f.column_name == *col) {
                     if f.auto_increment && matches!(val, Value::Null) {
                         val = Value::Default;
                     }
@@ -451,14 +455,18 @@ impl<'a, M: Model> InsertManyBuilder<'a, M> {
             .iter()
             .filter_map(|field| {
                 if field.auto_increment {
-                    return Some(field.name);
+                    return Some(field.column_name);
                 }
                 let has_value = rows.iter().any(|row| {
                     row.iter()
-                        .find(|(name, _)| name == &field.name)
+                        .find(|(name, _)| name == &field.column_name)
                         .is_some_and(|(_, v)| !matches!(v, Value::Null))
                 });
-                if has_value { Some(field.name) } else { None }
+                if has_value {
+                    Some(field.column_name)
+                } else {
+                    None
+                }
             })
             .collect();
 
@@ -475,7 +483,7 @@ impl<'a, M: Model> InsertManyBuilder<'a, M> {
                         .map_or(Value::Null, |(_, v)| v.clone());
 
                     // Map Null auto-increment fields to DEFAULT
-                    let field = fields.iter().find(|f| f.name == *col);
+                    let field = fields.iter().find(|f| f.column_name == *col);
                     if let Some(f) = field {
                         if f.auto_increment && matches!(val, Value::Null) {
                             return Value::Default;

@@ -19,6 +19,49 @@ fn sti_discriminator_filter<M: Model>() -> Option<Expr> {
     }
 }
 
+fn joined_inheritance_parent<M: Model>() -> Option<(&'static str, fn() -> &'static [sqlmodel_core::FieldInfo])>
+{
+    let inh = M::inheritance();
+    if inh.strategy != sqlmodel_core::InheritanceStrategy::Joined {
+        return None;
+    }
+    let parent = inh.parent?;
+    let parent_fields_fn = inh.parent_fields_fn?;
+    Some((parent, parent_fields_fn))
+}
+
+fn joined_inheritance_join<M: Model>() -> Option<Join> {
+    let (parent_table, _parent_fields_fn) = joined_inheritance_parent::<M>()?;
+
+    // Join child's PK columns to the parent's PK columns (same names).
+    let pks = M::PRIMARY_KEY;
+    if pks.is_empty() {
+        return None;
+    }
+
+    let mut on = Expr::qualified(M::TABLE_NAME, pks[0])
+        .eq(Expr::qualified(parent_table, pks[0]));
+    for pk in &pks[1..] {
+        on = on.and(
+            Expr::qualified(M::TABLE_NAME, *pk).eq(Expr::qualified(parent_table, *pk)),
+        );
+    }
+
+    Some(Join::inner(parent_table, on))
+}
+
+fn joined_inheritance_select_columns<M: Model>() -> Option<Vec<String>> {
+    let (parent_table, parent_fields_fn) = joined_inheritance_parent::<M>()?;
+
+    let child_cols: Vec<&str> = M::fields().iter().map(|f| f.column_name).collect();
+    let parent_cols: Vec<&str> = parent_fields_fn().iter().map(|f| f.column_name).collect();
+
+    let mut parts = Vec::new();
+    parts.extend(build_aliased_column_parts(M::TABLE_NAME, &child_cols));
+    parts.extend(build_aliased_column_parts(parent_table, &parent_cols));
+    Some(parts)
+}
+
 /// Information about a JOIN for eager loading.
 ///
 /// Used internally to track which relationships are being eagerly loaded
@@ -198,8 +241,8 @@ impl<M: Model> Select<M> {
             });
         }
 
-        // Collect parent table columns
-        let parent_cols: Vec<&str> = M::fields().iter().map(|f| f.name).collect();
+        // Collect parent table columns (database column names).
+        let parent_cols: Vec<&str> = M::fields().iter().map(|f| f.column_name).collect();
 
         // Start with SELECT DISTINCT to avoid duplicates from JOINs
         sql.push_str("SELECT ");
@@ -233,7 +276,7 @@ impl<M: Model> Select<M> {
                     // Add aliased columns for related table so callers can use
                     // `row.subset_by_prefix(rel.related_table)` deterministically.
                     let related_cols: Vec<&str> =
-                        (rel.related_fields_fn)().iter().map(|f| f.name).collect();
+                        (rel.related_fields_fn)().iter().map(|f| f.column_name).collect();
                     col_parts.extend(build_aliased_column_parts(rel.related_table, &related_cols));
                 }
             }
@@ -426,6 +469,7 @@ impl<M: Model> Select<M> {
         let mut sql = String::new();
         let mut params = Vec::new();
         let mut where_clause = self.where_clause.clone();
+        let mut joins = self.joins.clone();
 
         // Single-table inheritance child models should be implicitly filtered by their discriminator.
         if let Some(expr) = sti_discriminator_filter::<M>() {
@@ -435,13 +479,19 @@ impl<M: Model> Select<M> {
             });
         }
 
+        if let Some(join) = joined_inheritance_join::<M>() {
+            joins.insert(0, join);
+        }
+
         // SELECT
         sql.push_str("SELECT ");
         if self.distinct {
             sql.push_str("DISTINCT ");
         }
 
-        if self.columns.is_empty() {
+        if let Some(cols) = joined_inheritance_select_columns::<M>() {
+            sql.push_str(&cols.join(", "));
+        } else if self.columns.is_empty() {
             sql.push('*');
         } else {
             sql.push_str(&self.columns.join(", "));
@@ -452,7 +502,7 @@ impl<M: Model> Select<M> {
         sql.push_str(M::TABLE_NAME);
 
         // JOINs
-        for join in &self.joins {
+        for join in &joins {
             sql.push_str(&join.build_with_dialect(dialect, &mut params, 0));
         }
 
