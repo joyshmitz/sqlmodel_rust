@@ -2,6 +2,31 @@
 
 Purpose: keep a granular, lossless checklist for parity work (docs, schema, session/relationships) without losing track of sub-tasks.
 
+## 0. Current Focus (2026-02-10): bd-3j44 (cascade delete/orphan tracking)
+
+### 0.1 Implementation
+- [x] Add `TrackedObject.relationships: &'static [RelationshipInfo]` and plumb it through object tracking paths in `crates/sqlmodel-session/src/lib.rs`
+- [x] Implement explicit cascade delete planning in `Session::flush` based on `Model::RELATIONSHIPS`:
+- [x] One-to-many / one-to-one: delete child rows by FK when `cascade_delete=true` and `passive_deletes=Active`
+- [x] Many-to-many: delete association rows from the link table when `cascade_delete=true` and `passive_deletes=Active`
+- [x] Passive deletes: do not emit child DELETE SQL when `passive_deletes=Passive`, but detach loaded children from the identity map after successful parent delete (prevents stale reads)
+- [x] Keep behavior cancel-correct: propagate Cancelled/Panicked/Err without losing pending delete bookkeeping
+
+### 0.2 Tests
+- [x] Extend `MockConnection::execute` to record executed SQL/params (for ordering assertions)
+- [x] Add unit test: `test_flush_cascade_delete_one_to_many_deletes_children_first`
+- [x] Add unit test: `test_flush_passive_deletes_does_not_emit_child_delete_but_detaches_children`
+
+### 0.3 Docs
+- [x] Update `FEATURE_PARITY.md` relationships section: cascade delete planner is no longer metadata-only (still partial: single-column PK only)
+
+### 0.4 Quality Gates
+- [x] `cargo fmt --check`
+- [x] `cargo check --all-targets`
+- [x] `cargo clippy --all-targets -- -D warnings`
+- [x] `cargo test -p sqlmodel-session`
+- [x] `ubs --diff --only=rust,toml .` (exit 0)
+
 ## 0. Current Focus (2026-02-10): bd-2lpn (one-to-many batch loader)
 
 ### 0.1 Implementation

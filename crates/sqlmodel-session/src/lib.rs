@@ -438,6 +438,8 @@ struct TrackedObject {
     pk_columns: Vec<&'static str>,
     /// Primary key values (for DELETE/UPDATE WHERE clause).
     pk_values: Vec<Value>,
+    /// Static relationship metadata for this object's model type.
+    relationships: &'static [sqlmodel_core::RelationshipInfo],
     /// Set of expired attribute names (None = all expired, Some(empty) = none expired).
     /// When Some(non-empty), only those specific attributes need reload.
     expired_attributes: Option<std::collections::HashSet<String>>,
@@ -592,6 +594,7 @@ impl<C: Connection> Session<C> {
             values,
             pk_columns,
             pk_values,
+            relationships: M::RELATIONSHIPS,
             expired_attributes: None,
         };
 
@@ -764,6 +767,7 @@ impl<C: Connection> Session<C> {
             values,
             pk_columns,
             pk_values: obj_pk_values,
+            relationships: M::RELATIONSHIPS,
             expired_attributes: None,
         };
 
@@ -908,6 +912,7 @@ impl<C: Connection> Session<C> {
             values,
             pk_columns: pk_cols,
             pk_values: obj_pk_values,
+            relationships: M::RELATIONSHIPS,
             expired_attributes: None,
         };
 
@@ -1316,8 +1321,167 @@ impl<C: Connection> Session<C> {
             }
         }
 
-        // 1. Execute DELETEs first (to respect FK constraints)
+        let dialect = self.connection.dialect();
+
+        // 1. Execute DELETEs first (to respect FK constraints), including explicit cascades.
         let deletes: Vec<ObjectKey> = std::mem::take(&mut self.pending_delete);
+
+        // Cascade planning: use relationship metadata on each deleted parent to proactively
+        // delete dependent rows (and clean up link tables) when `passive_deletes` is not set.
+        //
+        // This is intentionally explicit (no hidden queries): we emit concrete DELETE statements.
+        let mut cascade_child_deletes: HashMap<(&'static str, &'static str), Vec<Value>> =
+            HashMap::new();
+        let mut cascade_link_deletes: HashMap<(&'static str, &'static str), Vec<Value>> =
+            HashMap::new();
+
+        for key in &deletes {
+            let Some(tracked) = self.identity_map.get(key) else {
+                continue;
+            };
+            if tracked.state != ObjectState::Deleted {
+                continue;
+            }
+            // Composite PK cascades need richer metadata; skip rather than guessing.
+            if tracked.pk_values.len() != 1 {
+                continue;
+            }
+            let parent_pk = tracked.pk_values[0].clone();
+
+            for rel in tracked.relationships {
+                if !rel.cascade_delete || rel.is_passive_deletes_all() {
+                    continue;
+                }
+
+                match rel.kind {
+                    sqlmodel_core::RelationshipKind::OneToMany
+                    | sqlmodel_core::RelationshipKind::OneToOne => {
+                        // With passive_deletes, the DB will delete children when the parent is deleted.
+                        // Orphan tracking for Passive is handled after the parent delete succeeds.
+                        if matches!(rel.passive_deletes, sqlmodel_core::PassiveDeletes::Passive) {
+                            continue;
+                        }
+                        let Some(remote_key) = rel.remote_key else {
+                            continue;
+                        };
+                        cascade_child_deletes
+                            .entry((rel.related_table, remote_key))
+                            .or_default()
+                            .push(parent_pk.clone());
+                    }
+                    sqlmodel_core::RelationshipKind::ManyToMany => {
+                        if matches!(rel.passive_deletes, sqlmodel_core::PassiveDeletes::Passive) {
+                            continue;
+                        }
+                        let Some(link) = rel.link_table else {
+                            continue;
+                        };
+                        cascade_link_deletes
+                            .entry((link.table_name, link.local_column))
+                            .or_default()
+                            .push(parent_pk.clone());
+                    }
+                    sqlmodel_core::RelationshipKind::ManyToOne => {}
+                }
+            }
+        }
+
+        let dedup_by_hash = |vals: &mut Vec<Value>| {
+            let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+            vals.retain(|v| seen.insert(hash_values(std::slice::from_ref(v))));
+        };
+
+        // (a) Delete children first (one-to-many / one-to-one).
+        for ((child_table, fk_col), mut pks) in cascade_child_deletes {
+            dedup_by_hash(&mut pks);
+            if pks.is_empty() {
+                continue;
+            }
+
+            let placeholders: Vec<String> =
+                (1..=pks.len()).map(|i| dialect.placeholder(i)).collect();
+            let sql = format!(
+                "DELETE FROM {} WHERE {} IN ({})",
+                dialect.quote_identifier(child_table),
+                dialect.quote_identifier(fk_col),
+                placeholders.join(", ")
+            );
+
+            match self.connection.execute(cx, &sql, &pks).await {
+                Outcome::Ok(_) => {}
+                Outcome::Err(e) => {
+                    self.pending_delete = deletes;
+                    return Outcome::Err(e);
+                }
+                Outcome::Cancelled(r) => {
+                    self.pending_delete = deletes;
+                    return Outcome::Cancelled(r);
+                }
+                Outcome::Panicked(p) => {
+                    self.pending_delete = deletes;
+                    return Outcome::Panicked(p);
+                }
+            }
+
+            // Remove now-deleted children from the identity map to prevent stale reads.
+            let pk_hashes: std::collections::HashSet<u64> = pks
+                .iter()
+                .map(|v| hash_values(std::slice::from_ref(v)))
+                .collect();
+            let mut to_remove: Vec<ObjectKey> = Vec::new();
+            for (k, t) in &self.identity_map {
+                if t.table_name != child_table {
+                    continue;
+                }
+                let Some(idx) = t.column_names.iter().position(|col| *col == fk_col) else {
+                    continue;
+                };
+                let fk_val = &t.values[idx];
+                if pk_hashes.contains(&hash_values(std::slice::from_ref(fk_val))) {
+                    to_remove.push(*k);
+                }
+            }
+            for k in &to_remove {
+                self.identity_map.remove(k);
+            }
+            self.pending_new.retain(|k| !to_remove.contains(k));
+            self.pending_dirty.retain(|k| !to_remove.contains(k));
+            self.pending_delete.retain(|k| !to_remove.contains(k));
+        }
+
+        // (b) Clean up link-table rows for many-to-many relationships (association rows only).
+        for ((link_table, local_col), mut pks) in cascade_link_deletes {
+            dedup_by_hash(&mut pks);
+            if pks.is_empty() {
+                continue;
+            }
+
+            let placeholders: Vec<String> =
+                (1..=pks.len()).map(|i| dialect.placeholder(i)).collect();
+            let sql = format!(
+                "DELETE FROM {} WHERE {} IN ({})",
+                dialect.quote_identifier(link_table),
+                dialect.quote_identifier(local_col),
+                placeholders.join(", ")
+            );
+
+            match self.connection.execute(cx, &sql, &pks).await {
+                Outcome::Ok(_) => {}
+                Outcome::Err(e) => {
+                    self.pending_delete = deletes;
+                    return Outcome::Err(e);
+                }
+                Outcome::Cancelled(r) => {
+                    self.pending_delete = deletes;
+                    return Outcome::Cancelled(r);
+                }
+                Outcome::Panicked(p) => {
+                    self.pending_delete = deletes;
+                    return Outcome::Panicked(p);
+                }
+            }
+        }
+
         let mut actually_deleted: Vec<ObjectKey> = Vec::new();
         for key in &deletes {
             if let Some(tracked) = self.identity_map.get(key) {
@@ -1335,23 +1499,85 @@ impl<C: Connection> Session<C> {
                     continue;
                 }
 
+                // Copy needed metadata so we can mutate the identity map after the DB op.
+                let pk_columns = tracked.pk_columns.clone();
+                let pk_values = tracked.pk_values.clone();
+                let table_name = tracked.table_name;
+                let relationships = tracked.relationships;
+
                 // Build WHERE clause from primary key columns and values
-                let where_parts: Vec<String> = tracked
-                    .pk_columns
+                let where_parts: Vec<String> = pk_columns
                     .iter()
                     .enumerate()
-                    .map(|(i, col)| format!("\"{}\" = ${}", col, i + 1))
+                    .map(|(i, col)| {
+                        format!(
+                            "{} = {}",
+                            dialect.quote_identifier(col),
+                            dialect.placeholder(i + 1)
+                        )
+                    })
                     .collect();
 
                 let sql = format!(
-                    "DELETE FROM \"{}\" WHERE {}",
-                    tracked.table_name,
+                    "DELETE FROM {} WHERE {}",
+                    dialect.quote_identifier(table_name),
                     where_parts.join(" AND ")
                 );
 
-                match self.connection.execute(cx, &sql, &tracked.pk_values).await {
+                match self.connection.execute(cx, &sql, &pk_values).await {
                     Outcome::Ok(_) => {
                         actually_deleted.push(*key);
+
+                        // PassiveDeletes::Passive orphan tracking: the DB will delete children,
+                        // so eagerly detach them from the identity map after the parent delete succeeds.
+                        if pk_values.len() == 1 {
+                            let parent_pk = &pk_values[0];
+                            let parent_pk_hash = hash_values(std::slice::from_ref(parent_pk));
+
+                            let mut to_remove: Vec<ObjectKey> = Vec::new();
+                            for rel in relationships {
+                                if !rel.cascade_delete
+                                    || !matches!(
+                                        rel.passive_deletes,
+                                        sqlmodel_core::PassiveDeletes::Passive
+                                    )
+                                {
+                                    continue;
+                                }
+                                if !matches!(
+                                    rel.kind,
+                                    sqlmodel_core::RelationshipKind::OneToMany
+                                        | sqlmodel_core::RelationshipKind::OneToOne
+                                ) {
+                                    continue;
+                                }
+                                let Some(remote_key) = rel.remote_key else {
+                                    continue;
+                                };
+
+                                for (k, t) in &self.identity_map {
+                                    if t.table_name != rel.related_table {
+                                        continue;
+                                    }
+                                    let Some(idx) =
+                                        t.column_names.iter().position(|col| *col == remote_key)
+                                    else {
+                                        continue;
+                                    };
+                                    let fk_val = &t.values[idx];
+                                    if hash_values(std::slice::from_ref(fk_val)) == parent_pk_hash {
+                                        to_remove.push(*k);
+                                    }
+                                }
+                            }
+
+                            for k in &to_remove {
+                                self.identity_map.remove(k);
+                            }
+                            self.pending_new.retain(|k| !to_remove.contains(k));
+                            self.pending_dirty.retain(|k| !to_remove.contains(k));
+                            self.pending_delete.retain(|k| !to_remove.contains(k));
+                        }
                     }
                     Outcome::Err(e) => {
                         // Only restore deletes that weren't already executed
@@ -1408,17 +1634,18 @@ impl<C: Connection> Session<C> {
 
                 // Build INSERT statement using stored column names and values
                 let columns = &tracked.column_names;
-                let placeholders: Vec<String> =
-                    (1..=columns.len()).map(|i| format!("${}", i)).collect();
+                let columns_sql: Vec<String> = columns
+                    .iter()
+                    .map(|c| dialect.quote_identifier(c))
+                    .collect();
+                let placeholders: Vec<String> = (1..=columns.len())
+                    .map(|i| dialect.placeholder(i))
+                    .collect();
 
                 let sql = format!(
-                    "INSERT INTO \"{}\" ({}) VALUES ({})",
-                    tracked.table_name,
-                    columns
-                        .iter()
-                        .map(|c| format!("\"{}\"", c))
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    "INSERT INTO {} ({}) VALUES ({})",
+                    dialect.quote_identifier(tracked.table_name),
+                    columns_sql.join(", "),
                     placeholders.join(", ")
                 );
 
@@ -1482,7 +1709,11 @@ impl<C: Connection> Session<C> {
                 for (i, col) in tracked.column_names.iter().enumerate() {
                     // Skip primary key columns in SET clause
                     if !tracked.pk_columns.contains(col) {
-                        set_parts.push(format!("\"{}\" = ${}", col, param_idx));
+                        set_parts.push(format!(
+                            "{} = {}",
+                            dialect.quote_identifier(col),
+                            dialect.placeholder(param_idx)
+                        ));
                         params.push(tracked.values[i].clone());
                         param_idx += 1;
                     }
@@ -1493,7 +1724,11 @@ impl<C: Connection> Session<C> {
                     .pk_columns
                     .iter()
                     .map(|col| {
-                        let clause = format!("\"{}\" = ${}", col, param_idx);
+                        let clause = format!(
+                            "{} = {}",
+                            dialect.quote_identifier(col),
+                            dialect.placeholder(param_idx)
+                        );
                         param_idx += 1;
                         clause
                     })
@@ -1507,8 +1742,8 @@ impl<C: Connection> Session<C> {
                 }
 
                 let sql = format!(
-                    "UPDATE \"{}\" SET {} WHERE {}",
-                    tracked.table_name,
+                    "UPDATE {} SET {} WHERE {}",
+                    dialect.quote_identifier(tracked.table_name),
                     set_parts.join(", "),
                     where_parts.join(" AND ")
                 );
@@ -1810,6 +2045,7 @@ impl<C: Connection> Session<C> {
                         values,
                         pk_columns: T::PRIMARY_KEY.to_vec(),
                         pk_values: pk_values.clone(),
+                        relationships: T::RELATIONSHIPS,
                         expired_attributes: None,
                     };
                     self.identity_map.insert(key, tracked);
@@ -2083,6 +2319,7 @@ impl<C: Connection> Session<C> {
                             values,
                             pk_columns: Child::PRIMARY_KEY.to_vec(),
                             pk_values: pk_values.clone(),
+                            relationships: Child::RELATIONSHIPS,
                             expired_attributes: None,
                         }
                     });
@@ -2905,6 +3142,8 @@ mod tests {
     struct MockState {
         query_calls: usize,
         last_sql: Option<String>,
+        execute_calls: usize,
+        executed: Vec<(String, Vec<Value>)>,
     }
 
     #[derive(Debug, Clone)]
@@ -3003,10 +3242,18 @@ mod tests {
         fn execute(
             &self,
             _cx: &Cx,
-            _sql: &str,
-            _params: &[Value],
+            sql: &str,
+            params: &[Value],
         ) -> impl Future<Output = Outcome<u64, Error>> + Send {
-            async { Outcome::Ok(0) }
+            let state = Arc::clone(&self.state);
+            let sql = sql.to_string();
+            let params = params.to_vec();
+            async move {
+                let mut guard = state.lock().expect("lock poisoned");
+                guard.execute_calls += 1;
+                guard.executed.push((sql, params));
+                Outcome::Ok(0)
+            }
         }
 
         fn insert(
@@ -3262,6 +3509,59 @@ mod tests {
     impl Model for TeamWithHeroes {
         const TABLE_NAME: &'static str = "teams";
         const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const RELATIONSHIPS: &'static [sqlmodel_core::RelationshipInfo] =
+            &[sqlmodel_core::RelationshipInfo::new(
+                "heroes",
+                "heroes",
+                sqlmodel_core::RelationshipKind::OneToMany,
+            )
+            .remote_key("team_id")
+            .cascade_delete(true)];
+
+        fn fields() -> &'static [sqlmodel_core::FieldInfo] {
+            &[]
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            vec![("id", self.id.map_or(Value::Null, Value::BigInt))]
+        }
+
+        fn from_row(row: &Row) -> sqlmodel_core::Result<Self> {
+            let id: i64 = row.get_named("id")?;
+            Ok(Self {
+                id: Some(id),
+                heroes: sqlmodel_core::RelatedMany::new("team_id"),
+            })
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            self.id
+                .map_or_else(|| vec![Value::Null], |id| vec![Value::BigInt(id)])
+        }
+
+        fn is_new(&self) -> bool {
+            self.id.is_none()
+        }
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct TeamWithHeroesPassive {
+        id: Option<i64>,
+        heroes: sqlmodel_core::RelatedMany<HeroChild>,
+    }
+
+    impl Model for TeamWithHeroesPassive {
+        const TABLE_NAME: &'static str = "teams_passive";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+        const RELATIONSHIPS: &'static [sqlmodel_core::RelationshipInfo] =
+            &[sqlmodel_core::RelationshipInfo::new(
+                "heroes",
+                "heroes",
+                sqlmodel_core::RelationshipKind::OneToMany,
+            )
+            .remote_key("team_id")
+            .cascade_delete(true)
+            .passive_deletes(sqlmodel_core::PassiveDeletes::Passive)];
 
         fn fields() -> &'static [sqlmodel_core::FieldInfo] {
             &[]
@@ -3361,6 +3661,122 @@ mod tests {
         assert!(
             sql.contains("$2"),
             "expected Postgres-style placeholders ($1, $2, ...)"
+        );
+    }
+
+    #[test]
+    fn test_flush_cascade_delete_one_to_many_deletes_children_first() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection::new(Arc::clone(&state));
+        let mut session = Session::with_config(
+            conn,
+            SessionConfig {
+                auto_begin: false,
+                auto_flush: false,
+                expire_on_commit: true,
+            },
+        );
+
+        rt.block_on(async {
+            // Load a parent so it's tracked as Persistent (MockConnection returns a row for id=1).
+            let team = unwrap_outcome(session.get::<TeamWithHeroes>(&cx, 1_i64).await).unwrap();
+
+            // Load children into identity map via one-to-many batch loader.
+            let mut teams = vec![team.clone()];
+            let loaded = unwrap_outcome(
+                session
+                    .load_one_to_many::<TeamWithHeroes, HeroChild, _, _>(
+                        &cx,
+                        &mut teams,
+                        |t| &mut t.heroes,
+                        |t| t.id.map_or(Value::Null, Value::BigInt),
+                    )
+                    .await,
+            );
+            assert_eq!(loaded, 2);
+
+            // Mark parent for deletion and flush.
+            session.delete(&team);
+            unwrap_outcome(session.flush(&cx).await);
+
+            // Parent + children should be gone from the identity map after flush.
+            assert_eq!(session.tracked_count(), 0);
+        });
+
+        let guard = state.lock().expect("lock poisoned");
+        assert!(
+            guard.execute_calls >= 2,
+            "expected at least cascade + parent delete"
+        );
+        let (sql0, _params0) = &guard.executed[0];
+        let (sql1, _params1) = &guard.executed[1];
+        assert!(
+            sql0.contains("DELETE") && sql0.contains("heroes"),
+            "expected first delete to target child table"
+        );
+        assert!(
+            sql1.contains("DELETE") && sql1.contains("teams"),
+            "expected second delete to target parent table"
+        );
+    }
+
+    #[test]
+    fn test_flush_passive_deletes_does_not_emit_child_delete_but_detaches_children() {
+        let rt = RuntimeBuilder::current_thread()
+            .build()
+            .expect("create asupersync runtime");
+        let cx = Cx::for_testing();
+
+        let state = Arc::new(Mutex::new(MockState::default()));
+        let conn = MockConnection::new(Arc::clone(&state));
+        let mut session = Session::with_config(
+            conn,
+            SessionConfig {
+                auto_begin: false,
+                auto_flush: false,
+                expire_on_commit: true,
+            },
+        );
+
+        rt.block_on(async {
+            let team =
+                unwrap_outcome(session.get::<TeamWithHeroesPassive>(&cx, 1_i64).await).unwrap();
+
+            // Load children into identity map.
+            let mut teams = vec![team.clone()];
+            let loaded = unwrap_outcome(
+                session
+                    .load_one_to_many::<TeamWithHeroesPassive, HeroChild, _, _>(
+                        &cx,
+                        &mut teams,
+                        |t| &mut t.heroes,
+                        |t| t.id.map_or(Value::Null, Value::BigInt),
+                    )
+                    .await,
+            );
+            assert_eq!(loaded, 2);
+
+            session.delete(&team);
+            unwrap_outcome(session.flush(&cx).await);
+
+            assert_eq!(session.tracked_count(), 0);
+        });
+
+        let guard = state.lock().expect("lock poisoned");
+        assert_eq!(guard.execute_calls, 1, "expected only the parent delete");
+        let (sql0, _params0) = &guard.executed[0];
+        assert!(
+            sql0.contains("teams_passive"),
+            "expected delete to target parent table"
+        );
+        assert!(
+            !sql0.contains("heroes"),
+            "did not expect a child-table delete for passive_deletes"
         );
     }
 
