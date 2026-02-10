@@ -378,6 +378,7 @@ mod inheritance_tests {
     use serde::{Deserialize, Serialize};
     // InheritanceStrategy is re-exported from crate root
     use crate::InheritanceStrategy;
+    use sqlmodel_core::Value;
 
     // Single table inheritance base model with discriminator column
     #[derive(Model, Debug, Clone, Serialize, Deserialize)]
@@ -448,10 +449,26 @@ mod inheritance_tests {
     #[test]
     fn test_single_table_inheritance_child() {
         let info = <Manager as Model>::inheritance();
-        assert_eq!(info.parent, Some("Employee"));
+        assert_eq!(info.parent, Some(<Employee as Model>::TABLE_NAME));
+        assert_eq!(info.discriminator_column, Some("type_"));
         assert_eq!(info.discriminator_value, Some("manager"));
         assert!(info.is_child());
         assert!(!info.is_base());
+    }
+
+    #[test]
+    fn test_single_table_inheritance_child_to_row_includes_discriminator() {
+        let m = Manager {
+            id: 1,
+            department: "ops".to_string(),
+        };
+        let row = m.to_row();
+
+        assert!(
+            row.iter()
+                .any(|(k, v)| *k == "type_" && *v == Value::Text("manager".to_string())),
+            "STI child to_row() must include discriminator value"
+        );
     }
 
     #[test]
@@ -465,7 +482,8 @@ mod inheritance_tests {
     #[test]
     fn test_joined_table_inheritance_child() {
         let info = <Student as Model>::inheritance();
-        assert_eq!(info.parent, Some("Person"));
+        assert_eq!(info.strategy, InheritanceStrategy::Joined);
+        assert_eq!(info.parent, Some(<Person as Model>::TABLE_NAME));
         assert!(info.is_child());
     }
 

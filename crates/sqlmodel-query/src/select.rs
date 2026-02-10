@@ -11,6 +11,14 @@ use asupersync::{Cx, Outcome};
 use sqlmodel_core::{Connection, Model, RelationshipKind, Value};
 use std::marker::PhantomData;
 
+fn sti_discriminator_filter<M: Model>() -> Option<Expr> {
+    let inh = M::inheritance();
+    match (inh.discriminator_column, inh.discriminator_value) {
+        (Some(col), Some(val)) => Some(Expr::qualified(M::TABLE_NAME, col).eq(val)),
+        _ => None,
+    }
+}
+
 /// Information about a JOIN for eager loading.
 ///
 /// Used internally to track which relationships are being eagerly loaded
@@ -180,6 +188,15 @@ impl<M: Model> Select<M> {
         let mut sql = String::new();
         let mut params = Vec::new();
         let mut join_info = Vec::new();
+        let mut where_clause = self.where_clause.clone();
+
+        // Single-table inheritance child models should be implicitly filtered by their discriminator.
+        if let Some(expr) = sti_discriminator_filter::<M>() {
+            where_clause = Some(match where_clause {
+                Some(existing) => existing.and(expr),
+                None => Where::new(expr),
+            });
+        }
 
         // Collect parent table columns
         let parent_cols: Vec<&str> = M::fields().iter().map(|f| f.name).collect();
@@ -246,7 +263,7 @@ impl<M: Model> Select<M> {
         }
 
         // WHERE
-        if let Some(where_clause) = &self.where_clause {
+        if let Some(where_clause) = &where_clause {
             let (where_sql, where_params) = where_clause.build_with_dialect(dialect, params.len());
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
@@ -408,6 +425,15 @@ impl<M: Model> Select<M> {
     pub fn build_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
         let mut sql = String::new();
         let mut params = Vec::new();
+        let mut where_clause = self.where_clause.clone();
+
+        // Single-table inheritance child models should be implicitly filtered by their discriminator.
+        if let Some(expr) = sti_discriminator_filter::<M>() {
+            where_clause = Some(match where_clause {
+                Some(existing) => existing.and(expr),
+                None => Where::new(expr),
+            });
+        }
 
         // SELECT
         sql.push_str("SELECT ");
@@ -431,7 +457,7 @@ impl<M: Model> Select<M> {
         }
 
         // WHERE
-        if let Some(where_clause) = &self.where_clause {
+        if let Some(where_clause) = &where_clause {
             let (where_sql, where_params) = where_clause.build_with_dialect(dialect, params.len());
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
@@ -607,6 +633,14 @@ impl<M: Model> Select<M> {
             _marker: _,
         } = self;
 
+        let mut where_clause = where_clause;
+        if let Some(expr) = sti_discriminator_filter::<M>() {
+            where_clause = Some(match where_clause {
+                Some(existing) => existing.and(expr),
+                None => Where::new(expr),
+            });
+        }
+
         SelectQuery {
             table: M::TABLE_NAME.to_string(),
             columns,
@@ -625,6 +659,14 @@ impl<M: Model> Select<M> {
     fn build_exists_subquery_with_dialect(&self, dialect: Dialect) -> (String, Vec<Value>) {
         let mut sql = String::new();
         let mut params = Vec::new();
+        let mut where_clause = self.where_clause.clone();
+
+        if let Some(expr) = sti_discriminator_filter::<M>() {
+            where_clause = Some(match where_clause {
+                Some(existing) => existing.and(expr),
+                None => Where::new(expr),
+            });
+        }
 
         // SELECT 1 for optimal EXISTS performance
         sql.push_str("SELECT 1 FROM ");
@@ -636,7 +678,7 @@ impl<M: Model> Select<M> {
         }
 
         // WHERE
-        if let Some(where_clause) = &self.where_clause {
+        if let Some(where_clause) = &where_clause {
             let (where_sql, where_params) = where_clause.build_with_dialect(dialect, params.len());
             sql.push_str(" WHERE ");
             sql.push_str(&where_sql);
@@ -760,7 +802,9 @@ impl<M: Model> Default for Select<M> {
 mod tests {
     use super::*;
     use crate::JoinType;
-    use sqlmodel_core::{Error, FieldInfo, Result, Row, Value};
+    use sqlmodel_core::{
+        Error, FieldInfo, InheritanceInfo, InheritanceStrategy, Result, Row, Value,
+    };
 
     #[derive(Debug, Clone)]
     struct Hero;
@@ -787,6 +831,45 @@ mod tests {
 
         fn is_new(&self) -> bool {
             true
+        }
+    }
+
+    #[derive(Debug, Clone)]
+    struct StiManager;
+
+    impl Model for StiManager {
+        // STI child shares the physical table.
+        const TABLE_NAME: &'static str = "employees";
+        const PRIMARY_KEY: &'static [&'static str] = &["id"];
+
+        fn fields() -> &'static [FieldInfo] {
+            &[]
+        }
+
+        fn to_row(&self) -> Vec<(&'static str, Value)> {
+            Vec::new()
+        }
+
+        fn from_row(_row: &Row) -> Result<Self> {
+            Err(Error::Custom("not used in tests".to_string()))
+        }
+
+        fn primary_key_value(&self) -> Vec<Value> {
+            Vec::new()
+        }
+
+        fn is_new(&self) -> bool {
+            true
+        }
+
+        fn inheritance() -> InheritanceInfo {
+            InheritanceInfo {
+                strategy: InheritanceStrategy::None,
+                parent: Some("employees"),
+                parent_fields_fn: None,
+                discriminator_column: Some("type_"),
+                discriminator_value: Some("manager"),
+            }
         }
     }
 
@@ -820,6 +903,31 @@ mod tests {
 
         assert_eq!(sql, "SELECT * FROM heroes");
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_sti_child_select_adds_discriminator_filter() {
+        let query = Select::<StiManager>::new();
+        let (sql, params) = query.build();
+        assert_eq!(
+            sql,
+            "SELECT * FROM employees WHERE \"employees\".\"type_\" = $1"
+        );
+        assert_eq!(params, vec![Value::Text("manager".to_string())]);
+    }
+
+    #[test]
+    fn test_sti_child_select_ands_discriminator_with_user_filter() {
+        let query = Select::<StiManager>::new().filter(Expr::col("active").eq(true));
+        let (sql, params) = query.build();
+        assert_eq!(
+            sql,
+            "SELECT * FROM employees WHERE \"active\" = $1 AND \"employees\".\"type_\" = $2"
+        );
+        assert_eq!(
+            params,
+            vec![Value::Bool(true), Value::Text("manager".to_string())]
+        );
     }
 
     #[test]
