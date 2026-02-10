@@ -13,6 +13,7 @@ use asupersync::{Cx, Outcome};
 use sqlmodel_core::{
     Connection, FieldInfo, InheritanceStrategy, Model, Row, TransactionOps, Value,
 };
+use std::collections::HashSet;
 use std::marker::PhantomData;
 
 fn is_joined_inheritance_child<M: Model>() -> bool {
@@ -20,13 +21,356 @@ fn is_joined_inheritance_child<M: Model>() -> bool {
     inh.strategy == InheritanceStrategy::Joined && inh.parent.is_some()
 }
 
-fn build_insert_sql_for_table(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JoinedTableTarget {
+    Parent,
+    Child,
+}
+
+fn joined_parent_meta<M: Model>() -> Result<(&'static str, &'static [FieldInfo]), sqlmodel_core::Error>
+{
+    let inh = M::inheritance();
+    let Some(parent_table) = inh.parent else {
+        return Err(sqlmodel_core::Error::Custom(
+            "joined-table inheritance child missing parent table metadata".to_string(),
+        ));
+    };
+    let Some(parent_fields_fn) = inh.parent_fields_fn else {
+        return Err(sqlmodel_core::Error::Custom(
+            "joined-table inheritance child missing parent_fields_fn metadata".to_string(),
+        ));
+    };
+    Ok((parent_table, parent_fields_fn()))
+}
+
+fn field_names(fields: &[FieldInfo]) -> HashSet<&'static str> {
+    fields.iter().map(|f| f.column_name).collect()
+}
+
+fn classify_joined_column<M: Model>(
+    column: &str,
+    parent_table: &'static str,
+    parent_fields: &'static [FieldInfo],
+) -> Result<(JoinedTableTarget, &'static str), sqlmodel_core::Error> {
+    let child_fields = M::fields();
+
+    let child_lookup = |name: &str| -> Option<&'static str> {
+        child_fields
+            .iter()
+            .find(|f| f.column_name == name)
+            .map(|f| f.column_name)
+    };
+    let parent_lookup = |name: &str| -> Option<&'static str> {
+        parent_fields
+            .iter()
+            .find(|f| f.column_name == name)
+            .map(|f| f.column_name)
+    };
+
+    if let Some((table, col)) = column.split_once('.') {
+        if table == parent_table {
+            return parent_lookup(col).map(|c| (JoinedTableTarget::Parent, c)).ok_or_else(|| {
+                sqlmodel_core::Error::Custom(format!(
+                    "unknown parent column '{col}' for joined-table inheritance child"
+                ))
+            });
+        }
+        if table == M::TABLE_NAME {
+            return child_lookup(col).map(|c| (JoinedTableTarget::Child, c)).ok_or_else(|| {
+                sqlmodel_core::Error::Custom(format!(
+                    "unknown child column '{col}' for joined-table inheritance child"
+                ))
+            });
+        }
+        return Err(sqlmodel_core::Error::Custom(format!(
+            "unknown table qualifier '{table}' for joined-table inheritance DML; expected '{}' or '{}'",
+            parent_table,
+            M::TABLE_NAME
+        )));
+    }
+
+    let in_parent = parent_lookup(column);
+    let in_child = child_lookup(column);
+    match (in_parent, in_child) {
+        (Some(c), None) => Ok((JoinedTableTarget::Parent, c)),
+        (None, Some(c)) => Ok((JoinedTableTarget::Child, c)),
+        (Some(_), Some(_)) => Err(sqlmodel_core::Error::Custom(format!(
+            "ambiguous joined-table inheritance column '{column}' exists in both parent and child tables; qualify as '{parent_table}.{column}' or '{}.{column}'",
+            M::TABLE_NAME
+        ))),
+        (None, None) => Err(sqlmodel_core::Error::Custom(format!(
+            "unknown joined-table inheritance column '{column}'"
+        ))),
+    }
+}
+
+fn build_joined_pk_select_sql<M: Model>(
+    dialect: Dialect,
+    where_clause: Option<&Where>,
+    param_offset: usize,
+) -> Result<(String, Vec<Value>), sqlmodel_core::Error> {
+    let (parent_table, _parent_fields) = joined_parent_meta::<M>()?;
+    let pk_cols = M::PRIMARY_KEY;
+    if pk_cols.is_empty() {
+        return Err(sqlmodel_core::Error::Custom(
+            "joined-table inheritance DML requires a primary key".to_string(),
+        ));
+    }
+
+    let mut sql = String::new();
+    sql.push_str("SELECT ");
+    // Always select PK columns from the child table to avoid ambiguity.
+    sql.push_str(
+        &pk_cols
+            .iter()
+            .map(|c| format!("{}.{}", M::TABLE_NAME, c))
+            .collect::<Vec<_>>()
+            .join(", "),
+    );
+    sql.push_str(" FROM ");
+    sql.push_str(M::TABLE_NAME);
+    sql.push_str(" JOIN ");
+    sql.push_str(parent_table);
+    sql.push_str(" ON ");
+    sql.push_str(
+        &pk_cols
+            .iter()
+            .map(|c| format!("{}.{} = {}.{}", M::TABLE_NAME, c, parent_table, c))
+            .collect::<Vec<_>>()
+            .join(" AND "),
+    );
+
+    let mut params = Vec::new();
+    if let Some(w) = where_clause {
+        let (where_sql, where_params) = w.build_with_dialect(dialect, param_offset);
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_sql);
+        params.extend(where_params);
+    }
+
+    Ok((sql, params))
+}
+
+fn build_pk_in_where(
+    dialect: Dialect,
+    pk_cols: &[&'static str],
+    pk_values: &[Vec<Value>],
+    param_offset: usize,
+) -> (String, Vec<Value>) {
+    let mut params: Vec<Value> = Vec::new();
+
+    if pk_cols.is_empty() || pk_values.is_empty() {
+        return (String::new(), params);
+    }
+
+    if pk_cols.len() == 1 {
+        let col = pk_cols[0];
+        let mut placeholders = Vec::new();
+        for vals in pk_values {
+            if vals.len() != 1 {
+                continue;
+            }
+            params.push(vals[0].clone());
+            placeholders.push(dialect.placeholder(param_offset + params.len()));
+        }
+        return (format!("{col} IN ({})", placeholders.join(", ")), params);
+    }
+
+    // Composite PK: (a,b) IN ((..),(..))
+    let cols_tuple = format!("({})", pk_cols.join(", "));
+    let mut groups = Vec::new();
+    for vals in pk_values {
+        if vals.len() != pk_cols.len() {
+            continue;
+        }
+        let mut ph = Vec::new();
+        for v in vals {
+            params.push(v.clone());
+            ph.push(dialect.placeholder(param_offset + params.len()));
+        }
+        groups.push(format!("({})", ph.join(", ")));
+    }
+
+    (format!("{cols_tuple} IN ({})", groups.join(", ")), params)
+}
+
+fn build_update_sql_for_table_pk_in(
+    dialect: Dialect,
+    table: &str,
+    pk_cols: &[&'static str],
+    pk_values: &[Vec<Value>],
+    set_pairs: &[(&'static str, Value)],
+) -> (String, Vec<Value>) {
+    let mut params = Vec::new();
+    let mut set_clauses = Vec::new();
+    for (col, value) in set_pairs {
+        set_clauses.push(format!(
+            "{} = {}",
+            col,
+            dialect.placeholder(params.len() + 1)
+        ));
+        params.push(value.clone());
+    }
+    if set_clauses.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    let (pk_where, pk_params) = build_pk_in_where(dialect, pk_cols, pk_values, params.len());
+    if pk_where.is_empty() {
+        return (String::new(), Vec::new());
+    }
+
+    let mut sql = format!("UPDATE {} SET {} WHERE {}", table, set_clauses.join(", "), pk_where);
+    params.extend(pk_params);
+    (sql, params)
+}
+
+fn build_delete_sql_for_table_pk_in(
+    dialect: Dialect,
+    table: &str,
+    pk_cols: &[&'static str],
+    pk_values: &[Vec<Value>],
+) -> (String, Vec<Value>) {
+    let (pk_where, pk_params) = build_pk_in_where(dialect, pk_cols, pk_values, 0);
+    if pk_where.is_empty() {
+        return (String::new(), Vec::new());
+    }
+    (format!("DELETE FROM {table} WHERE {pk_where}"), pk_params)
+}
+
+fn build_joined_child_select_sql_by_pk_in<M: Model>(
+    dialect: Dialect,
+    pk_cols: &[&'static str],
+    pk_values: &[Vec<Value>],
+) -> Result<(String, Vec<Value>), sqlmodel_core::Error> {
+    let (parent_table, parent_fields) = joined_parent_meta::<M>()?;
+    if pk_cols.is_empty() {
+        return Err(sqlmodel_core::Error::Custom(
+            "joined-table inheritance returning requires a primary key".to_string(),
+        ));
+    }
+
+    let child_cols: Vec<&'static str> = M::fields().iter().map(|f| f.column_name).collect();
+    let parent_cols: Vec<&'static str> = parent_fields.iter().map(|f| f.column_name).collect();
+
+    let mut col_parts = Vec::new();
+    for col in &child_cols {
+        col_parts.push(format!(
+            "{}.{} AS {}__{}",
+            M::TABLE_NAME,
+            col,
+            M::TABLE_NAME,
+            col
+        ));
+    }
+    for col in &parent_cols {
+        col_parts.push(format!(
+            "{}.{} AS {}__{}",
+            parent_table,
+            col,
+            parent_table,
+            col
+        ));
+    }
+
+    let mut sql = String::new();
+    sql.push_str("SELECT ");
+    sql.push_str(&col_parts.join(", "));
+    sql.push_str(" FROM ");
+    sql.push_str(M::TABLE_NAME);
+    sql.push_str(" JOIN ");
+    sql.push_str(parent_table);
+    sql.push_str(" ON ");
+    sql.push_str(
+        &pk_cols
+            .iter()
+            .map(|c| format!("{}.{} = {}.{}", M::TABLE_NAME, c, parent_table, c))
+            .collect::<Vec<_>>()
+            .join(" AND "),
+    );
+
+    let (pk_where, pk_params) = build_pk_in_where(dialect, pk_cols, pk_values, 0);
+    if pk_where.is_empty() {
+        return Ok((String::new(), Vec::new()));
+    }
+    sql.push_str(" WHERE ");
+    sql.push_str(&pk_where);
+
+    Ok((sql, pk_params))
+}
+
+fn append_on_conflict_clause(
+    dialect: Dialect,
+    sql: &mut String,
+    pk_cols: &[&'static str],
+    insert_columns: &[&'static str],
+    on_conflict: &OnConflict,
+) -> Result<(), sqlmodel_core::Error> {
+    if dialect == Dialect::Mysql {
+        return Err(sqlmodel_core::Error::Custom(
+            "ON CONFLICT is not supported for MySQL yet".to_string(),
+        ));
+    }
+
+    match on_conflict {
+        OnConflict::DoNothing => {
+            sql.push_str(" ON CONFLICT DO NOTHING");
+            Ok(())
+        }
+        OnConflict::DoUpdate { columns, target } => {
+            sql.push_str(" ON CONFLICT");
+
+            let effective_target: Vec<String> = if !target.is_empty() {
+                target.clone()
+            } else {
+                pk_cols.iter().map(|c| (*c).to_string()).collect()
+            };
+
+            if effective_target.is_empty() {
+                sql.push_str(" DO NOTHING");
+                return Ok(());
+            }
+
+            sql.push_str(" (");
+            sql.push_str(&effective_target.join(", "));
+            sql.push(')');
+
+            let update_cols: Vec<String> = if columns.is_empty() {
+                insert_columns
+                    .iter()
+                    .filter(|c| !pk_cols.contains(c))
+                    .map(|c| (*c).to_string())
+                    .collect()
+            } else {
+                columns.clone()
+            };
+
+            if update_cols.is_empty() {
+                sql.push_str(" DO NOTHING");
+                return Ok(());
+            }
+
+            sql.push_str(" DO UPDATE SET ");
+            sql.push_str(
+                &update_cols
+                    .iter()
+                    .map(|c| format!("{c} = EXCLUDED.{c}"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+
+            Ok(())
+        }
+    }
+}
+
+fn build_insert_sql_for_table_with_columns(
     dialect: Dialect,
     table: &str,
     fields: &[FieldInfo],
     row: &[(&'static str, Value)],
     returning: Option<&str>,
-) -> (String, Vec<Value>) {
+) -> (String, Vec<Value>, Vec<&'static str>) {
     let insert_fields: Vec<_> = row
         .iter()
         .map(|(name, value)| {
@@ -76,6 +420,19 @@ fn build_insert_sql_for_table(
         sql.push_str(ret);
     }
 
+    (sql, params, columns)
+}
+
+fn build_insert_sql_for_table(
+    dialect: Dialect,
+    table: &str,
+    fields: &[FieldInfo],
+    row: &[(&'static str, Value)],
+    returning: Option<&str>,
+) -> (String, Vec<Value>) {
+    let (sql, params, _cols) = build_insert_sql_for_table_with_columns(
+        dialect, table, fields, row, returning,
+    );
     (sql, params)
 }
 
@@ -389,26 +746,12 @@ impl<'a, M: Model> InsertBuilder<'a, M> {
         conn: &C,
     ) -> Outcome<i64, sqlmodel_core::Error> {
         if is_joined_inheritance_child::<M>() {
-            if self.on_conflict.is_some() {
-                return Outcome::Err(sqlmodel_core::Error::Custom(
-                    "joined-table inheritance insert does not support ON CONFLICT yet (bd-2bht follow-ups may extend this)"
-                        .to_string(),
-                ));
-            }
-
             let dialect = conn.dialect();
-            let inh = M::inheritance();
-            let Some(parent_table) = inh.parent else {
-                return Outcome::Err(sqlmodel_core::Error::Custom(
-                    "joined-table inheritance child missing parent table metadata".to_string(),
-                ));
+            let on_conflict = self.on_conflict.clone();
+            let (parent_table, parent_fields) = match joined_parent_meta::<M>() {
+                Ok(v) => v,
+                Err(e) => return Outcome::Err(e),
             };
-            let Some(parent_fields_fn) = inh.parent_fields_fn else {
-                return Outcome::Err(sqlmodel_core::Error::Custom(
-                    "joined-table inheritance child missing parent_fields_fn metadata".to_string(),
-                ));
-            };
-            let parent_fields = parent_fields_fn();
 
             let Some(parent_row) = self.model.joined_parent_row() else {
                 return Outcome::Err(sqlmodel_core::Error::Custom(
@@ -426,6 +769,72 @@ impl<'a, M: Model> InsertBuilder<'a, M> {
                     .find(|f| f.column_name == pk_col.unwrap_or("") && f.primary_key)
                     .is_some_and(|f| f.auto_increment)
                 && pk_vals[0].is_null();
+
+            if on_conflict.is_some() {
+                if needs_generated_id || pk_vals.iter().any(|v| v.is_null()) {
+                    return Outcome::Err(sqlmodel_core::Error::Custom(
+                        "joined-table inheritance insert ON CONFLICT requires explicit primary key values (auto-increment upsert is not supported yet)"
+                            .to_string(),
+                    ));
+                }
+                // For joined-table inheritance, we currently only support conflict targets that
+                // align across both tables (primary key).
+                if let Some(OnConflict::DoUpdate { target, .. }) = &on_conflict {
+                    let pk_target: Vec<String> =
+                        M::PRIMARY_KEY.iter().map(|c| (*c).to_string()).collect();
+                    if !target.is_empty()
+                        && target != &pk_target
+                    {
+                        return Outcome::Err(sqlmodel_core::Error::Custom(
+                            "joined-table inheritance insert ON CONFLICT currently only supports the primary key as conflict target"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+
+            let parent_allowed: HashSet<&'static str> =
+                parent_fields.iter().map(|f| f.column_name).collect();
+            let child_allowed: HashSet<&'static str> =
+                M::fields().iter().map(|f| f.column_name).collect();
+
+            let (parent_on_conflict, child_on_conflict) = match &on_conflict {
+                None => (None, None),
+                Some(OnConflict::DoNothing) => (Some(OnConflict::DoNothing), Some(OnConflict::DoNothing)),
+                Some(OnConflict::DoUpdate { columns, target }) => {
+                    // Column list can include either parent or child columns; each table gets its own subset.
+                    for c in columns {
+                        if !parent_allowed.contains(c.as_str()) && !child_allowed.contains(c.as_str())
+                        {
+                            return Outcome::Err(sqlmodel_core::Error::Custom(format!(
+                                "unknown joined-table inheritance ON CONFLICT update column '{c}'"
+                            )));
+                        }
+                    }
+
+                    let parent_cols: Vec<String> = columns
+                        .iter()
+                        .filter(|c| parent_allowed.contains(c.as_str()))
+                        .cloned()
+                        .collect();
+                    let child_cols: Vec<String> = columns
+                        .iter()
+                        .filter(|c| child_allowed.contains(c.as_str()))
+                        .cloned()
+                        .collect();
+
+                    (
+                        Some(OnConflict::DoUpdate {
+                            columns: parent_cols,
+                            target: target.clone(),
+                        }),
+                        Some(OnConflict::DoUpdate {
+                            columns: child_cols,
+                            target: target.clone(),
+                        }),
+                    )
+                }
+            };
 
             let tx_out = conn.begin(cx).await;
             let tx = match tx_out {
@@ -445,48 +854,89 @@ impl<'a, M: Model> InsertBuilder<'a, M> {
                     ));
                 };
 
-                let (sql, params) = build_insert_sql_for_table(
-                    dialect,
-                    parent_table,
-                    parent_fields,
-                    &parent_row,
-                    Some(pk_col),
-                );
-                match tx.query_one(cx, &sql, &params).await {
-                    Outcome::Ok(Some(row)) => match row.get_as::<i64>(0) {
-                        Ok(v) => inserted_id = Some(v),
-                        Err(e) => {
+                if needs_generated_id {
+                    let (sql, params, _cols) = build_insert_sql_for_table_with_columns(
+                        dialect,
+                        parent_table,
+                        parent_fields,
+                        &parent_row,
+                        Some(pk_col),
+                    );
+                    match tx.query_one(cx, &sql, &params).await {
+                        Outcome::Ok(Some(row)) => match row.get_as::<i64>(0) {
+                            Ok(v) => inserted_id = Some(v),
+                            Err(e) => {
+                                tx_rollback_best_effort(tx, cx).await;
+                                return Outcome::Err(e);
+                            }
+                        },
+                        Outcome::Ok(None) => {
+                            tx_rollback_best_effort(tx, cx).await;
+                            return Outcome::Err(sqlmodel_core::Error::Custom(
+                                "base insert returned no row".to_string(),
+                            ));
+                        }
+                        Outcome::Err(e) => {
                             tx_rollback_best_effort(tx, cx).await;
                             return Outcome::Err(e);
                         }
-                    },
-                    Outcome::Ok(None) => {
-                        tx_rollback_best_effort(tx, cx).await;
-                        return Outcome::Err(sqlmodel_core::Error::Custom(
-                            "base insert returned no row".to_string(),
-                        ));
+                        Outcome::Cancelled(r) => {
+                            tx_rollback_best_effort(tx, cx).await;
+                            return Outcome::Cancelled(r);
+                        }
+                        Outcome::Panicked(p) => {
+                            tx_rollback_best_effort(tx, cx).await;
+                            return Outcome::Panicked(p);
+                        }
                     }
-                    Outcome::Err(e) => {
-                        tx_rollback_best_effort(tx, cx).await;
-                        return Outcome::Err(e);
+                } else {
+                    let (mut sql, params, cols) = build_insert_sql_for_table_with_columns(
+                        dialect,
+                        parent_table,
+                        parent_fields,
+                        &parent_row,
+                        None,
+                    );
+                    if let Some(oc) = &parent_on_conflict {
+                        if let Err(e) =
+                            append_on_conflict_clause(dialect, &mut sql, M::PRIMARY_KEY, &cols, oc)
+                        {
+                            tx_rollback_best_effort(tx, cx).await;
+                            return Outcome::Err(e);
+                        }
                     }
-                    Outcome::Cancelled(r) => {
-                        tx_rollback_best_effort(tx, cx).await;
-                        return Outcome::Cancelled(r);
-                    }
-                    Outcome::Panicked(p) => {
-                        tx_rollback_best_effort(tx, cx).await;
-                        return Outcome::Panicked(p);
+                    match tx.execute(cx, &sql, &params).await {
+                        Outcome::Ok(_) => {}
+                        Outcome::Err(e) => {
+                            tx_rollback_best_effort(tx, cx).await;
+                            return Outcome::Err(e);
+                        }
+                        Outcome::Cancelled(r) => {
+                            tx_rollback_best_effort(tx, cx).await;
+                            return Outcome::Cancelled(r);
+                        }
+                        Outcome::Panicked(p) => {
+                            tx_rollback_best_effort(tx, cx).await;
+                            return Outcome::Panicked(p);
+                        }
                     }
                 }
             } else {
-                let (sql, params) = build_insert_sql_for_table(
+                let (mut sql, params, cols) = build_insert_sql_for_table_with_columns(
                     dialect,
                     parent_table,
                     parent_fields,
                     &parent_row,
                     None,
                 );
+                if let Some(oc) = &parent_on_conflict {
+                    if let Err(e) =
+                        append_on_conflict_clause(dialect, &mut sql, M::PRIMARY_KEY, &cols, oc)
+                    {
+                        tx_rollback_best_effort(tx, cx).await;
+                        return Outcome::Err(e);
+                    }
+                }
                 match tx.execute(cx, &sql, &params).await {
                     Outcome::Ok(_) => {}
                     Outcome::Err(e) => {
@@ -557,8 +1007,17 @@ impl<'a, M: Model> InsertBuilder<'a, M> {
                 }
             }
 
-            let (child_sql, child_params) =
-                build_insert_sql_for_table(dialect, M::TABLE_NAME, M::fields(), &child_row, None);
+            let (mut child_sql, child_params, child_cols) =
+                build_insert_sql_for_table_with_columns(dialect, M::TABLE_NAME, M::fields(), &child_row, None);
+            if let Some(oc) = &child_on_conflict {
+                if let Err(e) =
+                    append_on_conflict_clause(dialect, &mut child_sql, M::PRIMARY_KEY, &child_cols, oc)
+                {
+                    tx_rollback_best_effort(tx, cx).await;
+                    return Outcome::Err(e);
+                }
+            }
+
             match tx.execute(cx, &child_sql, &child_params).await {
                 Outcome::Ok(_) => {}
                 Outcome::Err(e) => {
