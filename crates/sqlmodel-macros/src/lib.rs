@@ -1270,7 +1270,65 @@ fn to_snake_case(s: &str) -> String {
 /// ```
 #[proc_macro_attribute]
 pub fn query(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Stub: query attribute macro is a pass-through placeholder for future SQL validation.
-    // When implemented, it will provide compile-time SQL validation and query optimization hints.
-    item
+    let original = item.clone();
+
+    let func: syn::ItemFn = match syn::parse(item) {
+        Ok(f) => f,
+        Err(e) => return e.to_compile_error().into(),
+    };
+
+    if func.sig.asyncness.is_none() {
+        return syn::Error::new_spanned(
+            func.sig.fn_token,
+            "#[sqlmodel::query] requires an async fn",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let Some(first_arg) = func.sig.inputs.first() else {
+        return syn::Error::new_spanned(
+            &func.sig.ident,
+            "#[sqlmodel::query] requires the first parameter to be `cx: &Cx`",
+        )
+        .to_compile_error()
+        .into();
+    };
+
+    let first_ty = match first_arg {
+        syn::FnArg::Typed(pat_ty) => &*pat_ty.ty,
+        syn::FnArg::Receiver(recv) => {
+            return syn::Error::new_spanned(
+                recv,
+                "#[sqlmodel::query] does not support methods; use a free function",
+            )
+            .to_compile_error()
+            .into();
+        }
+    };
+
+    if !is_ref_to_cx(first_ty) {
+        return syn::Error::new_spanned(
+            first_ty,
+            "#[sqlmodel::query] requires the first parameter to be `cx: &Cx`",
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    original
+}
+
+fn is_ref_to_cx(ty: &syn::Type) -> bool {
+    let syn::Type::Reference(r) = ty else {
+        return false;
+    };
+    is_cx_path(&r.elem)
+}
+
+fn is_cx_path(ty: &syn::Type) -> bool {
+    let syn::Type::Path(p) = ty else {
+        return false;
+    };
+    p.path.segments.last().is_some_and(|seg| seg.ident == "Cx")
 }

@@ -400,11 +400,11 @@ pub enum DumpMode {
 pub struct DumpOptions {
     /// Output mode: Json or Python (Rust native).
     ///
-    /// **Note:** This option is currently NOT IMPLEMENTED. In Pydantic,
-    /// `mode='json'` returns JSON-compatible types (strings for dates) while
-    /// `mode='python'` returns native Python types (datetime objects). In Rust
-    /// with serde, type serialization is determined by Serialize implementations,
-    /// so both modes currently produce identical `serde_json::Value` output.
+    /// In Python/Pydantic, `mode='json'` produces JSON-compatible values while
+    /// `mode='python'` preserves native Python types (e.g., datetime objects).
+    ///
+    /// In this crate, `model_dump()`/`sql_model_dump()` return `serde_json::Value`,
+    /// so only JSON output is supported. Non-JSON modes are rejected at runtime.
     pub mode: DumpMode,
     /// Only include these fields (if Some)
     pub include: Option<std::collections::HashSet<String>>,
@@ -417,12 +417,11 @@ pub struct DumpOptions {
     pub by_alias: bool,
     /// Exclude fields that were not explicitly set.
     ///
-    /// **Note:** This option is currently NOT IMPLEMENTED. It is defined for
-    /// API compatibility with Pydantic but has no effect. Full implementation
-    /// requires compile-time code generation to track which fields were
-    /// explicitly provided during construction (a `fields_set: HashSet<String>`).
-    /// This differs from `exclude_defaults` which compares current values to
-    /// known defaults.
+    /// In Pydantic, this depends on tracking which fields were explicitly
+    /// provided at construction time (distinct from `exclude_defaults`).
+    ///
+    /// Rust structs do not retain "field set" metadata by default, so this
+    /// option is rejected at runtime to avoid silently producing incorrect output.
     ///
     /// Pydantic semantics: If a field has a default value and the user explicitly
     /// sets it to that default, it should still be included (it was "set").
@@ -437,10 +436,10 @@ pub struct DumpOptions {
     pub exclude_computed_fields: bool,
     /// Enable round-trip mode (preserves types for re-parsing).
     ///
-    /// **Note:** This option is currently NOT IMPLEMENTED. In Pydantic,
-    /// round_trip mode serializes values in a way that can be deserialized
-    /// back to the exact same model. In Rust with serde, round-trip fidelity
-    /// is generally handled by the Serialize/Deserialize implementations.
+    /// Pydantic can alter serialization to ensure a dump can be fed back into
+    /// validation and reproduce the same model. This crate does not currently
+    /// implement a tagged encoding for round-trip fidelity, so this option is
+    /// rejected at runtime.
     pub round_trip: bool,
     /// Indentation for JSON output (None = compact, Some(n) = n spaces)
     pub indent: Option<usize>,
@@ -524,6 +523,13 @@ impl DumpOptions {
 
 /// Result type for model_dump operations.
 pub type DumpResult = std::result::Result<serde_json::Value, serde_json::Error>;
+
+fn dump_options_unsupported(msg: impl Into<String>) -> serde_json::Error {
+    serde_json::Error::io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        msg.into(),
+    ))
+}
 
 /// Trait for models that support model_dump().
 ///
@@ -613,6 +619,27 @@ pub trait ModelDump {
 /// Blanket implementation of ModelDump for types that implement Serialize.
 impl<T: serde::Serialize> ModelDump for T {
     fn model_dump(&self, options: DumpOptions) -> DumpResult {
+        if options.mode != DumpMode::Json {
+            return Err(dump_options_unsupported(
+                "DumpOptions.mode != Json is not supported (output is serde_json::Value)",
+            ));
+        }
+        if options.exclude_unset {
+            return Err(dump_options_unsupported(
+                "DumpOptions.exclude_unset is not supported (requires fields_set tracking)",
+            ));
+        }
+        if options.round_trip {
+            return Err(dump_options_unsupported(
+                "DumpOptions.round_trip is not supported (tagged round-trip encoding is not available)",
+            ));
+        }
+        if options.by_alias || options.exclude_defaults || options.exclude_computed_fields {
+            return Err(dump_options_unsupported(
+                "DumpOptions.by_alias/exclude_defaults/exclude_computed_fields require SqlModelDump",
+            ));
+        }
+
         // First, serialize to JSON value
         let mut value = serde_json::to_value(self)?;
 
@@ -634,11 +661,7 @@ impl<T: serde::Serialize> ModelDump for T {
             }
 
             // Note: This is the generic ModelDump implementation for Serialize types.
-            // - exclude_defaults: Requires Model::fields() metadata. Use SqlModelDump instead.
-            // - exclude_unset: Requires fields_set tracking. NOT IMPLEMENTED in either trait.
-            // - exclude_computed_fields: Requires Model::fields() metadata. Use SqlModelDump instead.
-            // - by_alias: Requires Model::fields() metadata. Use SqlModelDump instead.
-            // - mode/round_trip: Currently not implemented (no effect).
+            // Model-aware transforms are implemented by SqlModelDump and rejected above.
         }
 
         Ok(value)
@@ -901,6 +924,22 @@ impl<T: Model + DeserializeOwned> SqlModelValidate for T {}
 pub trait SqlModelDump: Model + serde::Serialize {
     /// Serialize a model to a JSON value, optionally applying aliases.
     fn sql_model_dump(&self, options: DumpOptions) -> DumpResult {
+        if options.mode != DumpMode::Json {
+            return Err(dump_options_unsupported(
+                "DumpOptions.mode != Json is not supported (output is serde_json::Value)",
+            ));
+        }
+        if options.exclude_unset {
+            return Err(dump_options_unsupported(
+                "DumpOptions.exclude_unset is not supported (requires fields_set tracking)",
+            ));
+        }
+        if options.round_trip {
+            return Err(dump_options_unsupported(
+                "DumpOptions.round_trip is not supported (tagged round-trip encoding is not available)",
+            ));
+        }
+
         // First, serialize to JSON value
         let mut value = serde_json::to_value(self)?;
 

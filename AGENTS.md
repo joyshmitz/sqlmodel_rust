@@ -124,7 +124,7 @@ cargo fmt --check
 
 ## Minimal Dependency Stack
 
-**ONLY these dependencies are allowed:**
+Core crates should keep dependencies tight (strong preference):
 
 | Crate | Purpose |
 |-------|---------|
@@ -134,6 +134,12 @@ cargo fmt --check
 | `proc-macro2` | Proc macro support (macros crate only) |
 | `quote` | Proc macro code generation |
 | `syn` | Proc macro parsing |
+
+Drivers/validation may use focused dependencies when required for correctness:
+- `regex` (validation patterns)
+- `sha1` / `sha2` / `rand` (auth + protocol)
+- `rustls` / `webpki-roots` / `rustls-pemfile` (TLS)
+- `rsa` (MySQL RSA auth for `caching_sha2_password`/`sha256_password` without TLS)
 
 **NOT allowed:**
 - `tokio` (use asupersync)

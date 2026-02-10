@@ -35,10 +35,78 @@ use sqlmodel_console::{ConsoleAware, SqlModelConsole};
 
 use crate::auth::ScramClient;
 use crate::config::PgConfig;
+#[cfg(not(feature = "tls"))]
+use crate::config::SslMode;
 use crate::protocol::{
     BackendMessage, ErrorFields, FrontendMessage, MessageReader, MessageWriter, PROTOCOL_VERSION,
     TransactionStatus,
 };
+
+#[cfg(feature = "tls")]
+use crate::tls;
+
+enum PgStream {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(rustls::StreamOwned<rustls::ClientConnection, TcpStream>),
+    #[cfg(feature = "tls")]
+    Closed,
+}
+
+impl PgStream {
+    #[cfg(feature = "tls")]
+    fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        match self {
+            PgStream::Plain(s) => s.read_exact(buf),
+            #[cfg(feature = "tls")]
+            PgStream::Tls(s) => s.read_exact(buf),
+            #[cfg(feature = "tls")]
+            PgStream::Closed => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "connection closed",
+            )),
+        }
+    }
+
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            PgStream::Plain(s) => s.read(buf),
+            #[cfg(feature = "tls")]
+            PgStream::Tls(s) => s.read(buf),
+            #[cfg(feature = "tls")]
+            PgStream::Closed => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "connection closed",
+            )),
+        }
+    }
+
+    fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        match self {
+            PgStream::Plain(s) => s.write_all(buf),
+            #[cfg(feature = "tls")]
+            PgStream::Tls(s) => s.write_all(buf),
+            #[cfg(feature = "tls")]
+            PgStream::Closed => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "connection closed",
+            )),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            PgStream::Plain(s) => s.flush(),
+            #[cfg(feature = "tls")]
+            PgStream::Tls(s) => s.flush(),
+            #[cfg(feature = "tls")]
+            PgStream::Closed => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "connection closed",
+            )),
+        }
+    }
+}
 
 /// Connection state in the PostgreSQL protocol state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,7 +163,7 @@ impl From<TransactionStatus> for TransactionStatusState {
 /// connection establishment and query execution.
 pub struct PgConnection {
     /// TCP stream to the server
-    stream: TcpStream,
+    stream: PgStream,
     /// Current connection state
     state: ConnectionState,
     /// Backend process ID (for query cancellation)
@@ -170,7 +238,7 @@ impl PgConnection {
         stream.set_write_timeout(Some(config.connect_timeout)).ok();
 
         let mut conn = Self {
-            stream,
+            stream: PgStream::Plain(stream),
             state: ConnectionState::Connecting,
             process_id: 0,
             secret_key: 0,
@@ -185,7 +253,19 @@ impl PgConnection {
 
         // 2. SSL negotiation (if configured)
         if conn.config.ssl_mode.should_try_ssl() {
+            #[cfg(feature = "tls")]
             conn.negotiate_ssl()?;
+
+            #[cfg(not(feature = "tls"))]
+            if conn.config.ssl_mode != SslMode::Prefer {
+                return Err(Error::Connection(ConnectionError {
+                    kind: ConnectionErrorKind::Ssl,
+                    message:
+                        "TLS requested but 'sqlmodel-postgres' was built without feature 'tls'"
+                            .to_string(),
+                    source: None,
+                }));
+            }
         }
 
         // 3. Send startup message
@@ -250,6 +330,7 @@ impl PgConnection {
     // ==================== SSL Negotiation ====================
 
     #[allow(clippy::result_large_err)]
+    #[cfg(feature = "tls")]
     fn negotiate_ssl(&mut self) -> Result<(), Error> {
         // Send SSL request
         self.send_message(&FrontendMessage::SSLRequest)?;
@@ -266,23 +347,61 @@ impl PgConnection {
 
         match buf[0] {
             b'S' => {
-                // Server supports SSL - would need TLS handshake here
-                // For now, we don't implement TLS, so error if required
-                if self.config.ssl_mode.is_required() {
-                    return Err(Error::Connection(ConnectionError {
-                        kind: ConnectionErrorKind::Ssl,
-                        message: "SSL/TLS not yet implemented".to_string(),
-                        source: None,
-                    }));
+                // Server supports SSL; upgrade to TLS.
+                #[cfg(feature = "tls")]
+                {
+                    let plain = match std::mem::replace(&mut self.stream, PgStream::Closed) {
+                        PgStream::Plain(s) => s,
+                        other => {
+                            self.stream = other;
+                            return Err(Error::Connection(ConnectionError {
+                                kind: ConnectionErrorKind::Ssl,
+                                message: "TLS upgrade requires a plain TCP stream".to_string(),
+                                source: None,
+                            }));
+                        }
+                    };
+
+                    let config = tls::build_client_config(self.config.ssl_mode)?;
+                    let server_name = tls::server_name(&self.config.host)?;
+                    let conn =
+                        rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
+                            .map_err(|e| {
+                                Error::Connection(ConnectionError {
+                                    kind: ConnectionErrorKind::Ssl,
+                                    message: format!("Failed to create TLS connection: {e}"),
+                                    source: None,
+                                })
+                            })?;
+
+                    let mut tls_stream = rustls::StreamOwned::new(conn, plain);
+                    while tls_stream.conn.is_handshaking() {
+                        tls_stream
+                            .conn
+                            .complete_io(&mut tls_stream.sock)
+                            .map_err(|e| {
+                                Error::Connection(ConnectionError {
+                                    kind: ConnectionErrorKind::Ssl,
+                                    message: format!("TLS handshake failed: {e}"),
+                                    source: Some(Box::new(e)),
+                                })
+                            })?;
+                    }
+
+                    self.stream = PgStream::Tls(tls_stream);
+                    Ok(())
                 }
-                // If prefer mode, we'd continue without SSL
-                // But we need to reconnect without SSL since we already sent SSLRequest
-                Err(Error::Connection(ConnectionError {
-                    kind: ConnectionErrorKind::Ssl,
-                    message: "SSL/TLS not yet implemented, reconnect with ssl_mode=disable"
-                        .to_string(),
-                    source: None,
-                }))
+
+                #[cfg(not(feature = "tls"))]
+                {
+                    Err(Error::Connection(ConnectionError {
+                        kind: ConnectionErrorKind::Ssl,
+                        message:
+                            "TLS requested but 'sqlmodel-postgres' was built without feature 'tls'"
+                                .to_string(),
+                        source: None,
+                    }))
+                }
             }
             b'N' => {
                 // Server doesn't support SSL

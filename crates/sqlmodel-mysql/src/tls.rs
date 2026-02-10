@@ -340,7 +340,7 @@ impl<S: Read + Write> Write for TlsStream<S> {
 
 /// Build a rustls ClientConfig based on TLS configuration and SSL mode.
 #[cfg(feature = "tls")]
-fn build_client_config(
+pub(crate) fn build_client_config(
     tls_config: &TlsConfig,
     ssl_mode: SslMode,
 ) -> Result<rustls::ClientConfig, Error> {
@@ -578,14 +578,14 @@ fn add_client_auth(
 }
 
 // ============================================================================
-// Placeholder for when TLS feature is disabled
+// Stand-in types when TLS feature is disabled
 // ============================================================================
 
-/// TLS connection wrapper (placeholder when `tls` feature is disabled).
+/// TLS connection wrapper when `tls` feature is disabled.
 #[cfg(not(feature = "tls"))]
 #[derive(Debug)]
 pub struct TlsStream<S> {
-    /// The underlying stream (placeholder)
+    /// The underlying stream
     #[allow(dead_code)]
     inner: S,
 }

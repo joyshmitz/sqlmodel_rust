@@ -47,6 +47,7 @@ pub mod auth;
 pub mod config;
 pub mod connection;
 pub mod protocol;
+pub mod tls;
 pub mod types;
 
 pub use async_connection::{PgAsyncConnection, SharedPgConnection, SharedPgTransaction};

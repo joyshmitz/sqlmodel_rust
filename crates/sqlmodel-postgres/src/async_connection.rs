@@ -17,6 +17,8 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+#[cfg(feature = "tls")]
+use std::io::{Read, Write};
 use std::sync::Arc;
 
 use asupersync::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -32,7 +34,7 @@ use sqlmodel_core::row::ColumnInfo;
 use sqlmodel_core::{Error, Row, Value};
 
 use crate::auth::ScramClient;
-use crate::config::PgConfig;
+use crate::config::{PgConfig, SslMode};
 use crate::connection::{ConnectionState, TransactionStatusState};
 use crate::protocol::{
     BackendMessage, DescribeKind, ErrorFields, FrontendMessage, MessageReader, MessageWriter,
@@ -40,20 +42,266 @@ use crate::protocol::{
 };
 use crate::types::{Format, decode_value, encode_value};
 
+#[cfg(feature = "tls")]
+use crate::tls;
+
+enum PgAsyncStream {
+    Plain(TcpStream),
+    #[cfg(feature = "tls")]
+    Tls(AsyncTlsStream),
+    #[cfg(feature = "tls")]
+    Closed,
+}
+
+impl PgAsyncStream {
+    #[cfg(feature = "tls")]
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        match self {
+            PgAsyncStream::Plain(s) => read_exact_plain_async(s, buf).await,
+            #[cfg(feature = "tls")]
+            PgAsyncStream::Tls(s) => s.read_exact(buf).await,
+            #[cfg(feature = "tls")]
+            PgAsyncStream::Closed => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "connection closed",
+            )),
+        }
+    }
+
+    async fn read_some(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            PgAsyncStream::Plain(s) => read_some_plain_async(s, buf).await,
+            #[cfg(feature = "tls")]
+            PgAsyncStream::Tls(s) => s.read_plain(buf).await,
+            #[cfg(feature = "tls")]
+            PgAsyncStream::Closed => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "connection closed",
+            )),
+        }
+    }
+
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        match self {
+            PgAsyncStream::Plain(s) => write_all_plain_async(s, buf).await,
+            #[cfg(feature = "tls")]
+            PgAsyncStream::Tls(s) => s.write_all(buf).await,
+            #[cfg(feature = "tls")]
+            PgAsyncStream::Closed => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "connection closed",
+            )),
+        }
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            PgAsyncStream::Plain(s) => flush_plain_async(s).await,
+            #[cfg(feature = "tls")]
+            PgAsyncStream::Tls(s) => s.flush().await,
+            #[cfg(feature = "tls")]
+            PgAsyncStream::Closed => Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "connection closed",
+            )),
+        }
+    }
+}
+
+#[cfg(feature = "tls")]
+struct AsyncTlsStream {
+    tcp: TcpStream,
+    tls: rustls::ClientConnection,
+}
+
+#[cfg(feature = "tls")]
+impl AsyncTlsStream {
+    async fn handshake(mut tcp: TcpStream, ssl_mode: SslMode, host: &str) -> Result<Self, Error> {
+        let config = tls::build_client_config(ssl_mode)?;
+        let server_name = tls::server_name(host)?;
+        let mut tls = rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
+            .map_err(|e| connection_error(format!("Failed to create TLS connection: {e}")))?;
+
+        while tls.is_handshaking() {
+            while tls.wants_write() {
+                let mut out = Vec::new();
+                tls.write_tls(&mut out)
+                    .map_err(|e| connection_error(format!("TLS handshake write_tls error: {e}")))?;
+                if !out.is_empty() {
+                    write_all_plain_async(&mut tcp, &out).await.map_err(|e| {
+                        Error::Connection(ConnectionError {
+                            kind: ConnectionErrorKind::Disconnected,
+                            message: format!("TLS handshake write error: {e}"),
+                            source: Some(Box::new(e)),
+                        })
+                    })?;
+                }
+            }
+
+            if tls.wants_read() {
+                let mut buf = [0u8; 8192];
+                let n = read_some_plain_async(&mut tcp, &mut buf)
+                    .await
+                    .map_err(|e| {
+                        Error::Connection(ConnectionError {
+                            kind: ConnectionErrorKind::Disconnected,
+                            message: format!("TLS handshake read error: {e}"),
+                            source: Some(Box::new(e)),
+                        })
+                    })?;
+                if n == 0 {
+                    return Err(connection_error("Connection closed during TLS handshake"));
+                }
+
+                let mut cursor = std::io::Cursor::new(&buf[..n]);
+                tls.read_tls(&mut cursor)
+                    .map_err(|e| connection_error(format!("TLS handshake read_tls error: {e}")))?;
+                tls.process_new_packets()
+                    .map_err(|e| connection_error(format!("TLS handshake error: {e}")))?;
+            }
+        }
+
+        Ok(Self { tcp, tls })
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> std::io::Result<()> {
+        let mut read = 0;
+        while read < buf.len() {
+            let n = self.read_plain(&mut buf[read..]).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed",
+                ));
+            }
+            read += n;
+        }
+        Ok(())
+    }
+
+    async fn read_plain(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match self.tls.reader().read(out) {
+                Ok(n) if n > 0 => return Ok(n),
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e),
+            }
+
+            if !self.tls.wants_read() {
+                return Ok(0);
+            }
+
+            let mut enc = [0u8; 8192];
+            let n = read_some_plain_async(&mut self.tcp, &mut enc).await?;
+            if n == 0 {
+                return Ok(0);
+            }
+
+            let mut cursor = std::io::Cursor::new(&enc[..n]);
+            self.tls.read_tls(&mut cursor)?;
+            self.tls
+                .process_new_packets()
+                .map_err(|e| std::io::Error::other(format!("TLS error: {e}")))?;
+        }
+    }
+
+    async fn write_all(&mut self, buf: &[u8]) -> std::io::Result<()> {
+        let mut written = 0;
+        while written < buf.len() {
+            let n = self.tls.writer().write(&buf[written..])?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "TLS write zero",
+                ));
+            }
+            written += n;
+            self.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> std::io::Result<()> {
+        self.tls.writer().flush()?;
+        while self.tls.wants_write() {
+            let mut out = Vec::new();
+            self.tls.write_tls(&mut out)?;
+            if !out.is_empty() {
+                write_all_plain_async(&mut self.tcp, &out).await?;
+            }
+        }
+        flush_plain_async(&mut self.tcp).await
+    }
+}
+
+#[cfg(feature = "tls")]
+async fn read_exact_plain_async(stream: &mut TcpStream, buf: &mut [u8]) -> std::io::Result<()> {
+    let mut read = 0;
+    while read < buf.len() {
+        let n = read_some_plain_async(stream, &mut buf[read..]).await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "connection closed",
+            ));
+        }
+        read += n;
+    }
+    Ok(())
+}
+
+async fn read_some_plain_async(stream: &mut TcpStream, buf: &mut [u8]) -> std::io::Result<usize> {
+    let mut read_buf = ReadBuf::new(buf);
+    std::future::poll_fn(|cx| std::pin::Pin::new(&mut *stream).poll_read(cx, &mut read_buf))
+        .await?;
+    Ok(read_buf.filled().len())
+}
+
+async fn write_all_plain_async(stream: &mut TcpStream, buf: &[u8]) -> std::io::Result<()> {
+    let mut written = 0;
+    while written < buf.len() {
+        let n = std::future::poll_fn(|cx| {
+            std::pin::Pin::new(&mut *stream).poll_write(cx, &buf[written..])
+        })
+        .await?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "connection closed",
+            ));
+        }
+        written += n;
+    }
+    Ok(())
+}
+
+async fn flush_plain_async(stream: &mut TcpStream) -> std::io::Result<()> {
+    std::future::poll_fn(|cx| std::pin::Pin::new(&mut *stream).poll_flush(cx)).await
+}
+
 /// Async PostgreSQL connection.
 ///
 /// This connection uses asupersync's TCP stream for non-blocking I/O and
 /// supports the extended query protocol for parameter binding.
 pub struct PgAsyncConnection {
-    stream: TcpStream,
+    stream: PgAsyncStream,
     state: ConnectionState,
     process_id: i32,
     secret_key: i32,
     parameters: HashMap<String, String>,
+    next_prepared_id: u64,
+    prepared: HashMap<u64, PgPreparedMeta>,
     config: PgConfig,
     reader: MessageReader,
     writer: MessageWriter,
     read_buf: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct PgPreparedMeta {
+    name: String,
+    param_type_oids: Vec<u32>,
 }
 
 impl std::fmt::Debug for PgAsyncConnection {
@@ -102,24 +350,34 @@ impl PgAsyncConnection {
         stream.set_nodelay(true).ok();
 
         let mut conn = Self {
-            stream,
+            stream: PgAsyncStream::Plain(stream),
             state: ConnectionState::Connecting,
             process_id: 0,
             secret_key: 0,
             parameters: HashMap::new(),
+            next_prepared_id: 1,
+            prepared: HashMap::new(),
             config,
             reader: MessageReader::new(),
             writer: MessageWriter::new(),
             read_buf: vec![0u8; 8192],
         };
 
-        // SSL negotiation (TLS not implemented; matches sync driver behavior)
+        // SSL negotiation (feature-gated TLS)
         if conn.config.ssl_mode.should_try_ssl() {
+            #[cfg(feature = "tls")]
             match conn.negotiate_ssl().await {
                 Outcome::Ok(()) => {}
                 Outcome::Err(e) => return Outcome::Err(e),
                 Outcome::Cancelled(r) => return Outcome::Cancelled(r),
                 Outcome::Panicked(p) => return Outcome::Panicked(p),
+            }
+
+            #[cfg(not(feature = "tls"))]
+            if conn.config.ssl_mode != SslMode::Prefer {
+                return Outcome::Err(connection_error(
+                    "TLS requested but 'sqlmodel-postgres' was built without feature 'tls'",
+                ));
             }
         }
 
@@ -223,12 +481,273 @@ impl PgAsyncConnection {
     /// Close the connection.
     pub async fn close_async(&mut self, cx: &Cx) -> Outcome<(), Error> {
         // Best-effort terminate. If this fails, the drop will close the socket.
+        //
+        // Note: server-side prepared statements are released when the connection terminates;
+        // explicit Close/DEALLOCATE is not required for correctness here.
         let _ = self.send_message(cx, &FrontendMessage::Terminate).await;
         self.state = ConnectionState::Closed;
         Outcome::Ok(())
     }
 
+    // ==================== Prepared statements ====================
+
+    /// Prepare a server-side statement and return a reusable handle.
+    pub async fn prepare_async(&mut self, cx: &Cx, sql: &str) -> Outcome<PreparedStatement, Error> {
+        let stmt_id = self.next_prepared_id;
+        self.next_prepared_id = self.next_prepared_id.saturating_add(1);
+        let stmt_name = format!("sqlmodel_stmt_{stmt_id}");
+
+        if let Outcome::Err(e) = self
+            .send_message(
+                cx,
+                &FrontendMessage::Parse {
+                    name: stmt_name.clone(),
+                    query: sql.to_string(),
+                    // Let PostgreSQL infer types where possible; ambiguous queries will error
+                    // and should add explicit casts.
+                    param_types: Vec::new(),
+                },
+            )
+            .await
+        {
+            return Outcome::Err(e);
+        }
+
+        if let Outcome::Err(e) = self
+            .send_message(
+                cx,
+                &FrontendMessage::Describe {
+                    kind: DescribeKind::Statement,
+                    name: stmt_name.clone(),
+                },
+            )
+            .await
+        {
+            return Outcome::Err(e);
+        }
+
+        if let Outcome::Err(e) = self.send_message(cx, &FrontendMessage::Sync).await {
+            return Outcome::Err(e);
+        }
+
+        let mut param_type_oids: Option<Vec<u32>> = None;
+        let mut columns: Option<Vec<String>> = None;
+
+        loop {
+            let msg = match self.receive_message(cx).await {
+                Outcome::Ok(m) => m,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+
+            match msg {
+                BackendMessage::ParseComplete
+                | BackendMessage::BindComplete
+                | BackendMessage::CloseComplete
+                | BackendMessage::NoData
+                | BackendMessage::EmptyQueryResponse => {}
+                BackendMessage::ParameterDescription(oids) => {
+                    param_type_oids = Some(oids);
+                }
+                BackendMessage::RowDescription(desc) => {
+                    columns = Some(desc.iter().map(|f| f.name.clone()).collect());
+                }
+                BackendMessage::ReadyForQuery(status) => {
+                    self.state = ConnectionState::Ready(TransactionStatusState::from(status));
+                    break;
+                }
+                BackendMessage::ErrorResponse(e) => {
+                    self.state = ConnectionState::Error;
+                    return Outcome::Err(error_from_fields(&e));
+                }
+                BackendMessage::NoticeResponse(_notice) => {}
+                other => {
+                    return Outcome::Err(protocol_error(format!(
+                        "Unexpected message during prepare: {other:?}"
+                    )));
+                }
+            }
+        }
+
+        let param_type_oids = param_type_oids.unwrap_or_default();
+        self.prepared.insert(
+            stmt_id,
+            PgPreparedMeta {
+                name: stmt_name,
+                param_type_oids: param_type_oids.clone(),
+            },
+        );
+
+        match columns {
+            Some(cols) => Outcome::Ok(PreparedStatement::with_columns(
+                stmt_id,
+                sql.to_string(),
+                param_type_oids.len(),
+                cols,
+            )),
+            None => Outcome::Ok(PreparedStatement::new(
+                stmt_id,
+                sql.to_string(),
+                param_type_oids.len(),
+            )),
+        }
+    }
+
+    pub async fn query_prepared_async(
+        &mut self,
+        cx: &Cx,
+        stmt: &PreparedStatement,
+        params: &[Value],
+    ) -> Outcome<Vec<Row>, Error> {
+        let meta = match self.prepared.get(&stmt.id()) {
+            Some(m) => m.clone(),
+            None => {
+                return Outcome::Err(query_error_msg(
+                    format!("Unknown prepared statement id {}", stmt.id()),
+                    QueryErrorKind::Database,
+                ));
+            }
+        };
+
+        if meta.param_type_oids.len() != params.len() {
+            return Outcome::Err(query_error_msg(
+                format!(
+                    "Prepared statement expects {} params, got {}",
+                    meta.param_type_oids.len(),
+                    params.len()
+                ),
+                QueryErrorKind::Database,
+            ));
+        }
+
+        match self.run_prepared(cx, &meta, params).await {
+            Outcome::Ok(result) => Outcome::Ok(result.rows),
+            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Cancelled(r) => Outcome::Cancelled(r),
+            Outcome::Panicked(p) => Outcome::Panicked(p),
+        }
+    }
+
+    pub async fn execute_prepared_async(
+        &mut self,
+        cx: &Cx,
+        stmt: &PreparedStatement,
+        params: &[Value],
+    ) -> Outcome<u64, Error> {
+        let meta = match self.prepared.get(&stmt.id()) {
+            Some(m) => m.clone(),
+            None => {
+                return Outcome::Err(query_error_msg(
+                    format!("Unknown prepared statement id {}", stmt.id()),
+                    QueryErrorKind::Database,
+                ));
+            }
+        };
+
+        if meta.param_type_oids.len() != params.len() {
+            return Outcome::Err(query_error_msg(
+                format!(
+                    "Prepared statement expects {} params, got {}",
+                    meta.param_type_oids.len(),
+                    params.len()
+                ),
+                QueryErrorKind::Database,
+            ));
+        }
+
+        match self.run_prepared(cx, &meta, params).await {
+            Outcome::Ok(result) => {
+                Outcome::Ok(parse_rows_affected(result.command_tag.as_deref()).unwrap_or(0))
+            }
+            Outcome::Err(e) => Outcome::Err(e),
+            Outcome::Cancelled(r) => Outcome::Cancelled(r),
+            Outcome::Panicked(p) => Outcome::Panicked(p),
+        }
+    }
+
     // ==================== Protocol: extended query ====================
+
+    async fn read_extended_result(&mut self, cx: &Cx) -> Outcome<PgQueryResult, Error> {
+        // Read responses until ReadyForQuery
+        let mut field_descs: Option<Vec<crate::protocol::FieldDescription>> = None;
+        let mut columns: Option<Arc<ColumnInfo>> = None;
+        let mut rows: Vec<Row> = Vec::new();
+        let mut command_tag: Option<String> = None;
+
+        loop {
+            let msg = match self.receive_message(cx).await {
+                Outcome::Ok(m) => m,
+                Outcome::Err(e) => return Outcome::Err(e),
+                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                Outcome::Panicked(p) => return Outcome::Panicked(p),
+            };
+
+            match msg {
+                BackendMessage::ParseComplete
+                | BackendMessage::BindComplete
+                | BackendMessage::CloseComplete
+                | BackendMessage::ParameterDescription(_)
+                | BackendMessage::NoData
+                | BackendMessage::PortalSuspended
+                | BackendMessage::EmptyQueryResponse => {}
+                BackendMessage::RowDescription(desc) => {
+                    let names: Vec<String> = desc.iter().map(|f| f.name.clone()).collect();
+                    columns = Some(Arc::new(ColumnInfo::new(names)));
+                    field_descs = Some(desc);
+                }
+                BackendMessage::DataRow(raw_values) => {
+                    let Some(ref desc) = field_descs else {
+                        return Outcome::Err(protocol_error(
+                            "DataRow received before RowDescription",
+                        ));
+                    };
+                    let Some(ref cols) = columns else {
+                        return Outcome::Err(protocol_error("Row column metadata missing"));
+                    };
+                    if raw_values.len() != desc.len() {
+                        return Outcome::Err(protocol_error("DataRow field count mismatch"));
+                    }
+
+                    let mut values = Vec::with_capacity(raw_values.len());
+                    for (i, raw) in raw_values.into_iter().enumerate() {
+                        match raw {
+                            None => values.push(Value::Null),
+                            Some(bytes) => {
+                                let field = &desc[i];
+                                let format = Format::from_code(field.format);
+                                let decoded = match decode_value(
+                                    field.type_oid,
+                                    Some(bytes.as_slice()),
+                                    format,
+                                ) {
+                                    Ok(v) => v,
+                                    Err(e) => return Outcome::Err(e),
+                                };
+                                values.push(decoded);
+                            }
+                        }
+                    }
+                    rows.push(Row::with_columns(Arc::clone(cols), values));
+                }
+                BackendMessage::CommandComplete(tag) => {
+                    command_tag = Some(tag);
+                }
+                BackendMessage::ReadyForQuery(status) => {
+                    self.state = ConnectionState::Ready(TransactionStatusState::from(status));
+                    break;
+                }
+                BackendMessage::ErrorResponse(e) => {
+                    self.state = ConnectionState::Error;
+                    return Outcome::Err(error_from_fields(&e));
+                }
+                BackendMessage::NoticeResponse(_notice) => {}
+                _ => {}
+            }
+        }
+
+        Outcome::Ok(PgQueryResult { rows, command_tag })
+    }
 
     async fn run_extended(
         &mut self,
@@ -321,89 +840,100 @@ impl PgAsyncConnection {
         if let Outcome::Err(e) = self.send_message(cx, &FrontendMessage::Sync).await {
             return Outcome::Err(e);
         }
+        self.read_extended_result(cx).await
+    }
 
-        // Read responses until ReadyForQuery
-        let mut field_descs: Option<Vec<crate::protocol::FieldDescription>> = None;
-        let mut columns: Option<Arc<ColumnInfo>> = None;
-        let mut rows: Vec<Row> = Vec::new();
-        let mut command_tag: Option<String> = None;
+    async fn run_prepared(
+        &mut self,
+        cx: &Cx,
+        meta: &PgPreparedMeta,
+        params: &[Value],
+    ) -> Outcome<PgQueryResult, Error> {
+        let mut param_values = Vec::with_capacity(params.len());
 
-        loop {
-            let msg = match self.receive_message(cx).await {
-                Outcome::Ok(m) => m,
-                Outcome::Err(e) => return Outcome::Err(e),
-                Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-                Outcome::Panicked(p) => return Outcome::Panicked(p),
-            };
-
-            match msg {
-                BackendMessage::ParseComplete
-                | BackendMessage::BindComplete
-                | BackendMessage::CloseComplete
-                | BackendMessage::ParameterDescription(_)
-                | BackendMessage::NoData
-                | BackendMessage::PortalSuspended
-                | BackendMessage::EmptyQueryResponse => {}
-                BackendMessage::RowDescription(desc) => {
-                    let names: Vec<String> = desc.iter().map(|f| f.name.clone()).collect();
-                    columns = Some(Arc::new(ColumnInfo::new(names)));
-                    field_descs = Some(desc);
-                }
-                BackendMessage::DataRow(raw_values) => {
-                    let Some(ref desc) = field_descs else {
-                        return Outcome::Err(protocol_error(
-                            "DataRow received before RowDescription",
+        for (i, v) in params.iter().enumerate() {
+            if matches!(v, Value::Null) {
+                param_values.push(None);
+                continue;
+            }
+            match encode_value(v, Format::Text) {
+                Ok((bytes, oid)) => {
+                    let expected = meta.param_type_oids.get(i).copied().unwrap_or(0);
+                    if expected != 0 && expected != oid {
+                        return Outcome::Err(query_error_msg(
+                            format!(
+                                "Prepared statement param {} expects type OID {}, got {}",
+                                i + 1,
+                                expected,
+                                oid
+                            ),
+                            QueryErrorKind::Database,
                         ));
-                    };
-                    let Some(ref cols) = columns else {
-                        return Outcome::Err(protocol_error("Row column metadata missing"));
-                    };
-                    if raw_values.len() != desc.len() {
-                        return Outcome::Err(protocol_error("DataRow field count mismatch"));
                     }
-
-                    let mut values = Vec::with_capacity(raw_values.len());
-                    for (i, raw) in raw_values.into_iter().enumerate() {
-                        match raw {
-                            None => values.push(Value::Null),
-                            Some(bytes) => {
-                                let field = &desc[i];
-                                let format = Format::from_code(field.format);
-                                let decoded = match decode_value(
-                                    field.type_oid,
-                                    Some(bytes.as_slice()),
-                                    format,
-                                ) {
-                                    Ok(v) => v,
-                                    Err(e) => return Outcome::Err(e),
-                                };
-                                values.push(decoded);
-                            }
-                        }
-                    }
-                    rows.push(Row::with_columns(Arc::clone(cols), values));
+                    param_values.push(Some(bytes));
                 }
-                BackendMessage::CommandComplete(tag) => {
-                    command_tag = Some(tag);
-                }
-                BackendMessage::ReadyForQuery(status) => {
-                    self.state = ConnectionState::Ready(TransactionStatusState::from(status));
-                    break;
-                }
-                BackendMessage::ErrorResponse(e) => {
-                    self.state = ConnectionState::Error;
-                    return Outcome::Err(error_from_fields(&e));
-                }
-                BackendMessage::NoticeResponse(_notice) => {}
-                _ => {}
+                Err(e) => return Outcome::Err(e),
             }
         }
 
-        Outcome::Ok(PgQueryResult { rows, command_tag })
+        let param_formats = if params.is_empty() {
+            Vec::new()
+        } else {
+            vec![Format::Text.code()]
+        };
+
+        if let Outcome::Err(e) = self
+            .send_message(
+                cx,
+                &FrontendMessage::Bind {
+                    portal: String::new(),
+                    statement: meta.name.clone(),
+                    param_formats,
+                    params: param_values,
+                    result_formats: Vec::new(),
+                },
+            )
+            .await
+        {
+            return Outcome::Err(e);
+        }
+
+        if let Outcome::Err(e) = self
+            .send_message(
+                cx,
+                &FrontendMessage::Describe {
+                    kind: DescribeKind::Portal,
+                    name: String::new(),
+                },
+            )
+            .await
+        {
+            return Outcome::Err(e);
+        }
+
+        if let Outcome::Err(e) = self
+            .send_message(
+                cx,
+                &FrontendMessage::Execute {
+                    portal: String::new(),
+                    max_rows: 0,
+                },
+            )
+            .await
+        {
+            return Outcome::Err(e);
+        }
+
+        if let Outcome::Err(e) = self.send_message(cx, &FrontendMessage::Sync).await {
+            return Outcome::Err(e);
+        }
+
+        self.read_extended_result(cx).await
     }
 
     // ==================== Startup + auth ====================
 
+    #[cfg(feature = "tls")]
     async fn negotiate_ssl(&mut self) -> Outcome<(), Error> {
         // Send SSL request
         if let Outcome::Err(e) = self.send_message_no_cx(&FrontendMessage::SSLRequest).await {
@@ -412,33 +942,48 @@ impl PgAsyncConnection {
 
         // Read single-byte response
         let mut buf = [0u8; 1];
-        match read_exact_async(&mut self.stream, &mut buf).await {
-            Ok(()) => {}
-            Err(e) => {
-                return Outcome::Err(Error::Connection(ConnectionError {
-                    kind: ConnectionErrorKind::Ssl,
-                    message: format!("Failed to read SSL response: {}", e),
-                    source: Some(Box::new(e)),
-                }));
-            }
+        if let Err(e) = self.stream.read_exact(&mut buf).await {
+            return Outcome::Err(Error::Connection(ConnectionError {
+                kind: ConnectionErrorKind::Ssl,
+                message: format!("Failed to read SSL response: {}", e),
+                source: Some(Box::new(e)),
+            }));
         }
 
         match buf[0] {
             b'S' => {
-                // Server supports SSL but TLS handshake is not implemented.
-                if self.config.ssl_mode.is_required() {
-                    Outcome::Err(Error::Connection(ConnectionError {
-                        kind: ConnectionErrorKind::Ssl,
-                        message: "SSL/TLS not yet implemented".to_string(),
-                        source: None,
-                    }))
-                } else {
-                    Outcome::Err(Error::Connection(ConnectionError {
-                        kind: ConnectionErrorKind::Ssl,
-                        message: "SSL/TLS not yet implemented, reconnect with ssl_mode=disable"
-                            .to_string(),
-                        source: None,
-                    }))
+                #[cfg(feature = "tls")]
+                {
+                    let plain = match std::mem::replace(&mut self.stream, PgAsyncStream::Closed) {
+                        PgAsyncStream::Plain(s) => s,
+                        other => {
+                            self.stream = other;
+                            return Outcome::Err(connection_error(
+                                "TLS upgrade requires a plain TCP stream",
+                            ));
+                        }
+                    };
+
+                    let tls_stream = match AsyncTlsStream::handshake(
+                        plain,
+                        self.config.ssl_mode,
+                        &self.config.host,
+                    )
+                    .await
+                    {
+                        Ok(s) => s,
+                        Err(e) => return Outcome::Err(e),
+                    };
+
+                    self.stream = PgAsyncStream::Tls(tls_stream);
+                    Outcome::Ok(())
+                }
+
+                #[cfg(not(feature = "tls"))]
+                {
+                    Outcome::Err(connection_error(
+                        "TLS requested but 'sqlmodel-postgres' was built without feature 'tls'",
+                    ))
                 }
             }
             b'N' => {
@@ -707,46 +1252,25 @@ impl PgAsyncConnection {
     async fn send_message_no_cx(&mut self, msg: &FrontendMessage) -> Outcome<(), Error> {
         let data = self.writer.write(msg).to_vec();
 
-        let mut written = 0;
-        while written < data.len() {
-            match std::future::poll_fn(|cx| {
-                std::pin::Pin::new(&mut self.stream).poll_write(cx, &data[written..])
-            })
-            .await
-            {
-                Ok(n) => {
-                    if n == 0 {
-                        self.state = ConnectionState::Error;
-                        return Outcome::Err(Error::Connection(ConnectionError {
-                            kind: ConnectionErrorKind::Disconnected,
-                            message: "Connection closed while writing".to_string(),
-                            source: None,
-                        }));
-                    }
-                    written += n;
-                }
-                Err(e) => {
-                    self.state = ConnectionState::Error;
-                    return Outcome::Err(Error::Connection(ConnectionError {
-                        kind: ConnectionErrorKind::Disconnected,
-                        message: format!("Failed to write to server: {}", e),
-                        source: Some(Box::new(e)),
-                    }));
-                }
-            }
+        if let Err(e) = self.stream.write_all(&data).await {
+            self.state = ConnectionState::Error;
+            return Outcome::Err(Error::Connection(ConnectionError {
+                kind: ConnectionErrorKind::Disconnected,
+                message: format!("Failed to write to server: {}", e),
+                source: Some(Box::new(e)),
+            }));
         }
 
-        match std::future::poll_fn(|cx| std::pin::Pin::new(&mut self.stream).poll_flush(cx)).await {
-            Ok(()) => Outcome::Ok(()),
-            Err(e) => {
-                self.state = ConnectionState::Error;
-                Outcome::Err(Error::Connection(ConnectionError {
-                    kind: ConnectionErrorKind::Disconnected,
-                    message: format!("Failed to flush stream: {}", e),
-                    source: Some(Box::new(e)),
-                }))
-            }
+        if let Err(e) = self.stream.flush().await {
+            self.state = ConnectionState::Error;
+            return Outcome::Err(Error::Connection(ConnectionError {
+                kind: ConnectionErrorKind::Disconnected,
+                message: format!("Failed to flush stream: {}", e),
+                source: Some(Box::new(e)),
+            }));
         }
+
+        Outcome::Ok(())
     }
 
     async fn receive_message_no_cx(&mut self) -> Outcome<BackendMessage, Error> {
@@ -760,27 +1284,8 @@ impl PgAsyncConnection {
                 }
             }
 
-            let mut read_buf = ReadBuf::new(&mut self.read_buf);
-            match std::future::poll_fn(|cx| {
-                std::pin::Pin::new(&mut self.stream).poll_read(cx, &mut read_buf)
-            })
-            .await
-            {
-                Ok(()) => {
-                    let n = read_buf.filled().len();
-                    if n == 0 {
-                        self.state = ConnectionState::Disconnected;
-                        return Outcome::Err(Error::Connection(ConnectionError {
-                            kind: ConnectionErrorKind::Disconnected,
-                            message: "Connection closed by server".to_string(),
-                            source: None,
-                        }));
-                    }
-                    if let Err(e) = self.reader.feed(read_buf.filled()) {
-                        self.state = ConnectionState::Error;
-                        return Outcome::Err(protocol_error(format!("Protocol error: {}", e)));
-                    }
-                }
+            let n = match self.stream.read_some(&mut self.read_buf).await {
+                Ok(n) => n,
                 Err(e) => {
                     self.state = ConnectionState::Error;
                     return Outcome::Err(match e.kind() {
@@ -794,6 +1299,20 @@ impl PgAsyncConnection {
                         }),
                     });
                 }
+            };
+
+            if n == 0 {
+                self.state = ConnectionState::Disconnected;
+                return Outcome::Err(Error::Connection(ConnectionError {
+                    kind: ConnectionErrorKind::Disconnected,
+                    message: "Connection closed by server".to_string(),
+                    source: None,
+                }));
+            }
+
+            if let Err(e) = self.reader.feed(&self.read_buf[..n]) {
+                self.state = ConnectionState::Error;
+                return Outcome::Err(protocol_error(format!("Protocol error: {}", e)));
             }
         }
     }
@@ -1020,15 +1539,16 @@ impl Connection for SharedPgConnection {
 
     fn prepare(
         &self,
-        _cx: &Cx,
+        cx: &Cx,
         sql: &str,
     ) -> impl Future<Output = Outcome<PreparedStatement, Error>> + Send {
+        let inner = Arc::clone(&self.inner);
         let sql = sql.to_string();
         async move {
-            // Note: Client-side prepared statement stub. Server-side prepared statements
-            // (PostgreSQL PREPARE/EXECUTE) can be added later for performance optimization.
-            // Current implementation passes through to regular query execution.
-            Outcome::Ok(PreparedStatement::new(0, sql, 0))
+            let Ok(mut guard) = inner.lock(cx).await else {
+                return Outcome::Err(connection_error("Failed to acquire connection lock"));
+            };
+            guard.prepare_async(cx, &sql).await
         }
     }
 
@@ -1038,7 +1558,15 @@ impl Connection for SharedPgConnection {
         stmt: &PreparedStatement,
         params: &[Value],
     ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
-        self.query(cx, stmt.sql(), params)
+        let inner = Arc::clone(&self.inner);
+        let stmt = stmt.clone();
+        let params = params.to_vec();
+        async move {
+            let Ok(mut guard) = inner.lock(cx).await else {
+                return Outcome::Err(connection_error("Failed to acquire connection lock"));
+            };
+            guard.query_prepared_async(cx, &stmt, &params).await
+        }
     }
 
     fn execute_prepared(
@@ -1047,7 +1575,15 @@ impl Connection for SharedPgConnection {
         stmt: &PreparedStatement,
         params: &[Value],
     ) -> impl Future<Output = Outcome<u64, Error>> + Send {
-        self.execute(cx, stmt.sql(), params)
+        let inner = Arc::clone(&self.inner);
+        let stmt = stmt.clone();
+        let params = params.to_vec();
+        async move {
+            let Ok(mut guard) = inner.lock(cx).await else {
+                return Outcome::Err(connection_error("Failed to acquire connection lock"));
+            };
+            guard.execute_prepared_async(cx, &stmt, &params).await
+        }
     }
 
     fn ping(&self, cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
@@ -1372,20 +1908,4 @@ fn md5_password(user: &str, password: &str, salt: [u8; 4]) -> String {
     result
 }
 
-async fn read_exact_async(stream: &mut TcpStream, buf: &mut [u8]) -> std::io::Result<()> {
-    let mut read = 0;
-    while read < buf.len() {
-        let mut read_buf = ReadBuf::new(&mut buf[read..]);
-        std::future::poll_fn(|cx| std::pin::Pin::new(&mut *stream).poll_read(cx, &mut read_buf))
-            .await?;
-        let n = read_buf.filled().len();
-        if n == 0 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::UnexpectedEof,
-                "connection closed",
-            ));
-        }
-        read += n;
-    }
-    Ok(())
-}
+// Note: read/write helpers are implemented above on PgAsyncStream.

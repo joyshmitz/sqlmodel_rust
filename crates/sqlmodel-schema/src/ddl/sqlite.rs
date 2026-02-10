@@ -75,7 +75,7 @@ impl DdlGenerator for SqliteDdlGenerator {
                 // SQLite doesn't support altering nullability
                 tracing::warn!(
                     table = %table,
-                    column = %column,
+                    column = %column.name,
                     to_nullable = %to_nullable,
                     "SQLite does not support ALTER COLUMN nullability - requires table recreation"
                 );
@@ -87,7 +87,7 @@ impl DdlGenerator for SqliteDdlGenerator {
                 vec![format!(
                     "-- SQLite: Cannot change column nullability directly. Requires table recreation.\n\
                      -- Setting {}.{} to {}",
-                    table, column, action
+                    table, column.name, action
                 )]
             }
             SchemaOperation::AlterColumnDefault {

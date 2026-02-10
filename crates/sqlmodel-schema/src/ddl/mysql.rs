@@ -3,9 +3,9 @@
 //! MySQL has comprehensive ALTER TABLE support for most schema operations.
 
 use super::{
-    DdlGenerator, format_fk_constraint, generate_add_column, generate_create_index,
-    generate_create_table, generate_drop_index, generate_drop_table, generate_rename_column,
-    generate_rename_table, quote_identifier,
+    DdlGenerator, format_column_def, format_fk_constraint, generate_add_column,
+    generate_create_index, generate_create_table, generate_drop_index, generate_drop_table,
+    generate_rename_column, generate_rename_table, quote_identifier,
 };
 use crate::diff::SchemaOperation;
 use crate::introspect::Dialect;
@@ -64,20 +64,14 @@ impl DdlGenerator for MysqlDdlGenerator {
                 to_nullable,
                 ..
             } => {
-                // MySQL uses MODIFY COLUMN - need to restate the entire column definition
-                // This is a simplified version; full impl would need to preserve other properties
-                let null_str = if *to_nullable { "NULL" } else { "NOT NULL" };
-                tracing::warn!(
-                    table = %table,
-                    column = %column,
-                    "MySQL ALTER COLUMN nullability requires full column definition - using simplified form"
-                );
+                // MySQL uses MODIFY COLUMN and requires a full column definition.
+                // We carry `ColumnInfo` on this operation so we can generate a correct statement.
+                let mut col = column.clone();
+                col.nullable = *to_nullable;
                 vec![format!(
-                    "-- MySQL: Use MODIFY COLUMN with full column definition\n\
-                     ALTER TABLE {} MODIFY COLUMN {} {}",
+                    "ALTER TABLE {} MODIFY COLUMN {}",
                     quote_identifier(table, Dialect::Mysql),
-                    quote_identifier(column, Dialect::Mysql),
-                    null_str
+                    format_column_def(&col, Dialect::Mysql)
                 )]
             }
             SchemaOperation::AlterColumnDefault {

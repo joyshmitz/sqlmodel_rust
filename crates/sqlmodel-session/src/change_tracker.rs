@@ -368,8 +368,12 @@ mod tests {
             vec![Value::BigInt(self.id)]
         }
 
-        fn from_row(_row: &Row) -> Result<Self, sqlmodel_core::Error> {
-            unimplemented!("Not needed for these tests")
+        fn from_row(row: &Row) -> Result<Self, sqlmodel_core::Error> {
+            Ok(Self {
+                id: row.get_named("id")?,
+                name: row.get_named("name")?,
+                age: row.get_named("age")?,
+            })
         }
 
         fn to_row(&self) -> Vec<(&'static str, Value)> {

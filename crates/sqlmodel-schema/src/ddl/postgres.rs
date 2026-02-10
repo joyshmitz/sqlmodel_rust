@@ -74,7 +74,7 @@ impl DdlGenerator for PostgresDdlGenerator {
                 vec![format!(
                     "ALTER TABLE {} ALTER COLUMN {} {}",
                     quote_identifier(table, Dialect::Postgres),
-                    quote_identifier(column, Dialect::Postgres),
+                    quote_identifier(&column.name, Dialect::Postgres),
                     action
                 )]
             }
@@ -321,7 +321,7 @@ mod tests {
         let ddl = PostgresDdlGenerator;
         let op = SchemaOperation::AlterColumnNullable {
             table: "heroes".to_string(),
-            column: "name".to_string(),
+            column: make_column("name", "TEXT", false),
             from_nullable: true,
             to_nullable: false,
         };
@@ -336,7 +336,7 @@ mod tests {
         let ddl = PostgresDdlGenerator;
         let op = SchemaOperation::AlterColumnNullable {
             table: "heroes".to_string(),
-            column: "name".to_string(),
+            column: make_column("name", "TEXT", true),
             from_nullable: false,
             to_nullable: true,
         };

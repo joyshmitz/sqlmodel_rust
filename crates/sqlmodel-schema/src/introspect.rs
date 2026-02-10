@@ -701,13 +701,19 @@ impl Introspector {
         table_name: &str,
     ) -> Outcome<Vec<ForeignKeyInfo>, Error> {
         let sql = "SELECT
-                       constraint_name,
-                       column_name,
-                       referenced_table_name,
-                       referenced_column_name
-                   FROM information_schema.key_column_usage
-                   WHERE table_name = ?
-                       AND referenced_table_name IS NOT NULL";
+                       kcu.constraint_name,
+                       kcu.column_name,
+                       kcu.referenced_table_name,
+                       kcu.referenced_column_name,
+                       rc.delete_rule,
+                       rc.update_rule
+                   FROM information_schema.key_column_usage AS kcu
+                   JOIN information_schema.referential_constraints AS rc
+                       ON rc.constraint_name = kcu.constraint_name
+                       AND rc.constraint_schema = kcu.constraint_schema
+                   WHERE kcu.table_schema = DATABASE()
+                       AND kcu.table_name = ?
+                       AND kcu.referenced_table_name IS NOT NULL";
 
         let rows = match conn
             .query(
@@ -730,14 +736,16 @@ impl Introspector {
                 let column = row.get_named::<String>("column_name").ok()?;
                 let foreign_table = row.get_named::<String>("referenced_table_name").ok()?;
                 let foreign_column = row.get_named::<String>("referenced_column_name").ok()?;
+                let on_delete = row.get_named::<String>("delete_rule").ok();
+                let on_update = row.get_named::<String>("update_rule").ok();
 
                 Some(ForeignKeyInfo {
                     name,
                     column,
                     foreign_table,
                     foreign_column,
-                    on_delete: None, // Would need additional query
-                    on_update: None,
+                    on_delete: on_delete.filter(|s| s != "NO ACTION"),
+                    on_update: on_update.filter(|s| s != "NO ACTION"),
                 })
             })
             .collect();

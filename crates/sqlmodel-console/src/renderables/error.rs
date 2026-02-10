@@ -431,16 +431,57 @@ impl ErrorPanel {
 
     /// Wrap a line to fit within the panel, accounting for ANSI codes.
     fn wrap_line(&self, content: &str, width: usize, border_color: &str, reset: &str) -> String {
-        // For simplicity, we just truncate long lines
-        // A more sophisticated implementation would wrap text properly
-        let visible_len = self.visible_length(content);
-        let padding = (width - 2).saturating_sub(visible_len);
+        let inner_width = width.saturating_sub(2);
+        let mut rendered = content.to_string();
+        if self.visible_length(&rendered) > inner_width {
+            rendered = self.truncate_ansi_to_width(&rendered, inner_width, reset);
+        }
+        let visible_len = self.visible_length(&rendered);
+        let padding = inner_width.saturating_sub(visible_len);
 
         format!(
-            "{border_color}│{reset}{content}{:padding$}{border_color}│{reset}",
+            "{border_color}│{reset}{rendered}{:padding$}{border_color}│{reset}",
             "",
             padding = padding
         )
+    }
+
+    fn truncate_ansi_to_width(&self, s: &str, max_visible: usize, reset: &str) -> String {
+        let mut out = String::new();
+        let mut visible = 0usize;
+        let mut in_escape = false;
+
+        for c in s.chars() {
+            if c == '\x1b' {
+                in_escape = true;
+                out.push(c);
+                continue;
+            }
+            if in_escape {
+                out.push(c);
+                if c == 'm' {
+                    in_escape = false;
+                }
+                continue;
+            }
+
+            if visible >= max_visible {
+                break;
+            }
+
+            out.push(c);
+            if c == '💡' {
+                visible = visible.saturating_add(2);
+            } else {
+                visible = visible.saturating_add(1);
+            }
+        }
+
+        if s.contains('\x1b') && !out.ends_with(reset) {
+            out.push_str(reset);
+        }
+
+        out
     }
 
     /// Calculate visible length of a string (excluding ANSI codes).

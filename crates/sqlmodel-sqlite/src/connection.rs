@@ -336,7 +336,7 @@ impl SqliteConnection {
 
     /// Backup the current database to another open SQLite connection.
     pub fn backup_to_connection(&self, dest: &SqliteConnection) -> Result<(), Error> {
-        let self_first = (self as *const _ as usize) <= (dest as *const _ as usize);
+        let self_first = (std::ptr::from_ref(self) as usize) <= (std::ptr::from_ref(dest) as usize);
         let (source_guard, dest_guard) = if self_first {
             let source_guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             let dest_guard = dest.inner.lock().unwrap_or_else(|e| e.into_inner());

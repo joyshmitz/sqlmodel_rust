@@ -32,7 +32,7 @@
 | **Type-safe query builder** | Compile-time validation of SQL expressions, columns, and joins |
 | **Cancel-correct async** | Built on [asupersync](https://github.com/Dicklesworthstone/asupersync) for structured concurrency |
 | **Multi-dialect support** | Single codebase generates Postgres, SQLite, or MySQL SQL |
-| **Minimal dependencies** | Only serde + asupersync—no tokio, no sqlx, no diesel |
+| **Lean dependencies** | No tokio/sqlx/diesel/sea-orm; core stays small, drivers/validation use focused crypto/regex deps |
 
 ---
 
@@ -97,10 +97,12 @@ The query builder validates at compile time when possible, and provides clear er
 
 ### 5. Minimal Dependencies
 
-Only these dependencies are allowed:
+Core crates keep dependencies tight:
 - `asupersync` - Async runtime with structured concurrency
 - `serde` / `serde_json` - Serialization
 - `proc-macro2` / `quote` / `syn` - Macro support
+
+Drivers and validation add focused dependencies where required (e.g., TLS/auth crypto, regex validation), but we still avoid heavyweight ORM/database stacks.
 
 No tokio, no sqlx, no diesel, no sea-orm. We build what we need.
 

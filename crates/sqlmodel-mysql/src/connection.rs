@@ -5,20 +5,10 @@
 //!
 //! # Current Status
 //!
-//! **Synchronous implementation complete.** The async `Connection` trait from
-//! `sqlmodel_core` is not yet implemented. Current API uses `_sync` suffix methods.
-//!
-//! # Migration Path to Async
-//!
-//! To implement the `Connection` trait, these changes are needed:
-//!
-//! 1. Replace `std::net::TcpStream` with `asupersync::net::TcpStream`
-//! 2. Convert `read_packet`/`write_packet` to async with `.await`
-//! 3. Add `&Cx` context parameter to all async methods
-//! 4. Return `Outcome<T, E>` instead of `Result<T, E>`
-//! 5. Add cancellation checks via `cx.checkpoint()?`
-//!
-//! See `crates/sqlmodel-mysql/README.md` for the full roadmap.
+//! This crate provides both:
+//! - A **synchronous** wire-protocol implementation (`MySqlConnection`) for low-level use.
+//! - An **asupersync-based async** implementation (`MySqlAsyncConnection` + `SharedMySqlConnection`)
+//!   that implements `sqlmodel_core::Connection` for integration with sqlmodel-query/session/pool.
 //!
 //! # Synchronous API
 //!
@@ -525,11 +515,35 @@ impl MySqlConnection {
                 Ok(())
             }
             auth::caching_sha2::PERFORM_FULL_AUTH => {
-                // Full auth needed - requires TLS or RSA
-                // For now, return error suggesting TLS
-                Err(auth_error(
-                    "Full authentication required - please use TLS connection",
-                ))
+                // Full auth needed - in the sync driver we don't support TLS, so we must use RSA.
+                let Some(server_caps) = self.server_caps.as_ref() else {
+                    return Err(protocol_error("Missing server capabilities during auth"));
+                };
+
+                let password = self.config.password.clone().unwrap_or_default();
+                let seed = server_caps.auth_data.clone();
+                let server_version = server_caps.server_version.clone();
+
+                // Request server public key
+                self.write_packet(&[auth::caching_sha2::REQUEST_PUBLIC_KEY])?;
+                let (payload, _) = self.read_packet()?;
+                if payload.is_empty() {
+                    return Err(protocol_error("Empty public key response"));
+                }
+
+                // Some servers wrap the PEM in an AuthMoreData packet (0x01 prefix).
+                let public_key = if payload[0] == 0x01 {
+                    &payload[1..]
+                } else {
+                    &payload[..]
+                };
+
+                let use_oaep = mysql_server_uses_oaep(&server_version);
+                let encrypted = auth::sha256_password_rsa(&password, &seed, public_key, use_oaep)
+                    .map_err(auth_error)?;
+
+                self.write_packet(&encrypted)?;
+                self.handle_auth_result()
             }
             _ => {
                 // Unknown - try to parse as OK packet
@@ -1310,6 +1324,25 @@ fn connection_error(msg: impl Into<String>) -> Error {
     })
 }
 
+fn mysql_server_uses_oaep(server_version: &str) -> bool {
+    // MySQL 8.0.5+ uses OAEP for caching_sha2_password RSA encryption.
+    // Parse leading "major.minor.patch" prefix; if parsing fails, default to OAEP
+    // (modern servers).
+    let prefix: String = server_version
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut it = prefix.split('.').filter(|s| !s.is_empty());
+    let major: u64 = match it.next().and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => return true,
+    };
+    let minor: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    (major, minor, patch) >= (8, 0, 5)
+}
+
 fn query_error(err: &ErrPacket) -> Error {
     let kind = if err.is_duplicate_key() || err.is_foreign_key_violation() {
         QueryErrorKind::Constraint
@@ -1372,11 +1405,9 @@ mod tests {
         };
 
         let err = query_error(&err_packet);
-        if let Error::Query(q) = err {
-            assert_eq!(q.kind, QueryErrorKind::Constraint);
-        } else {
-            panic!("Expected query error");
-        }
+        assert!(matches!(err, Error::Query(_)), "Expected query error");
+        let Error::Query(q) = err else { return };
+        assert_eq!(q.kind, QueryErrorKind::Constraint);
     }
 
     /// Console integration tests (only run when console feature is enabled).

@@ -52,7 +52,7 @@ pub enum SchemaOperation {
     /// Change a column's nullability.
     AlterColumnNullable {
         table: String,
-        column: String,
+        column: ColumnInfo,
         from_nullable: bool,
         to_nullable: bool,
     },
@@ -146,7 +146,11 @@ impl SchemaOperation {
                 to_nullable,
             } => Some(SchemaOperation::AlterColumnNullable {
                 table: table.clone(),
-                column: column.clone(),
+                column: {
+                    let mut col = column.clone();
+                    col.nullable = *from_nullable;
+                    col
+                },
                 from_nullable: *to_nullable,
                 to_nullable: *from_nullable,
             }),
@@ -627,7 +631,7 @@ fn diff_column_details(
     if current.nullable != expected.nullable {
         let op_index = diff.add_op(SchemaOperation::AlterColumnNullable {
             table: table.to_string(),
-            column: col.clone(),
+            column: (*expected).clone(),
             from_nullable: current.nullable,
             to_nullable: expected.nullable,
         });
@@ -1302,7 +1306,7 @@ mod tests {
 
         let diff = schema_diff(&current, &expected);
         assert!(diff.operations.iter().any(
-            |op| matches!(op, SchemaOperation::AlterColumnNullable { table, column, to_nullable: false, .. } if table == "heroes" && column == "name")
+            |op| matches!(op, SchemaOperation::AlterColumnNullable { table, column, to_nullable: false, .. } if table == "heroes" && column.name == "name")
         ));
     }
 

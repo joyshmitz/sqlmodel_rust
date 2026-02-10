@@ -19,6 +19,7 @@ workspace = true
 [features]
 default = []
 console = ["dep:sqlmodel-console"]
+tls = ["dep:rustls", "dep:webpki-roots"]
 
 [dependencies]
 sqlmodel-core.workspace = true
@@ -35,5 +36,9 @@ subtle = "2.5"
 
 # Optional console support
 sqlmodel-console = { workspace = true, optional = true }
+
+# Optional TLS support (rustls)
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "ring"] }
+webpki-roots = { version = "0.26", optional = true }
 
 [dev-dependencies]

@@ -23,6 +23,12 @@
 use sha1::Sha1;
 use sha2::{Digest, Sha256};
 
+use rand::rngs::OsRng;
+
+use rsa::RsaPublicKey;
+use rsa::pkcs1::DecodeRsaPublicKey;
+use rsa::pkcs8::DecodePublicKey;
+
 /// Well-known authentication plugin names.
 pub mod plugins {
     /// SHA1-based authentication (legacy default)
@@ -162,17 +168,49 @@ pub fn generate_nonce(length: usize) -> Vec<u8> {
 /// # Returns
 /// The encrypted password, or error if encryption fails.
 ///
-/// Note: This is a placeholder - RSA encryption requires additional dependencies.
-/// In practice, prefer using TLS connections which don't require RSA encryption.
+/// This is used for full authentication for `caching_sha2_password`/`sha256_password`
+/// when the connection is not secured by TLS.
 pub fn sha256_password_rsa(
-    _password: &str,
-    _seed: &[u8],
-    _public_key: &[u8],
+    password: &str,
+    seed: &[u8],
+    public_key_pem: &[u8],
+    use_oaep: bool,
 ) -> Result<Vec<u8>, String> {
-    // RSA encryption requires the `rsa` crate which adds significant dependencies.
-    // For now, we recommend using TLS connections instead.
-    // When TLS is established, the password can be sent in cleartext (still secure).
-    Err("RSA encryption not implemented - use TLS connection instead".to_string())
+    // MySQL expects: RSA_encrypt(password_with_nul XOR seed_rotation)
+    let mut pw = password.as_bytes().to_vec();
+    pw.push(0); // NUL terminator
+
+    if seed.is_empty() {
+        return Err("Seed is empty".to_string());
+    }
+
+    for (i, b) in pw.iter_mut().enumerate() {
+        *b ^= seed[i % seed.len()];
+    }
+
+    // Server usually returns a PEM public key for sha256_password/caching_sha2_password.
+    let pem = std::str::from_utf8(public_key_pem)
+        .map_err(|e| format!("Public key is not valid UTF-8 PEM: {e}"))?;
+
+    // Try both common encodings.
+    let pub_key = RsaPublicKey::from_public_key_pem(pem)
+        .or_else(|_| RsaPublicKey::from_pkcs1_pem(pem))
+        .map_err(|e| format!("Failed to parse RSA public key PEM: {e}"))?;
+
+    let encrypted = if use_oaep {
+        // MySQL 8.0.5+ uses OAEP padding for caching_sha2_password.
+        let padding = rsa::Oaep::new::<Sha1>();
+        pub_key
+            .encrypt(&mut OsRng, padding, &pw)
+            .map_err(|e| format!("RSA OAEP encryption failed: {e}"))?
+    } else {
+        let padding = rsa::Pkcs1v15Encrypt;
+        pub_key
+            .encrypt(&mut OsRng, padding, &pw)
+            .map_err(|e| format!("RSA PKCS1v1.5 encryption failed: {e}"))?
+    };
+
+    Ok(encrypted)
 }
 
 /// XOR password with seed for cleartext transmission over TLS.

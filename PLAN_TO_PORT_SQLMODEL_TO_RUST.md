@@ -66,9 +66,13 @@ sqlmodel (facade)
 - `diesel` - Different design philosophy
 - `sea-orm` - Too much runtime overhead
 
-## Explicit Exclusions
+## Scope And Parity
 
-The following features will NOT be ported:
+Earlier drafts of this document scoped out a number of Python SQLModel/Pydantic/SQLAlchemy behaviors.
+The current project goal is **feature-for-feature parity** with the legacy Python SQLModel library.
+
+Treat the items below as historical notes, not policy: if something is missing, it should be implemented
+or explicitly justified and tracked (see `FEATURE_PARITY.md` and Beads issues).
 
 ### 1. Python Runtime Introspection
 - **Python**: Uses `__annotations__`, `get_type_hints()`, runtime type inspection

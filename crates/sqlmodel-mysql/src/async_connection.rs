@@ -45,7 +45,7 @@ use crate::types::{
 /// and implements the `Connection` trait from sqlmodel-core.
 pub struct MySqlAsyncConnection {
     /// TCP stream (either sync for compatibility or async wrapper)
-    stream: ConnectionStream,
+    stream: Option<ConnectionStream>,
     /// Current connection state
     state: ConnectionState,
     /// Server capabilities from handshake
@@ -93,6 +93,189 @@ enum ConnectionStream {
     Sync(StdTcpStream),
     /// Async TCP stream (for async operations)
     Async(TcpStream),
+    /// Async TLS stream (for encrypted async operations)
+    #[cfg(feature = "tls")]
+    Tls(AsyncTlsStream),
+}
+
+/// Async TLS stream built on rustls + asupersync TcpStream.
+///
+/// This is intentionally minimal: it provides enough read/write behavior for
+/// MySQL packet framing without depending on a tokio/futures I/O ecosystem.
+#[cfg(feature = "tls")]
+struct AsyncTlsStream {
+    tcp: TcpStream,
+    tls: rustls::ClientConnection,
+}
+
+#[cfg(feature = "tls")]
+impl std::fmt::Debug for AsyncTlsStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AsyncTlsStream")
+            .field("protocol_version", &self.tls.protocol_version())
+            .field("is_handshaking", &self.tls.is_handshaking())
+            .finish_non_exhaustive()
+    }
+}
+
+#[cfg(feature = "tls")]
+impl AsyncTlsStream {
+    async fn handshake(
+        mut tcp: TcpStream,
+        tls_config: &crate::config::TlsConfig,
+        host: &str,
+        ssl_mode: crate::config::SslMode,
+    ) -> Result<Self, Error> {
+        let config = crate::tls::build_client_config(tls_config, ssl_mode)?;
+
+        let sni = tls_config.server_name.as_deref().unwrap_or(host);
+        let server_name = sni
+            .to_string()
+            .try_into()
+            .map_err(|e| connection_error(format!("Invalid server name '{sni}': {e}")))?;
+
+        let mut tls = rustls::ClientConnection::new(std::sync::Arc::new(config), server_name)
+            .map_err(|e| connection_error(format!("Failed to create TLS connection: {e}")))?;
+
+        // Drive rustls handshake using async reads/writes on the TCP stream.
+        while tls.is_handshaking() {
+            while tls.wants_write() {
+                let mut out = Vec::new();
+                tls.write_tls(&mut out)
+                    .map_err(|e| connection_error(format!("TLS handshake write_tls error: {e}")))?;
+                if !out.is_empty() {
+                    write_all_async(&mut tcp, &out).await.map_err(|e| {
+                        Error::Connection(ConnectionError {
+                            kind: ConnectionErrorKind::Disconnected,
+                            message: format!("TLS handshake write error: {e}"),
+                            source: Some(Box::new(e)),
+                        })
+                    })?;
+                }
+            }
+
+            if tls.wants_read() {
+                let mut buf = [0u8; 8192];
+                let n = read_some_async(&mut tcp, &mut buf).await.map_err(|e| {
+                    Error::Connection(ConnectionError {
+                        kind: ConnectionErrorKind::Disconnected,
+                        message: format!("TLS handshake read error: {e}"),
+                        source: Some(Box::new(e)),
+                    })
+                })?;
+                if n == 0 {
+                    return Err(connection_error("Connection closed during TLS handshake"));
+                }
+
+                let mut cursor = std::io::Cursor::new(&buf[..n]);
+                tls.read_tls(&mut cursor)
+                    .map_err(|e| connection_error(format!("TLS handshake read_tls error: {e}")))?;
+                tls.process_new_packets()
+                    .map_err(|e| connection_error(format!("TLS handshake error: {e}")))?;
+            }
+        }
+
+        Ok(Self { tcp, tls })
+    }
+
+    async fn read_exact(&mut self, buf: &mut [u8]) -> io::Result<()> {
+        let mut read = 0;
+        while read < buf.len() {
+            let n = self.read_plain(&mut buf[read..]).await?;
+            if n == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "connection closed",
+                ));
+            }
+            read += n;
+        }
+        Ok(())
+    }
+
+    async fn read_plain(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        loop {
+            match self.tls.reader().read(out) {
+                Ok(n) if n > 0 => return Ok(n),
+                Ok(_) => {}
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => return Err(e),
+            }
+
+            if !self.tls.wants_read() {
+                return Ok(0);
+            }
+
+            let mut enc = [0u8; 8192];
+            let n = read_some_async(&mut self.tcp, &mut enc).await?;
+            if n == 0 {
+                return Ok(0);
+            }
+
+            let mut cursor = std::io::Cursor::new(&enc[..n]);
+            self.tls.read_tls(&mut cursor)?;
+            self.tls
+                .process_new_packets()
+                .map_err(|e| io::Error::other(format!("TLS error: {e}")))?;
+        }
+    }
+
+    async fn write_all(&mut self, buf: &[u8]) -> io::Result<()> {
+        let mut written = 0;
+        while written < buf.len() {
+            let n = self.tls.writer().write(&buf[written..])?;
+            if n == 0 {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "TLS write zero"));
+            }
+            written += n;
+            self.flush().await?;
+        }
+        Ok(())
+    }
+
+    async fn flush(&mut self) -> io::Result<()> {
+        self.tls.writer().flush()?;
+        while self.tls.wants_write() {
+            let mut out = Vec::new();
+            self.tls.write_tls(&mut out)?;
+            if !out.is_empty() {
+                write_all_async(&mut self.tcp, &out).await?;
+            }
+        }
+        flush_async(&mut self.tcp).await
+    }
+}
+
+#[cfg(feature = "tls")]
+async fn read_some_async(stream: &mut TcpStream, buf: &mut [u8]) -> io::Result<usize> {
+    let mut read_buf = ReadBuf::new(buf);
+    std::future::poll_fn(|cx| std::pin::Pin::new(&mut *stream).poll_read(cx, &mut read_buf))
+        .await?;
+    Ok(read_buf.filled().len())
+}
+
+#[cfg(feature = "tls")]
+async fn write_all_async(stream: &mut TcpStream, buf: &[u8]) -> io::Result<()> {
+    let mut written = 0;
+    while written < buf.len() {
+        let n = std::future::poll_fn(|cx| {
+            std::pin::Pin::new(&mut *stream).poll_write(cx, &buf[written..])
+        })
+        .await?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::WriteZero,
+                "connection closed",
+            ));
+        }
+        written += n;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "tls")]
+async fn flush_async(stream: &mut TcpStream) -> io::Result<()> {
+    std::future::poll_fn(|cx| std::pin::Pin::new(&mut *stream).poll_flush(cx)).await
 }
 
 impl std::fmt::Debug for MySqlAsyncConnection {
@@ -148,7 +331,7 @@ impl MySqlAsyncConnection {
         stream.set_nodelay(true).ok();
 
         let mut conn = Self {
-            stream: ConnectionStream::Async(stream),
+            stream: Some(ConnectionStream::Async(stream)),
             state: ConnectionState::Connecting,
             server_caps: None,
             connection_id: 0,
@@ -199,6 +382,17 @@ impl MySqlAsyncConnection {
         matches!(self.state, ConnectionState::Ready)
     }
 
+    fn is_secure_transport(&self) -> bool {
+        #[cfg(feature = "tls")]
+        {
+            matches!(self.stream, Some(ConnectionStream::Tls(_)))
+        }
+        #[cfg(not(feature = "tls"))]
+        {
+            false
+        }
+    }
+
     /// Get the connection ID.
     pub fn connection_id(&self) -> u32 {
         self.connection_id
@@ -228,7 +422,11 @@ impl MySqlAsyncConnection {
         // Read header (4 bytes) - must loop since TCP can fragment reads
         let mut header_buf = [0u8; 4];
 
-        match &mut self.stream {
+        let Some(stream) = self.stream.as_mut() else {
+            return Outcome::Err(connection_error("Connection stream missing"));
+        };
+
+        match stream {
             ConnectionStream::Async(stream) => {
                 let mut header_read = 0;
                 while header_read < 4 {
@@ -268,6 +466,16 @@ impl MySqlAsyncConnection {
                     }));
                 }
             }
+            #[cfg(feature = "tls")]
+            ConnectionStream::Tls(stream) => {
+                if let Err(e) = stream.read_exact(&mut header_buf).await {
+                    return Outcome::Err(Error::Connection(ConnectionError {
+                        kind: ConnectionErrorKind::Disconnected,
+                        message: format!("Failed to read packet header: {e}"),
+                        source: Some(Box::new(e)),
+                    }));
+                }
+            }
         }
 
         let header = PacketHeader::from_bytes(&header_buf);
@@ -277,7 +485,10 @@ impl MySqlAsyncConnection {
         // Read payload
         let mut payload = vec![0u8; payload_len];
         if payload_len > 0 {
-            match &mut self.stream {
+            let Some(stream) = self.stream.as_mut() else {
+                return Outcome::Err(connection_error("Connection stream missing"));
+            };
+            match stream {
                 ConnectionStream::Async(stream) => {
                     let mut total_read = 0;
                     while total_read < payload_len {
@@ -318,6 +529,16 @@ impl MySqlAsyncConnection {
                         }));
                     }
                 }
+                #[cfg(feature = "tls")]
+                ConnectionStream::Tls(stream) => {
+                    if let Err(e) = stream.read_exact(&mut payload).await {
+                        return Outcome::Err(Error::Connection(ConnectionError {
+                            kind: ConnectionErrorKind::Disconnected,
+                            message: format!("Failed to read packet payload: {e}"),
+                            source: Some(Box::new(e)),
+                        }));
+                    }
+                }
             }
         }
 
@@ -326,7 +547,10 @@ impl MySqlAsyncConnection {
             loop {
                 // Read continuation header with loop (TCP can fragment)
                 let mut header_buf = [0u8; 4];
-                match &mut self.stream {
+                let Some(stream) = self.stream.as_mut() else {
+                    return Outcome::Err(connection_error("Connection stream missing"));
+                };
+                match stream {
                     ConnectionStream::Async(stream) => {
                         let mut header_read = 0;
                         while header_read < 4 {
@@ -369,6 +593,16 @@ impl MySqlAsyncConnection {
                             }));
                         }
                     }
+                    #[cfg(feature = "tls")]
+                    ConnectionStream::Tls(stream) => {
+                        if let Err(e) = stream.read_exact(&mut header_buf).await {
+                            return Outcome::Err(Error::Connection(ConnectionError {
+                                kind: ConnectionErrorKind::Disconnected,
+                                message: format!("Failed to read continuation header: {e}"),
+                                source: Some(Box::new(e)),
+                            }));
+                        }
+                    }
                 }
 
                 let cont_header = PacketHeader::from_bytes(&header_buf);
@@ -377,7 +611,10 @@ impl MySqlAsyncConnection {
 
                 if cont_len > 0 {
                     let mut cont_payload = vec![0u8; cont_len];
-                    match &mut self.stream {
+                    let Some(stream) = self.stream.as_mut() else {
+                        return Outcome::Err(connection_error("Connection stream missing"));
+                    };
+                    match stream {
                         ConnectionStream::Async(stream) => {
                             let mut total_read = 0;
                             while total_read < cont_len {
@@ -420,6 +657,16 @@ impl MySqlAsyncConnection {
                                 }));
                             }
                         }
+                        #[cfg(feature = "tls")]
+                        ConnectionStream::Tls(stream) => {
+                            if let Err(e) = stream.read_exact(&mut cont_payload).await {
+                                return Outcome::Err(Error::Connection(ConnectionError {
+                                    kind: ConnectionErrorKind::Disconnected,
+                                    message: format!("Failed to read continuation payload: {e}"),
+                                    source: Some(Box::new(e)),
+                                }));
+                            }
+                        }
                     }
                     payload.extend_from_slice(&cont_payload);
                 }
@@ -439,7 +686,11 @@ impl MySqlAsyncConnection {
         let packet = writer.build_packet_from_payload(payload, self.sequence_id);
         self.sequence_id = self.sequence_id.wrapping_add(1);
 
-        match &mut self.stream {
+        let Some(stream) = self.stream.as_mut() else {
+            return Outcome::Err(connection_error("Connection stream missing"));
+        };
+
+        match stream {
             ConnectionStream::Async(stream) => {
                 // Loop to handle partial writes (poll_write may return fewer bytes)
                 let mut written = 0;
@@ -494,6 +745,23 @@ impl MySqlAsyncConnection {
                     return Outcome::Err(Error::Connection(ConnectionError {
                         kind: ConnectionErrorKind::Disconnected,
                         message: format!("Failed to flush stream: {}", e),
+                        source: Some(Box::new(e)),
+                    }));
+                }
+            }
+            #[cfg(feature = "tls")]
+            ConnectionStream::Tls(stream) => {
+                if let Err(e) = stream.write_all(&packet).await {
+                    return Outcome::Err(Error::Connection(ConnectionError {
+                        kind: ConnectionErrorKind::Disconnected,
+                        message: format!("Failed to write packet: {e}"),
+                        source: Some(Box::new(e)),
+                    }));
+                }
+                if let Err(e) = stream.flush().await {
+                    return Outcome::Err(Error::Connection(ConnectionError {
+                        kind: ConnectionErrorKind::Disconnected,
+                        message: format!("Failed to flush stream: {e}"),
                         source: Some(Box::new(e)),
                     }));
                 }
@@ -615,12 +883,28 @@ impl MySqlAsyncConnection {
             return Outcome::Err(protocol_error("No server handshake received"));
         };
 
+        // Grab what we need up-front so we can mutably borrow `self` later.
+        let server_caps_bits = server_caps.capabilities;
+        let auth_plugin = server_caps.auth_plugin.clone();
+        let auth_data = server_caps.auth_data.clone();
+
         // Determine client capabilities
-        let client_caps = self.config.capability_flags() & server_caps.capabilities;
+        let mut client_caps = self.config.capability_flags() & server_caps_bits;
+        #[cfg(feature = "tls")]
+        if let Outcome::Err(e) = self
+            .maybe_upgrade_tls_async(server_caps_bits, &mut client_caps)
+            .await
+        {
+            return Outcome::Err(e);
+        }
+
+        #[cfg(not(feature = "tls"))]
+        if let Outcome::Err(e) = self.maybe_upgrade_tls(server_caps_bits, &mut client_caps) {
+            return Outcome::Err(e);
+        }
 
         // Build authentication response
-        let auth_response =
-            self.compute_auth_response(&server_caps.auth_plugin, &server_caps.auth_data);
+        let auth_response = self.compute_auth_response(&auth_plugin, &auth_data);
 
         let mut writer = PacketWriter::new();
 
@@ -662,7 +946,7 @@ impl MySqlAsyncConnection {
 
         // Auth plugin name (if CLIENT_PLUGIN_AUTH)
         if client_caps & capabilities::CLIENT_PLUGIN_AUTH != 0 {
-            writer.write_null_string(&server_caps.auth_plugin);
+            writer.write_null_string(&auth_plugin);
         }
 
         // Connection attributes (if CLIENT_CONNECT_ATTRS)
@@ -679,6 +963,101 @@ impl MySqlAsyncConnection {
         }
 
         self.write_packet_async(writer.as_bytes()).await
+    }
+
+    #[cfg(feature = "tls")]
+    async fn maybe_upgrade_tls_async(
+        &mut self,
+        server_caps: u32,
+        client_caps: &mut u32,
+    ) -> Outcome<(), Error> {
+        let ssl_mode = self.config.ssl_mode;
+
+        if !ssl_mode.should_try_ssl() {
+            *client_caps &= !capabilities::CLIENT_SSL;
+            return Outcome::Ok(());
+        }
+
+        let use_tls = match crate::tls::validate_ssl_mode(ssl_mode, server_caps) {
+            Ok(v) => v,
+            Err(e) => return Outcome::Err(e),
+        };
+
+        if !use_tls {
+            // Preferred but server doesn't support SSL: clear the bit so we don't lie.
+            *client_caps &= !capabilities::CLIENT_SSL;
+            return Outcome::Ok(());
+        }
+
+        if let Err(e) = crate::tls::validate_tls_config(ssl_mode, &self.config.tls_config) {
+            return Outcome::Err(e);
+        }
+
+        // Send SSLRequest packet (sequence id 1), then upgrade to TLS and continue
+        // the normal handshake (sequence id 2) over the encrypted stream.
+        let packet = crate::tls::build_ssl_request_packet(
+            *client_caps,
+            self.config.max_packet_size,
+            self.config.charset,
+            self.sequence_id,
+        );
+        if let Outcome::Err(e) = self.write_packet_raw_async(&packet).await {
+            return Outcome::Err(e);
+        }
+        self.sequence_id = self.sequence_id.wrapping_add(1);
+
+        let Some(stream) = self.stream.take() else {
+            return Outcome::Err(connection_error("Connection stream missing"));
+        };
+        let ConnectionStream::Async(tcp) = stream else {
+            return Outcome::Err(connection_error("TLS upgrade requires async TCP stream"));
+        };
+
+        let tls = match AsyncTlsStream::handshake(
+            tcp,
+            &self.config.tls_config,
+            &self.config.host,
+            ssl_mode,
+        )
+        .await
+        {
+            Ok(s) => s,
+            Err(e) => return Outcome::Err(e),
+        };
+
+        self.stream = Some(ConnectionStream::Tls(tls));
+        Outcome::Ok(())
+    }
+
+    #[cfg(not(feature = "tls"))]
+    fn maybe_upgrade_tls(&mut self, server_caps: u32, client_caps: &mut u32) -> Outcome<(), Error> {
+        let ssl_mode = self.config.ssl_mode;
+
+        if !ssl_mode.should_try_ssl() {
+            *client_caps &= !capabilities::CLIENT_SSL;
+            return Outcome::Ok(());
+        }
+
+        let use_tls = match crate::tls::validate_ssl_mode(ssl_mode, server_caps) {
+            Ok(v) => v,
+            Err(e) => return Outcome::Err(e),
+        };
+
+        if !use_tls {
+            // Preferred but server doesn't support SSL: clear the bit so we don't lie.
+            *client_caps &= !capabilities::CLIENT_SSL;
+            return Outcome::Ok(());
+        }
+
+        // Preferred should fall back to plain, required/verify must error.
+        if ssl_mode == crate::config::SslMode::Preferred {
+            *client_caps &= !capabilities::CLIENT_SSL;
+            Outcome::Ok(())
+        } else {
+            Outcome::Err(connection_error(
+                "TLS requested but 'sqlmodel-mysql' was built without feature 'tls'",
+            ))
+        }
     }
 
     /// Compute authentication response based on the plugin.
@@ -756,7 +1135,12 @@ impl MySqlAsyncConnection {
                 }
                 _ => {
                     // Handle additional auth data
-                    return self.handle_additional_auth_async(&payload).await;
+                    match self.handle_additional_auth_async(&payload).await {
+                        Outcome::Ok(()) => continue,
+                        Outcome::Err(e) => return Outcome::Err(e),
+                        Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                        Outcome::Panicked(p) => return Outcome::Panicked(p),
+                    }
                 }
             }
         }
@@ -770,33 +1154,70 @@ impl MySqlAsyncConnection {
 
         match data[0] {
             auth::caching_sha2::FAST_AUTH_SUCCESS => {
-                let (payload, _) = match self.read_packet_async().await {
-                    Outcome::Ok(p) => p,
-                    Outcome::Err(e) => return Outcome::Err(e),
-                    Outcome::Cancelled(r) => return Outcome::Cancelled(r),
-                    Outcome::Panicked(p) => return Outcome::Panicked(p),
-                };
-                let mut reader = PacketReader::new(&payload);
-                if let Some(ok) = reader.parse_ok_packet() {
-                    self.status_flags = ok.status_flags;
-                }
+                // Server will send the final OK packet next; leave it for the main auth loop.
                 Outcome::Ok(())
             }
-            auth::caching_sha2::PERFORM_FULL_AUTH => Outcome::Err(auth_error(
-                "Full authentication required - please use TLS connection",
-            )),
-            _ => {
-                let mut reader = PacketReader::new(data);
-                if let Some(ok) = reader.parse_ok_packet() {
-                    self.status_flags = ok.status_flags;
+            auth::caching_sha2::PERFORM_FULL_AUTH => {
+                let Some(server_caps) = self.server_caps.as_ref() else {
+                    return Outcome::Err(protocol_error("Missing server capabilities during auth"));
+                };
+
+                let password = self.config.password.clone().unwrap_or_default();
+                let seed = server_caps.auth_data.clone();
+                let server_version = server_caps.server_version.clone();
+
+                if self.is_secure_transport() {
+                    // On a secure transport (TLS), caching_sha2_password allows sending the
+                    // password as a NUL-terminated string.
+                    let mut clear = password.as_bytes().to_vec();
+                    clear.push(0);
+                    if let Outcome::Err(e) = self.write_packet_async(&clear).await {
+                        return Outcome::Err(e);
+                    }
                     Outcome::Ok(())
                 } else {
-                    Outcome::Err(protocol_error(format!(
-                        "Unknown auth response: {:02X}",
-                        data[0]
-                    )))
+                    // Request server public key then send RSA-encrypted password.
+                    if let Outcome::Err(e) = self
+                        .write_packet_async(&[auth::caching_sha2::REQUEST_PUBLIC_KEY])
+                        .await
+                    {
+                        return Outcome::Err(e);
+                    }
+
+                    let (payload, _) = match self.read_packet_async().await {
+                        Outcome::Ok(p) => p,
+                        Outcome::Err(e) => return Outcome::Err(e),
+                        Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+                        Outcome::Panicked(p) => return Outcome::Panicked(p),
+                    };
+                    if payload.is_empty() {
+                        return Outcome::Err(protocol_error("Empty public key response"));
+                    }
+
+                    // Some servers wrap the PEM in an AuthMoreData packet (0x01 prefix).
+                    let public_key = if payload[0] == 0x01 {
+                        &payload[1..]
+                    } else {
+                        &payload[..]
+                    };
+
+                    let use_oaep = mysql_server_uses_oaep(&server_version);
+                    let encrypted =
+                        match auth::sha256_password_rsa(&password, &seed, public_key, use_oaep) {
+                            Ok(v) => v,
+                            Err(e) => return Outcome::Err(auth_error(e)),
+                        };
+
+                    if let Outcome::Err(e) = self.write_packet_async(&encrypted).await {
+                        return Outcome::Err(e);
+                    }
+                    Outcome::Ok(())
                 }
             }
+            _ => Outcome::Err(protocol_error(format!(
+                "Unknown additional auth response: {:02X}",
+                data[0]
+            ))),
         }
     }
 
@@ -1452,7 +1873,10 @@ impl MySqlAsyncConnection {
 
     /// Write a pre-built packet (with header already included).
     async fn write_packet_raw_async(&mut self, packet: &[u8]) -> Outcome<(), Error> {
-        match &mut self.stream {
+        let Some(stream) = self.stream.as_mut() else {
+            return Outcome::Err(connection_error("Connection stream missing"));
+        };
+        match stream {
             ConnectionStream::Async(stream) => {
                 let mut written = 0;
                 while written < packet.len() {
@@ -1500,6 +1924,10 @@ impl MySqlAsyncConnection {
                 }
                 Outcome::Ok(())
             }
+            #[cfg(feature = "tls")]
+            ConnectionStream::Tls(_) => Outcome::Err(connection_error(
+                "write_packet_raw_async called after TLS upgrade (bug)",
+            )),
         }
     }
 
@@ -1547,226 +1975,6 @@ impl MySqlAsyncConnection {
     }
 }
 
-// === Connection trait implementation ===
-
-impl Connection for MySqlAsyncConnection {
-    type Tx<'conn> = MySqlTransaction<'conn>;
-
-    fn dialect(&self) -> sqlmodel_core::Dialect {
-        sqlmodel_core::Dialect::Mysql
-    }
-
-    fn query(
-        &self,
-        _cx: &Cx,
-        _sql: &str,
-        _params: &[Value],
-    ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
-        // Note: This requires &mut self, but trait uses &self
-        // We need interior mutability or a different approach
-        // For now, use a workaround
-        async move {
-            // This is a limitation - we need mutable access
-            // In a real implementation, we'd use interior mutability
-            Outcome::Err(connection_error(
-                "Query requires mutable access - use query_async directly",
-            ))
-        }
-    }
-
-    fn query_one(
-        &self,
-        _cx: &Cx,
-        _sql: &str,
-        _params: &[Value],
-    ) -> impl Future<Output = Outcome<Option<Row>, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Query requires mutable access - use query_async directly",
-            ))
-        }
-    }
-
-    fn execute(
-        &self,
-        _cx: &Cx,
-        _sql: &str,
-        _params: &[Value],
-    ) -> impl Future<Output = Outcome<u64, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Execute requires mutable access - use query_async directly",
-            ))
-        }
-    }
-
-    fn insert(
-        &self,
-        _cx: &Cx,
-        _sql: &str,
-        _params: &[Value],
-    ) -> impl Future<Output = Outcome<i64, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Insert requires mutable access - use query_async directly",
-            ))
-        }
-    }
-
-    fn batch(
-        &self,
-        _cx: &Cx,
-        _statements: &[(String, Vec<Value>)],
-    ) -> impl Future<Output = Outcome<Vec<u64>, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Batch requires mutable access - use query_async directly",
-            ))
-        }
-    }
-
-    fn begin(&self, _cx: &Cx) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Begin requires mutable access - use transaction methods directly",
-            ))
-        }
-    }
-
-    fn begin_with(
-        &self,
-        _cx: &Cx,
-        _isolation: IsolationLevel,
-    ) -> impl Future<Output = Outcome<Self::Tx<'_>, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Begin requires mutable access - use transaction methods directly",
-            ))
-        }
-    }
-
-    fn prepare(
-        &self,
-        _cx: &Cx,
-        _sql: &str,
-    ) -> impl Future<Output = Outcome<PreparedStatement, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Prepare not yet implemented for MySQL async",
-            ))
-        }
-    }
-
-    fn query_prepared(
-        &self,
-        _cx: &Cx,
-        _stmt: &PreparedStatement,
-        _params: &[Value],
-    ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Prepared query not yet implemented for MySQL async",
-            ))
-        }
-    }
-
-    fn execute_prepared(
-        &self,
-        _cx: &Cx,
-        _stmt: &PreparedStatement,
-        _params: &[Value],
-    ) -> impl Future<Output = Outcome<u64, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Prepared execute not yet implemented for MySQL async",
-            ))
-        }
-    }
-
-    fn ping(&self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Ping requires mutable access - use ping_async directly",
-            ))
-        }
-    }
-
-    fn close(self, cx: &Cx) -> impl Future<Output = Result<(), Error>> + Send {
-        async move { self.close_async(cx).await }
-    }
-}
-
-/// MySQL transaction (placeholder).
-pub struct MySqlTransaction<'conn> {
-    #[allow(dead_code)]
-    conn: &'conn mut MySqlAsyncConnection,
-}
-
-impl<'conn> TransactionOps for MySqlTransaction<'conn> {
-    fn query(
-        &self,
-        _cx: &Cx,
-        _sql: &str,
-        _params: &[Value],
-    ) -> impl Future<Output = Outcome<Vec<Row>, Error>> + Send {
-        async move { Outcome::Err(connection_error("Transaction query not yet implemented")) }
-    }
-
-    fn query_one(
-        &self,
-        _cx: &Cx,
-        _sql: &str,
-        _params: &[Value],
-    ) -> impl Future<Output = Outcome<Option<Row>, Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Transaction query_one not yet implemented",
-            ))
-        }
-    }
-
-    fn execute(
-        &self,
-        _cx: &Cx,
-        _sql: &str,
-        _params: &[Value],
-    ) -> impl Future<Output = Outcome<u64, Error>> + Send {
-        async move { Outcome::Err(connection_error("Transaction execute not yet implemented")) }
-    }
-
-    fn savepoint(&self, _cx: &Cx, _name: &str) -> impl Future<Output = Outcome<(), Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Transaction savepoint not yet implemented",
-            ))
-        }
-    }
-
-    fn rollback_to(
-        &self,
-        _cx: &Cx,
-        _name: &str,
-    ) -> impl Future<Output = Outcome<(), Error>> + Send {
-        async move {
-            Outcome::Err(connection_error(
-                "Transaction rollback_to not yet implemented",
-            ))
-        }
-    }
-
-    fn release(&self, _cx: &Cx, _name: &str) -> impl Future<Output = Outcome<(), Error>> + Send {
-        async move { Outcome::Err(connection_error("Transaction release not yet implemented")) }
-    }
-
-    fn commit(self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
-        async move { Outcome::Err(connection_error("Transaction commit not yet implemented")) }
-    }
-
-    fn rollback(self, _cx: &Cx) -> impl Future<Output = Outcome<(), Error>> + Send {
-        async move { Outcome::Err(connection_error("Transaction rollback not yet implemented")) }
-    }
-}
-
 // === Console integration ===
 
 #[cfg(feature = "console")]
@@ -1804,6 +2012,24 @@ fn connection_error(msg: impl Into<String>) -> Error {
         message: msg.into(),
         source: None,
     })
+}
+
+fn mysql_server_uses_oaep(server_version: &str) -> bool {
+    // MySQL 8.0.5+ uses OAEP for caching_sha2_password RSA encryption.
+    // Parse leading "major.minor.patch" prefix; if parsing fails, default to OAEP.
+    let prefix: String = server_version
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut it = prefix.split('.').filter(|s| !s.is_empty());
+    let major: u64 = match it.next().and_then(|s| s.parse().ok()) {
+        Some(v) => v,
+        None => return true,
+    };
+    let minor: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let patch: u64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    (major, minor, patch) >= (8, 0, 5)
 }
 
 fn query_error(err: &ErrPacket) -> Error {

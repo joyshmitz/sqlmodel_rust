@@ -264,7 +264,7 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
    - ✅ Numeric constraints (min, max)
    - ✅ String constraints (min_length, max_length)
    - ✅ Custom validator methods
-   - ⚠️ Full regex patterns (simplified - email, url only)
+   - ✅ Full regex patterns (`#[validate(pattern = \"...\")]`) with compile-time pattern validation
 
 ~~2. **`on_delete` foreign key action** - CASCADE, SET NULL, RESTRICT~~ ✅ **IMPLEMENTED**
    - ✅ `#[sqlmodel(foreign_key = "...", on_delete = "CASCADE")]`
@@ -276,13 +276,12 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 
 ### Priority 2 (Nice to Have)
 
-1. **Decimal precision/scale** - For financial applications
-   - `#[sqlmodel(precision = 10, scale = 2)]`
-   - Workaround: Use `#[sqlmodel(sql_type = "DECIMAL(10,2)")]`
+~~1. **Decimal precision/scale** - For financial applications~~ ✅ **IMPLEMENTED**
+   - `#[sqlmodel(precision = 10, scale = 2)]` is reflected in DDL via `FieldInfo::effective_sql_type()`
+   - You can still override explicitly via `#[sqlmodel(sql_type = "DECIMAL(10,2)")]`
 
-2. **Full regex validation** - Beyond email/url patterns
-   - Would require `regex` crate dependency
-   - Current workaround: Use custom validators
+~~2. **Full regex validation** - Beyond email/url patterns~~ ✅ **IMPLEMENTED**
+   - `#[validate(pattern = "...")]` uses cached runtime compilation + compile-time pattern validation
 
 ### Priority 3 (Explicitly Excluded)
 
@@ -314,7 +313,7 @@ These features are intentionally NOT being ported:
 
 ## Conclusion
 
-The Rust SQLModel implementation is **~92% feature complete** compared to Python SQLModel. The core ORM functionality (Model derive, query building, CRUD operations, transactions, connection pooling, validation) is fully implemented and production-ready.
+The Rust SQLModel implementation covers the core ORM functionality (Model derive, query building, CRUD operations, transactions, connection pooling, validation) and tracks explicit exclusions separately.
 
 ### Fully Production-Ready
 
