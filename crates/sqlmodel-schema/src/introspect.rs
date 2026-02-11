@@ -400,6 +400,13 @@ impl Introspector {
             Outcome::Panicked(p) => return Outcome::Panicked(p),
         };
 
+        let comment = match self.table_comment(cx, conn, table_name).await {
+            Outcome::Ok(comment) => comment,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
         Outcome::Ok(TableInfo {
             name: table_name.to_string(),
             columns,
@@ -408,7 +415,7 @@ impl Introspector {
             unique_constraints,
             check_constraints,
             indexes,
-            comment: None, // Requires additional queries per dialect
+            comment,
         })
     }
 
@@ -689,7 +696,8 @@ impl Introspector {
     ) -> Outcome<Vec<CheckConstraintInfo>, Error> {
         match self.dialect {
             Dialect::Sqlite => self.sqlite_check_constraints(cx, conn, table_name).await,
-            Dialect::Postgres | Dialect::Mysql => Outcome::Ok(Vec::new()),
+            Dialect::Postgres => self.postgres_check_constraints(cx, conn, table_name).await,
+            Dialect::Mysql => self.mysql_check_constraints(cx, conn, table_name).await,
         }
     }
 
@@ -722,6 +730,186 @@ impl Introspector {
             Some(sql) => Outcome::Ok(extract_sqlite_check_constraints(&sql)),
             None => Outcome::Ok(Vec::new()),
         }
+    }
+
+    async fn postgres_check_constraints<C: Connection>(
+        &self,
+        cx: &Cx,
+        conn: &C,
+        table_name: &str,
+    ) -> Outcome<Vec<CheckConstraintInfo>, Error> {
+        let sql = "SELECT
+                       c.conname AS constraint_name,
+                       pg_get_constraintdef(c.oid, true) AS constraint_definition
+                   FROM pg_constraint c
+                   JOIN pg_class t ON t.oid = c.conrelid
+                   JOIN pg_namespace n ON n.oid = t.relnamespace
+                   WHERE t.relname = $1
+                     AND n.nspname = 'public'
+                     AND c.contype = 'c'
+                   ORDER BY c.conname";
+
+        let rows = match conn
+            .query(
+                cx,
+                sql,
+                &[sqlmodel_core::Value::Text(table_name.to_string())],
+            )
+            .await
+        {
+            Outcome::Ok(rows) => rows,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let checks = rows
+            .iter()
+            .filter_map(|row| {
+                let definition = row.get_named::<String>("constraint_definition").ok()?;
+                let expression = normalize_check_expression(&definition);
+                if expression.is_empty() {
+                    return None;
+                }
+                Some(CheckConstraintInfo {
+                    name: row
+                        .get_named::<String>("constraint_name")
+                        .ok()
+                        .filter(|s| !s.is_empty()),
+                    expression,
+                })
+            })
+            .collect();
+
+        Outcome::Ok(checks)
+    }
+
+    async fn mysql_check_constraints<C: Connection>(
+        &self,
+        cx: &Cx,
+        conn: &C,
+        table_name: &str,
+    ) -> Outcome<Vec<CheckConstraintInfo>, Error> {
+        let sql = format!(
+            "SELECT
+                 tc.CONSTRAINT_NAME AS constraint_name,
+                 cc.CHECK_CLAUSE AS check_clause
+             FROM information_schema.TABLE_CONSTRAINTS tc
+             JOIN information_schema.CHECK_CONSTRAINTS cc
+               ON tc.CONSTRAINT_SCHEMA = cc.CONSTRAINT_SCHEMA
+              AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
+             WHERE tc.CONSTRAINT_TYPE = 'CHECK'
+               AND tc.TABLE_SCHEMA = DATABASE()
+               AND tc.TABLE_NAME = '{}'
+             ORDER BY tc.CONSTRAINT_NAME",
+            sanitize_identifier(table_name)
+        );
+
+        let rows = match conn.query(cx, &sql, &[]).await {
+            Outcome::Ok(rows) => rows,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let checks = rows
+            .iter()
+            .filter_map(|row| {
+                let definition = row.get_named::<String>("check_clause").ok()?;
+                let expression = normalize_check_expression(&definition);
+                if expression.is_empty() {
+                    return None;
+                }
+                Some(CheckConstraintInfo {
+                    name: row
+                        .get_named::<String>("constraint_name")
+                        .ok()
+                        .filter(|s| !s.is_empty()),
+                    expression,
+                })
+            })
+            .collect();
+
+        Outcome::Ok(checks)
+    }
+
+    async fn table_comment<C: Connection>(
+        &self,
+        cx: &Cx,
+        conn: &C,
+        table_name: &str,
+    ) -> Outcome<Option<String>, Error> {
+        match self.dialect {
+            Dialect::Sqlite => Outcome::Ok(None),
+            Dialect::Postgres => self.postgres_table_comment(cx, conn, table_name).await,
+            Dialect::Mysql => self.mysql_table_comment(cx, conn, table_name).await,
+        }
+    }
+
+    async fn postgres_table_comment<C: Connection>(
+        &self,
+        cx: &Cx,
+        conn: &C,
+        table_name: &str,
+    ) -> Outcome<Option<String>, Error> {
+        let sql = "SELECT
+                       COALESCE(obj_description(c.oid, 'pg_class'), '') AS table_comment
+                   FROM pg_class c
+                   JOIN pg_namespace n ON n.oid = c.relnamespace
+                   WHERE c.relname = $1
+                     AND n.nspname = 'public'
+                   LIMIT 1";
+
+        let rows = match conn
+            .query(
+                cx,
+                sql,
+                &[sqlmodel_core::Value::Text(table_name.to_string())],
+            )
+            .await
+        {
+            Outcome::Ok(rows) => rows,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let comment = rows.iter().find_map(|row| {
+            row.get_named::<String>("table_comment")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+        Outcome::Ok(comment)
+    }
+
+    async fn mysql_table_comment<C: Connection>(
+        &self,
+        cx: &Cx,
+        conn: &C,
+        table_name: &str,
+    ) -> Outcome<Option<String>, Error> {
+        let sql = format!(
+            "SELECT TABLE_COMMENT AS table_comment
+             FROM information_schema.TABLES
+             WHERE TABLE_SCHEMA = DATABASE()
+               AND TABLE_NAME = '{}'
+             LIMIT 1",
+            sanitize_identifier(table_name)
+        );
+
+        let rows = match conn.query(cx, &sql, &[]).await {
+            Outcome::Ok(rows) => rows,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let comment = rows.iter().find_map(|row| {
+            row.get_named::<String>("table_comment")
+                .ok()
+                .filter(|s| !s.is_empty())
+        });
+        Outcome::Ok(comment)
     }
 
     /// Get foreign key constraints for a table.
@@ -1119,6 +1307,24 @@ fn build_postgres_type(
 
     // Default: just return the data type
     data_type.to_uppercase()
+}
+
+fn normalize_check_expression(definition: &str) -> String {
+    let trimmed = definition.trim();
+    let check_positions = keyword_positions_outside_quotes(trimmed, "CHECK");
+    if let Some(check_pos) = check_positions.first().copied() {
+        let mut cursor = check_pos + "CHECK".len();
+        while cursor < trimmed.len() && trimmed.as_bytes()[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor < trimmed.len()
+            && trimmed.as_bytes()[cursor] == b'('
+            && let Some((expr, _)) = extract_parenthesized(trimmed, cursor)
+        {
+            return expr;
+        }
+    }
+    trimmed.to_string()
 }
 
 fn extract_sqlite_check_constraints(create_table_sql: &str) -> Vec<CheckConstraintInfo> {
@@ -1658,6 +1864,27 @@ mod tests {
         assert_eq!(sanitize_identifier("table.name"), "tablename");
         assert_eq!(sanitize_identifier("table name"), "tablename");
         assert_eq!(sanitize_identifier("table\nname"), "tablename");
+    }
+
+    #[test]
+    fn test_normalize_check_expression_wrapped_check() {
+        assert_eq!(
+            normalize_check_expression("CHECK ((age >= 0) AND (age <= 150))"),
+            "(age >= 0) AND (age <= 150)"
+        );
+    }
+
+    #[test]
+    fn test_normalize_check_expression_raw_clause() {
+        assert_eq!(normalize_check_expression("(score > 0)"), "(score > 0)");
+    }
+
+    #[test]
+    fn test_normalize_check_expression_with_quoted_commas() {
+        assert_eq!(
+            normalize_check_expression("CHECK (kind IN ('A,B', 'C'))"),
+            "kind IN ('A,B', 'C')"
+        );
     }
 
     #[test]
