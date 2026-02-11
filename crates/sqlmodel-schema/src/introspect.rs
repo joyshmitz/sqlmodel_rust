@@ -4,8 +4,11 @@
 //! It extracts metadata about tables, columns, constraints, and indexes.
 
 use asupersync::{Cx, Outcome};
-use sqlmodel_core::{Connection, Error, sanitize_identifier};
+use sqlmodel_core::{Connection, Error};
 use std::collections::HashMap;
+
+#[cfg(test)]
+use sqlmodel_core::sanitize_identifier;
 
 // ============================================================================
 // Schema Types
@@ -528,7 +531,7 @@ impl Introspector {
         conn: &C,
         table_name: &str,
     ) -> Outcome<Vec<ColumnInfo>, Error> {
-        let sql = format!("PRAGMA table_info({})", sanitize_identifier(table_name));
+        let sql = format!("PRAGMA table_info({})", quote_sqlite_identifier(table_name));
         let rows = match conn.query(cx, &sql, &[]).await {
             Outcome::Ok(rows) => rows,
             Outcome::Err(e) => return Outcome::Err(e),
@@ -646,8 +649,8 @@ impl Introspector {
     ) -> Outcome<Vec<ColumnInfo>, Error> {
         // Use SHOW FULL COLUMNS to get comments
         let sql = format!(
-            "SHOW FULL COLUMNS FROM `{}`",
-            sanitize_identifier(table_name)
+            "SHOW FULL COLUMNS FROM {}",
+            quote_mysql_identifier(table_name)
         );
         let rows = match conn.query(cx, &sql, &[]).await {
             Outcome::Ok(rows) => rows,
@@ -707,12 +710,15 @@ impl Introspector {
         conn: &C,
         table_name: &str,
     ) -> Outcome<Vec<CheckConstraintInfo>, Error> {
-        let sql = format!(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='{}'",
-            sanitize_identifier(table_name)
-        );
-
-        let rows = match conn.query(cx, &sql, &[]).await {
+        let sql = "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1";
+        let rows = match conn
+            .query(
+                cx,
+                sql,
+                &[sqlmodel_core::Value::Text(table_name.to_string())],
+            )
+            .await
+        {
             Outcome::Ok(rows) => rows,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -790,8 +796,7 @@ impl Introspector {
         conn: &C,
         table_name: &str,
     ) -> Outcome<Vec<CheckConstraintInfo>, Error> {
-        let sql = format!(
-            "SELECT
+        let sql = "SELECT
                  tc.CONSTRAINT_NAME AS constraint_name,
                  cc.CHECK_CLAUSE AS check_clause
              FROM information_schema.TABLE_CONSTRAINTS tc
@@ -800,12 +805,17 @@ impl Introspector {
               AND tc.CONSTRAINT_NAME = cc.CONSTRAINT_NAME
              WHERE tc.CONSTRAINT_TYPE = 'CHECK'
                AND tc.TABLE_SCHEMA = DATABASE()
-               AND tc.TABLE_NAME = '{}'
-             ORDER BY tc.CONSTRAINT_NAME",
-            sanitize_identifier(table_name)
-        );
+               AND tc.TABLE_NAME = ?
+             ORDER BY tc.CONSTRAINT_NAME";
 
-        let rows = match conn.query(cx, &sql, &[]).await {
+        let rows = match conn
+            .query(
+                cx,
+                sql,
+                &[sqlmodel_core::Value::Text(table_name.to_string())],
+            )
+            .await
+        {
             Outcome::Ok(rows) => rows,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -888,16 +898,20 @@ impl Introspector {
         conn: &C,
         table_name: &str,
     ) -> Outcome<Option<String>, Error> {
-        let sql = format!(
-            "SELECT TABLE_COMMENT AS table_comment
+        let sql = "SELECT TABLE_COMMENT AS table_comment
              FROM information_schema.TABLES
              WHERE TABLE_SCHEMA = DATABASE()
-               AND TABLE_NAME = '{}'
-             LIMIT 1",
-            sanitize_identifier(table_name)
-        );
+               AND TABLE_NAME = ?
+             LIMIT 1";
 
-        let rows = match conn.query(cx, &sql, &[]).await {
+        let rows = match conn
+            .query(
+                cx,
+                sql,
+                &[sqlmodel_core::Value::Text(table_name.to_string())],
+            )
+            .await
+        {
             Outcome::Ok(rows) => rows,
             Outcome::Err(e) => return Outcome::Err(e),
             Outcome::Cancelled(r) => return Outcome::Cancelled(r),
@@ -934,7 +948,7 @@ impl Introspector {
     ) -> Outcome<Vec<ForeignKeyInfo>, Error> {
         let sql = format!(
             "PRAGMA foreign_key_list({})",
-            sanitize_identifier(table_name)
+            quote_sqlite_identifier(table_name)
         );
         let rows = match conn.query(cx, &sql, &[]).await {
             Outcome::Ok(rows) => rows,
@@ -1114,7 +1128,7 @@ impl Introspector {
         conn: &C,
         table_name: &str,
     ) -> Outcome<Vec<IndexInfo>, Error> {
-        let sql = format!("PRAGMA index_list({})", sanitize_identifier(table_name));
+        let sql = format!("PRAGMA index_list({})", quote_sqlite_identifier(table_name));
         let rows = match conn.query(cx, &sql, &[]).await {
             Outcome::Ok(rows) => rows,
             Outcome::Err(e) => return Outcome::Err(e),
@@ -1133,7 +1147,7 @@ impl Introspector {
             let primary = origin == "pk";
 
             // Get column info for this index
-            let info_sql = format!("PRAGMA index_info({})", sanitize_identifier(&name));
+            let info_sql = format!("PRAGMA index_info({})", quote_sqlite_identifier(&name));
             let info_rows = match conn.query(cx, &info_sql, &[]).await {
                 Outcome::Ok(r) => r,
                 Outcome::Err(_) => continue,
@@ -1238,7 +1252,7 @@ impl Introspector {
         conn: &C,
         table_name: &str,
     ) -> Outcome<Vec<IndexInfo>, Error> {
-        let sql = format!("SHOW INDEX FROM `{}`", sanitize_identifier(table_name));
+        let sql = format!("SHOW INDEX FROM {}", quote_mysql_identifier(table_name));
         let rows = match conn.query(cx, &sql, &[]).await {
             Outcome::Ok(rows) => rows,
             Outcome::Err(e) => return Outcome::Err(e),
@@ -1279,6 +1293,16 @@ impl Introspector {
 // ============================================================================
 // Helper Functions
 // ============================================================================
+
+fn quote_sqlite_identifier(name: &str) -> String {
+    let escaped = name.replace('"', "\"\"");
+    format!("\"{escaped}\"")
+}
+
+fn quote_mysql_identifier(name: &str) -> String {
+    let escaped = name.replace('`', "``");
+    format!("`{escaped}`")
+}
 
 /// Build a complete PostgreSQL type string from information_schema data.
 fn build_postgres_type(
@@ -1864,6 +1888,18 @@ mod tests {
         assert_eq!(sanitize_identifier("table.name"), "tablename");
         assert_eq!(sanitize_identifier("table name"), "tablename");
         assert_eq!(sanitize_identifier("table\nname"), "tablename");
+    }
+
+    #[test]
+    fn test_quote_sqlite_identifier_preserves_special_chars() {
+        assert_eq!(quote_sqlite_identifier("my table"), "\"my table\"");
+        assert_eq!(quote_sqlite_identifier("my\"table"), "\"my\"\"table\"");
+    }
+
+    #[test]
+    fn test_quote_mysql_identifier_preserves_special_chars() {
+        assert_eq!(quote_mysql_identifier("my-table"), "`my-table`");
+        assert_eq!(quote_mysql_identifier("my`table"), "`my``table`");
     }
 
     #[test]

@@ -104,3 +104,58 @@ fn sqlite_introspector_extracts_check_constraints_from_live_schema() {
         );
     });
 }
+
+#[test]
+fn sqlite_introspector_handles_special_character_table_names() {
+    let rt = RuntimeBuilder::current_thread()
+        .build()
+        .expect("create asupersync runtime");
+    let cx = Cx::for_testing();
+
+    rt.block_on(async {
+        let conn = SqliteConnection::open_memory().expect("open sqlite memory db");
+        let table_name = "heroes table-1";
+        let create_sql = r#"
+            CREATE TABLE "heroes table-1" (
+                id INTEGER PRIMARY KEY,
+                age INTEGER NOT NULL,
+                CHECK (age >= 0)
+            )
+        "#;
+
+        unwrap_outcome(conn.execute(&cx, create_sql, &[]).await).expect("create quoted table");
+
+        let introspector = Introspector::new(Dialect::Sqlite);
+        let names =
+            unwrap_outcome(introspector.table_names(&cx, &conn).await).expect("table names");
+        assert!(
+            names.iter().any(|name| name == table_name),
+            "expected table_names to include quoted-name table, got: {names:?}"
+        );
+
+        let table_info = unwrap_outcome(introspector.table_info(&cx, &conn, table_name).await)
+            .expect("introspect quoted-name table");
+        assert_eq!(table_info.name, table_name);
+        assert!(
+            table_info.columns.iter().any(|c| c.name == "id"),
+            "expected id column in {:?}",
+            table_info
+                .columns
+                .iter()
+                .map(|c| &c.name)
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            table_info
+                .check_constraints
+                .iter()
+                .any(|c| compact_sql_fragment(&c.expression) == "age>=0"),
+            "expected CHECK(age>=0), got {:?}",
+            table_info
+                .check_constraints
+                .iter()
+                .map(|c| (&c.name, &c.expression))
+                .collect::<Vec<_>>()
+        );
+    });
+}
