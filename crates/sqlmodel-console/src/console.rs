@@ -406,13 +406,7 @@ pub fn strip_markup(s: &str) -> String {
                 // Extract the tag content
                 let tag_content: String = chars[i + 1..close_idx].iter().collect();
 
-                // Check if this looks like markup:
-                // 1. Closing tags: starts with '/' (e.g., "/", "/bold")
-                // 2. Compound styles: contains a space (e.g., "red on white")
-                // 3. Style names: has 2+ alphabetic chars (e.g., "bold", "red")
-                let letter_count = tag_content.chars().filter(|c| c.is_alphabetic()).count();
-                let is_markup =
-                    tag_content.starts_with('/') || tag_content.contains(' ') || letter_count >= 2;
+                let is_markup = is_rich_markup_tag(&tag_content);
 
                 if is_markup {
                     // Skip the entire tag
@@ -431,6 +425,45 @@ pub fn strip_markup(s: &str) -> String {
     }
 
     result
+}
+
+#[must_use]
+fn is_rich_markup_tag(tag_content: &str) -> bool {
+    if tag_content.starts_with('/') {
+        return true;
+    }
+    if tag_content.contains(' ') || tag_content.contains('=') {
+        return true;
+    }
+
+    let normalized = tag_content.to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "bold"
+            | "dim"
+            | "italic"
+            | "underline"
+            | "strike"
+            | "blink"
+            | "reverse"
+            | "black"
+            | "red"
+            | "green"
+            | "yellow"
+            | "blue"
+            | "magenta"
+            | "cyan"
+            | "white"
+            | "default"
+            | "bright_black"
+            | "bright_red"
+            | "bright_green"
+            | "bright_yellow"
+            | "bright_blue"
+            | "bright_magenta"
+            | "bright_cyan"
+            | "bright_white"
+    )
 }
 
 #[cfg(test)]
@@ -475,6 +508,14 @@ mod tests {
         // Unclosed brackets should be preserved
         assert_eq!(strip_markup("array[0]"), "array[0]");
         assert_eq!(strip_markup("func(a[i])"), "func(a[i])");
+        assert_eq!(strip_markup("items[idx]"), "items[idx]");
+        assert_eq!(strip_markup("[idx] should stay"), "[idx] should stay");
+    }
+
+    #[test]
+    fn test_strip_markup_strips_known_single_tags() {
+        assert_eq!(strip_markup("[bold]x[/]"), "x");
+        assert_eq!(strip_markup("[red]x[/red]"), "x");
     }
 
     #[test]
