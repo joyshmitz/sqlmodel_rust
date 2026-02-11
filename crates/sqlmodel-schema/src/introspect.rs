@@ -269,6 +269,14 @@ pub struct IndexInfo {
     pub primary: bool,
 }
 
+#[derive(Default)]
+struct MySqlIndexAccumulator {
+    columns: Vec<(i64, String)>,
+    unique: bool,
+    index_type: Option<String>,
+    primary: bool,
+}
+
 /// Database introspector.
 pub struct Introspector {
     /// Database type for dialect-specific queries
@@ -1269,8 +1277,8 @@ impl Introspector {
             Outcome::Panicked(p) => return Outcome::Panicked(p),
         };
 
-        // Group by index name
-        let mut index_map: HashMap<String, IndexInfo> = HashMap::new();
+        // Group by index name, preserving declared key order via Seq_in_index.
+        let mut index_map: HashMap<String, MySqlIndexAccumulator> = HashMap::new();
 
         for row in &rows {
             let Ok(name) = row.get_named::<String>("Key_name") else {
@@ -1279,23 +1287,40 @@ impl Introspector {
             let Ok(column) = row.get_named::<String>("Column_name") else {
                 continue;
             };
+            let seq_in_index = row
+                .get_named::<i64>("Seq_in_index")
+                .ok()
+                .unwrap_or(i64::MAX);
             let non_unique = row.get_named::<i64>("Non_unique").ok().unwrap_or(1);
             let index_type = row.get_named::<String>("Index_type").ok();
             let primary = name == "PRIMARY";
 
             index_map
                 .entry(name.clone())
-                .and_modify(|idx| idx.columns.push(column.clone()))
-                .or_insert_with(|| IndexInfo {
-                    name,
-                    columns: vec![column],
+                .and_modify(|idx| idx.columns.push((seq_in_index, column.clone())))
+                .or_insert_with(|| MySqlIndexAccumulator {
+                    columns: vec![(seq_in_index, column)],
                     unique: non_unique == 0,
-                    index_type,
+                    index_type: index_type.clone(),
                     primary,
                 });
         }
 
-        Outcome::Ok(index_map.into_values().collect())
+        let indexes = index_map
+            .into_iter()
+            .map(|(name, mut acc)| {
+                acc.columns.sort_by_key(|(seq, _)| *seq);
+                IndexInfo {
+                    name,
+                    columns: acc.columns.into_iter().map(|(_, col)| col).collect(),
+                    unique: acc.unique,
+                    index_type: acc.index_type,
+                    primary: acc.primary,
+                }
+            })
+            .collect();
+
+        Outcome::Ok(indexes)
     }
 }
 
