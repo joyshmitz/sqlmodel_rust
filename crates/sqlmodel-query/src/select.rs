@@ -890,15 +890,25 @@ impl<M: Model> Select<M> {
 
     /// Execute the query and return exactly one row, or error.
     pub async fn one<C: Connection>(self, cx: &Cx, conn: &C) -> Outcome<M, sqlmodel_core::Error> {
-        match self.first(cx, conn).await {
-            Outcome::Ok(Some(model)) => Outcome::Ok(model),
-            Outcome::Ok(None) => Outcome::Err(sqlmodel_core::Error::Custom(
+        // Fetch up to two rows so we can enforce exact-one semantics without
+        // scanning the full result set.
+        let mut query = self;
+        query.limit = Some(Limit(2));
+        let (sql, params) = query.build_with_dialect(conn.dialect());
+        let rows = conn.query(cx, &sql, &params).await;
+
+        rows.and_then(|rows| match rows.len() {
+            0 => Outcome::Err(sqlmodel_core::Error::Custom(
                 "Expected one row, found none".to_string(),
             )),
-            Outcome::Err(e) => Outcome::Err(e),
-            Outcome::Cancelled(r) => Outcome::Cancelled(r),
-            Outcome::Panicked(p) => Outcome::Panicked(p),
-        }
+            1 => match M::from_row(&rows[0]) {
+                Ok(model) => Outcome::Ok(model),
+                Err(e) => Outcome::Err(e),
+            },
+            n => Outcome::Err(sqlmodel_core::Error::Custom(format!(
+                "Expected one row, found {n}"
+            ))),
+        })
     }
 
     /// Execute the query and return the count of matching rows.
