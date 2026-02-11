@@ -151,7 +151,7 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Unique constraint | Automatic | Automatic | ✅ Complete |
 | Migration tracking | Alembic | `MigrationRunner` | ✅ Implemented |
 | Auto-generate migrations | Alembic | `schema_diff` + `MigrationWriter` | ✅ Implemented |
-| Database introspection | `inspect(engine)` | Partial (tables/columns/FKs/indexes + CHECK constraints + table comments across dialects) | ⚠️ Partial |
+| Database introspection | `inspect(engine)` | Partial (tables/columns/FKs/indexes + CHECK constraints + table comments across dialects; pg/mysql driver-backed integration coverage) | ⚠️ Partial |
 
 ---
 
@@ -302,11 +302,11 @@ This project has **no exclusions** (see `bd-162`). Items previously listed here 
 | sqlmodel-core | ✅ | - | Good |
 | sqlmodel-macros | ✅ | - | Good |
 | sqlmodel-query | ✅ | - | Good |
-| sqlmodel-schema | ⚠️ | - | Basic |
+| sqlmodel-schema | ✅ | ⚠️ Via postgres/mysql driver integration suites | Improving |
 | sqlmodel-pool | ✅ | - | Good |
 | sqlmodel-mysql | ✅ 58+ tests | ✅ | Excellent |
 | sqlmodel-sqlite | ✅ | - | Good |
-| sqlmodel-postgres | ⚠️ | - | Basic |
+| sqlmodel-postgres | ✅ | ✅ | Good |
 
 ---
 
