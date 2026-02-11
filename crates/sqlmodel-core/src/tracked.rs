@@ -7,9 +7,7 @@
 use std::ops::{Deref, DerefMut};
 
 use crate::fields_set::FieldsSet;
-use crate::validate::{
-    DumpMode, DumpOptions, DumpResult, apply_serialization_aliases, dump_options_unsupported,
-};
+use crate::validate::{DumpOptions, DumpResult, apply_serialization_aliases};
 use crate::{FieldInfo, Model};
 
 /// A model instance with explicit "fields set" tracking.
@@ -129,7 +127,6 @@ impl<T: Model + serde::Serialize> TrackedModel<T> {
     /// by consulting the stored `FieldsSet`.
     pub fn sql_model_dump(&self, options: DumpOptions) -> DumpResult {
         let DumpOptions {
-            mode,
             include,
             exclude,
             by_alias,
@@ -137,20 +134,10 @@ impl<T: Model + serde::Serialize> TrackedModel<T> {
             exclude_defaults,
             exclude_none,
             exclude_computed_fields,
-            round_trip,
+            mode: _,
+            round_trip: _,
             indent: _,
         } = options;
-
-        if mode != DumpMode::Json {
-            return Err(dump_options_unsupported(
-                "DumpOptions.mode != Json is not supported (output is serde_json::Value)",
-            ));
-        }
-        if round_trip {
-            return Err(dump_options_unsupported(
-                "DumpOptions.round_trip is not supported (tagged round-trip encoding is not available)",
-            ));
-        }
 
         let mut value = serde_json::to_value(&self.inner)?;
 

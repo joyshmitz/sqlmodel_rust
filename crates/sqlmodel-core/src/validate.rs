@@ -404,7 +404,7 @@ pub struct DumpOptions {
     /// `mode='python'` preserves native Python types (e.g., datetime objects).
     ///
     /// In this crate, `model_dump()`/`sql_model_dump()` return `serde_json::Value`,
-    /// so only JSON output is supported. Non-JSON modes are rejected at runtime.
+    /// so both modes currently produce equivalent JSON-value output.
     pub mode: DumpMode,
     /// Only include these fields (if Some)
     pub include: Option<std::collections::HashSet<String>>,
@@ -437,9 +437,8 @@ pub struct DumpOptions {
     /// Enable round-trip mode (preserves types for re-parsing).
     ///
     /// Pydantic can alter serialization to ensure a dump can be fed back into
-    /// validation and reproduce the same model. This crate does not currently
-    /// implement a tagged encoding for round-trip fidelity, so this option is
-    /// rejected at runtime.
+    /// validation and reproduce the same model. This crate does not yet implement
+    /// tagged round-trip encoding, so this flag is currently accepted as a no-op.
     pub round_trip: bool,
     /// Indentation for JSON output (None = compact, Some(n) = n spaces)
     pub indent: Option<usize>,
@@ -619,19 +618,9 @@ pub trait ModelDump {
 /// Blanket implementation of ModelDump for types that implement Serialize.
 impl<T: serde::Serialize> ModelDump for T {
     fn model_dump(&self, options: DumpOptions) -> DumpResult {
-        if options.mode != DumpMode::Json {
-            return Err(dump_options_unsupported(
-                "DumpOptions.mode != Json is not supported (output is serde_json::Value)",
-            ));
-        }
         if options.exclude_unset {
             return Err(dump_options_unsupported(
                 "DumpOptions.exclude_unset requires fields_set tracking; use SqlModelValidate::sql_model_validate_tracked(...) or the tracked!(Type { .. }) macro",
-            ));
-        }
-        if options.round_trip {
-            return Err(dump_options_unsupported(
-                "DumpOptions.round_trip is not supported (tagged round-trip encoding is not available)",
             ));
         }
         if options.by_alias || options.exclude_defaults || options.exclude_computed_fields {
@@ -986,19 +975,9 @@ impl<T: Model + DeserializeOwned> SqlModelValidate for T {}
 pub trait SqlModelDump: Model + serde::Serialize {
     /// Serialize a model to a JSON value, optionally applying aliases.
     fn sql_model_dump(&self, options: DumpOptions) -> DumpResult {
-        if options.mode != DumpMode::Json {
-            return Err(dump_options_unsupported(
-                "DumpOptions.mode != Json is not supported (output is serde_json::Value)",
-            ));
-        }
         if options.exclude_unset {
             return Err(dump_options_unsupported(
                 "DumpOptions.exclude_unset requires fields_set tracking; use SqlModelValidate::sql_model_validate_tracked(...) or the tracked!(Type { .. }) macro",
-            ));
-        }
-        if options.round_trip {
-            return Err(dump_options_unsupported(
-                "DumpOptions.round_trip is not supported (tagged round-trip encoding is not available)",
             ));
         }
 
@@ -1863,6 +1842,22 @@ mod tests {
         assert!(json.get("active").is_none());
     }
 
+    #[test]
+    fn test_model_dump_accepts_python_mode_and_round_trip() {
+        let product = TestProduct {
+            name: "Widget".to_string(),
+            price: 19.99,
+            description: Some("A useful widget".to_string()),
+        };
+        let json = product
+            .model_dump(DumpOptions::default().python().round_trip())
+            .unwrap();
+
+        assert_eq!(json["name"], "Widget");
+        assert_eq!(json["price"], 19.99);
+        assert_eq!(json["description"], "A useful widget");
+    }
+
     // ========================================================================
     // Alias Tests
     // ========================================================================
@@ -2035,6 +2030,37 @@ mod tests {
         assert_eq!(json["email"], "alice@example.com");
         assert!(json.get("displayName").is_none());
         assert!(json.get("emailAddress").is_none());
+    }
+
+    #[test]
+    fn test_sql_model_dump_accepts_python_mode_and_round_trip() {
+        let user = TestAliasedUser {
+            id: 1,
+            name: "Alice".to_string(),
+            email: "alice@example.com".to_string(),
+        };
+        let json = user
+            .sql_model_dump(DumpOptions::default().python().round_trip())
+            .unwrap();
+
+        assert_eq!(json["name"], "Alice");
+        assert_eq!(json["email"], "alice@example.com");
+    }
+
+    #[test]
+    fn test_tracked_model_dump_accepts_python_mode_and_round_trip() {
+        let user = TestAliasedUser {
+            id: 1,
+            name: "Alice".to_string(),
+            email: "alice@example.com".to_string(),
+        };
+        let tracked = crate::TrackedModel::all_fields_set(user);
+        let json = tracked
+            .sql_model_dump(DumpOptions::default().python().round_trip())
+            .unwrap();
+
+        assert_eq!(json["name"], "Alice");
+        assert_eq!(json["email"], "alice@example.com");
     }
 
     #[test]
