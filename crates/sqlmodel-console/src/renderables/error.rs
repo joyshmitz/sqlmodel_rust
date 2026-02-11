@@ -302,8 +302,8 @@ impl ErrorPanel {
     #[must_use]
     pub fn render_styled(&self) -> String {
         let theme = self.theme.clone().unwrap_or_default();
-        let width = self.width.unwrap_or(70);
-        let inner_width = width - 4; // Account for borders and padding
+        let width = self.width.unwrap_or(70).max(6);
+        let inner_width = width.saturating_sub(4); // Account for borders and padding
 
         let color = self.severity.color_code();
         let reset = ErrorSeverity::reset_code();
@@ -312,10 +312,14 @@ impl ErrorPanel {
         let mut lines = Vec::new();
 
         // Top border with title
-        let title = format!(" {} ", self.title);
+        let max_title_chars = width.saturating_sub(4);
+        let title_text = self.truncate_plain_to_width(&self.title, max_title_chars);
+        let title = format!(" {title_text} ");
         let title_len = title.chars().count();
-        let left_pad = (width - 2 - title_len) / 2;
-        let right_pad = width - 2 - title_len - left_pad;
+        let border_space = width.saturating_sub(2);
+        let total_pad = border_space.saturating_sub(title_len);
+        let left_pad = total_pad / 2;
+        let right_pad = total_pad.saturating_sub(left_pad);
         let top_border = format!(
             "{color}╭{}{}{}╮{reset}",
             "─".repeat(left_pad),
@@ -351,35 +355,38 @@ impl ErrorPanel {
         // SQL context with position marker
         if let Some(ref sql) = self.sql {
             // SQL box header
-            let sql_header = format!("{dim}┌─ Query ─{}┐{reset}", "─".repeat(inner_width - 12));
+            let sql_header = format!(
+                "{dim}┌─ Query ─{}┐{reset}",
+                "─".repeat(inner_width.saturating_sub(12))
+            );
             lines.push(format!("{color}│{reset} {sql_header} {color}│{reset}"));
 
             // SQL content (may need truncation for very long queries)
-            let sql_display = if sql.len() > inner_width - 4 {
-                format!("{}...", &sql[..inner_width - 7])
-            } else {
-                sql.clone()
-            };
+            let sql_content_width = inner_width.saturating_sub(4);
+            let sql_display = self.truncate_plain_to_width(sql, sql_content_width);
             lines.push(format!(
                 "{color}│{reset} {dim}│{reset} {:<width$} {dim}│{reset} {color}│{reset}",
                 sql_display,
-                width = inner_width - 4
+                width = sql_content_width
             ));
 
             // Position marker
             if let Some(pos) = self.sql_position {
-                let marker_pos = pos.saturating_sub(1).min(inner_width - 5);
+                let marker_pos = pos.saturating_sub(1).min(inner_width.saturating_sub(5));
                 let marker_line = format!("{}^", " ".repeat(marker_pos));
                 lines.push(format!(
                     "{color}│{reset} {dim}│{reset} {}{:<width$}{reset} {dim}│{reset} {color}│{reset}",
                     theme.error.color_code(),
                     marker_line,
-                    width = inner_width - 4
+                    width = sql_content_width
                 ));
             }
 
             // SQL box footer
-            let sql_footer = format!("{dim}└{}┘{reset}", "─".repeat(inner_width - 2));
+            let sql_footer = format!(
+                "{dim}└{}┘{reset}",
+                "─".repeat(inner_width.saturating_sub(2))
+            );
             lines.push(format!("{color}│{reset} {sql_footer} {color}│{reset}"));
 
             // Empty line after SQL
@@ -482,6 +489,24 @@ impl ErrorPanel {
         }
 
         out
+    }
+
+    fn truncate_plain_to_width(&self, s: &str, max_visible: usize) -> String {
+        if max_visible == 0 {
+            return String::new();
+        }
+
+        let char_count = s.chars().count();
+        if char_count <= max_visible {
+            return s.to_string();
+        }
+
+        if max_visible <= 3 {
+            return ".".repeat(max_visible);
+        }
+
+        let truncated: String = s.chars().take(max_visible - 3).collect();
+        format!("{truncated}...")
     }
 
     /// Calculate visible length of a string (excluding ANSI codes).
@@ -750,6 +775,30 @@ mod tests {
         assert!(styled.contains("Query")); // SQL box header
         assert!(styled.contains("SELECT * FROM users"));
         assert!(styled.contains('^')); // Position marker
+    }
+
+    #[test]
+    fn test_error_panel_render_styled_tiny_width_does_not_panic() {
+        let panel = ErrorPanel::new("Tiny", "Narrow")
+            .with_sql("SELECT * FROM t")
+            .with_position(3)
+            .width(1);
+        let styled = panel.render_styled();
+
+        assert!(!styled.is_empty());
+        assert!(styled.contains('╭'));
+        assert!(styled.contains('╯'));
+    }
+
+    #[test]
+    fn test_error_panel_render_styled_unicode_sql_truncation() {
+        let panel = ErrorPanel::new("Unicode", "Syntax error")
+            .with_sql("SELECT '🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥'")
+            .width(26);
+        let styled = panel.render_styled();
+
+        assert!(styled.contains("Query"));
+        assert!(styled.contains("..."));
     }
 
     #[test]
