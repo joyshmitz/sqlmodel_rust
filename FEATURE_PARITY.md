@@ -151,7 +151,7 @@ This document tracks feature parity between Python SQLModel and Rust SQLModel.
 | Unique constraint | Automatic | Automatic | ✅ Complete |
 | Migration tracking | Alembic | `MigrationRunner` | ✅ Implemented |
 | Auto-generate migrations | Alembic | `schema_diff` + `MigrationWriter` | ✅ Implemented |
-| Database introspection | `inspect(engine)` | Partial | ⚠️ Basic |
+| Database introspection | `inspect(engine)` | Partial (tables/columns/FKs/indexes + SQLite CHECK constraints) | ⚠️ Partial |
 
 ---
 

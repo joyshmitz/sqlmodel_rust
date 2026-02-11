@@ -393,13 +393,20 @@ impl Introspector {
             Dialect::Postgres => (unique_constraints, indexes),
         };
 
+        let check_constraints = match self.check_constraints(cx, conn, table_name).await {
+            Outcome::Ok(checks) => checks,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
         Outcome::Ok(TableInfo {
             name: table_name.to_string(),
             columns,
             primary_key,
             foreign_keys,
             unique_constraints,
-            check_constraints: Vec::new(), // Requires additional queries per dialect
+            check_constraints,
             indexes,
             comment: None, // Requires additional queries per dialect
         })
@@ -673,6 +680,49 @@ impl Introspector {
     // ========================================================================
     // Foreign Key Introspection
     // ========================================================================
+
+    async fn check_constraints<C: Connection>(
+        &self,
+        cx: &Cx,
+        conn: &C,
+        table_name: &str,
+    ) -> Outcome<Vec<CheckConstraintInfo>, Error> {
+        match self.dialect {
+            Dialect::Sqlite => self.sqlite_check_constraints(cx, conn, table_name).await,
+            Dialect::Postgres | Dialect::Mysql => Outcome::Ok(Vec::new()),
+        }
+    }
+
+    async fn sqlite_check_constraints<C: Connection>(
+        &self,
+        cx: &Cx,
+        conn: &C,
+        table_name: &str,
+    ) -> Outcome<Vec<CheckConstraintInfo>, Error> {
+        let sql = format!(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='{}'",
+            sanitize_identifier(table_name)
+        );
+
+        let rows = match conn.query(cx, &sql, &[]).await {
+            Outcome::Ok(rows) => rows,
+            Outcome::Err(e) => return Outcome::Err(e),
+            Outcome::Cancelled(r) => return Outcome::Cancelled(r),
+            Outcome::Panicked(p) => return Outcome::Panicked(p),
+        };
+
+        let create_sql = rows.iter().find_map(|row| {
+            row.get_named::<String>("sql").ok().or_else(|| {
+                row.get(0)
+                    .and_then(|value| value.as_str().map(ToString::to_string))
+            })
+        });
+
+        match create_sql {
+            Some(sql) => Outcome::Ok(extract_sqlite_check_constraints(&sql)),
+            None => Outcome::Ok(Vec::new()),
+        }
+    }
 
     /// Get foreign key constraints for a table.
     async fn foreign_keys<C: Connection>(
@@ -1071,6 +1121,390 @@ fn build_postgres_type(
     data_type.to_uppercase()
 }
 
+fn extract_sqlite_check_constraints(create_table_sql: &str) -> Vec<CheckConstraintInfo> {
+    let Some(definitions) = sqlite_table_definitions(create_table_sql) else {
+        return Vec::new();
+    };
+
+    let mut checks = Vec::new();
+    for definition in split_sqlite_definitions(definitions) {
+        let constraint_positions = keyword_positions_outside_quotes(definition, "CONSTRAINT");
+        let check_positions = keyword_positions_outside_quotes(definition, "CHECK");
+
+        for check_pos in check_positions {
+            let mut cursor = check_pos + "CHECK".len();
+            while cursor < definition.len() && definition.as_bytes()[cursor].is_ascii_whitespace() {
+                cursor += 1;
+            }
+
+            if cursor >= definition.len() || definition.as_bytes()[cursor] != b'(' {
+                continue;
+            }
+
+            let Some((expression, _end_pos)) = extract_parenthesized(definition, cursor) else {
+                continue;
+            };
+
+            checks.push(CheckConstraintInfo {
+                name: sqlite_constraint_name_for_check(
+                    definition,
+                    check_pos,
+                    &constraint_positions,
+                ),
+                expression,
+            });
+        }
+    }
+
+    checks
+}
+
+fn sqlite_table_definitions(create_table_sql: &str) -> Option<&str> {
+    let mut start = None;
+    let mut depth = 0usize;
+
+    for (idx, byte) in create_table_sql.as_bytes().iter().copied().enumerate() {
+        match byte {
+            b'(' => {
+                if start.is_none() {
+                    start = Some(idx + 1);
+                }
+                depth += 1;
+            }
+            b')' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    return start.map(|s| &create_table_sql[s..idx]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn split_sqlite_definitions(definitions: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let bytes = definitions.as_bytes();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    let mut i = 0usize;
+    let mut single_quote = false;
+    let mut double_quote = false;
+    let mut backtick_quote = false;
+    let mut bracket_quote = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if single_quote {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if double_quote {
+            if b == b'"' {
+                double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if backtick_quote {
+            if b == b'`' {
+                backtick_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if bracket_quote {
+            if b == b']' {
+                bracket_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => single_quote = true,
+            b'"' => double_quote = true,
+            b'`' => backtick_quote = true,
+            b'[' => bracket_quote = true,
+            b'(' => depth += 1,
+            b')' if depth > 0 => depth -= 1,
+            b',' if depth == 0 => {
+                let part = definitions[start..i].trim();
+                if !part.is_empty() {
+                    parts.push(part);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+
+        i += 1;
+    }
+
+    let tail = definitions[start..].trim();
+    if !tail.is_empty() {
+        parts.push(tail);
+    }
+
+    parts
+}
+
+fn keyword_positions_outside_quotes(input: &str, keyword: &str) -> Vec<usize> {
+    if keyword.is_empty() || input.len() < keyword.len() {
+        return Vec::new();
+    }
+
+    let bytes = input.as_bytes();
+    let keyword_bytes = keyword.as_bytes();
+    let mut positions = Vec::new();
+    let mut i = 0usize;
+    let mut single_quote = false;
+    let mut double_quote = false;
+    let mut backtick_quote = false;
+    let mut bracket_quote = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if single_quote {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if double_quote {
+            if b == b'"' {
+                double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if backtick_quote {
+            if b == b'`' {
+                backtick_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if bracket_quote {
+            if b == b']' {
+                bracket_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => {
+                single_quote = true;
+                i += 1;
+                continue;
+            }
+            b'"' => {
+                double_quote = true;
+                i += 1;
+                continue;
+            }
+            b'`' => {
+                backtick_quote = true;
+                i += 1;
+                continue;
+            }
+            b'[' => {
+                bracket_quote = true;
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if i + keyword_bytes.len() <= bytes.len()
+            && bytes[i..i + keyword_bytes.len()].eq_ignore_ascii_case(keyword_bytes)
+            && (i == 0 || !is_identifier_byte(bytes[i - 1]))
+            && (i + keyword_bytes.len() == bytes.len()
+                || !is_identifier_byte(bytes[i + keyword_bytes.len()]))
+        {
+            positions.push(i);
+            i += keyword_bytes.len();
+            continue;
+        }
+
+        i += 1;
+    }
+
+    positions
+}
+
+fn sqlite_constraint_name_for_check(
+    definition: &str,
+    check_pos: usize,
+    constraint_positions: &[usize],
+) -> Option<String> {
+    let constraint_pos = constraint_positions
+        .iter()
+        .copied()
+        .rfind(|pos| *pos < check_pos)?;
+
+    let mut cursor = constraint_pos + "CONSTRAINT".len();
+    while cursor < definition.len() && definition.as_bytes()[cursor].is_ascii_whitespace() {
+        cursor += 1;
+    }
+    if cursor >= definition.len() {
+        return None;
+    }
+
+    let (name, _next) = parse_sqlite_identifier_token(definition, cursor)?;
+    Some(name)
+}
+
+fn parse_sqlite_identifier_token(input: &str, start: usize) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    let first = *bytes.get(start)?;
+    match first {
+        b'"' => {
+            let mut i = start + 1;
+            while i < bytes.len() {
+                if bytes[i] == b'"' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'"' {
+                        i += 2;
+                        continue;
+                    }
+                    let name = input[start + 1..i].replace("\"\"", "\"");
+                    return Some((name, i + 1));
+                }
+                i += 1;
+            }
+            None
+        }
+        b'`' => {
+            let mut i = start + 1;
+            while i < bytes.len() {
+                if bytes[i] == b'`' {
+                    if i + 1 < bytes.len() && bytes[i + 1] == b'`' {
+                        i += 2;
+                        continue;
+                    }
+                    let name = input[start + 1..i].replace("``", "`");
+                    return Some((name, i + 1));
+                }
+                i += 1;
+            }
+            None
+        }
+        b'[' => {
+            let mut i = start + 1;
+            while i < bytes.len() {
+                if bytes[i] == b']' {
+                    let name = input[start + 1..i].to_string();
+                    return Some((name, i + 1));
+                }
+                i += 1;
+            }
+            None
+        }
+        _ => {
+            let mut i = start;
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i == start {
+                None
+            } else {
+                Some((input[start..i].to_string(), i))
+            }
+        }
+    }
+}
+
+fn extract_parenthesized(input: &str, open_paren_pos: usize) -> Option<(String, usize)> {
+    let bytes = input.as_bytes();
+    if bytes.get(open_paren_pos).copied() != Some(b'(') {
+        return None;
+    }
+
+    let mut depth = 0usize;
+    let mut i = open_paren_pos;
+    let mut single_quote = false;
+    let mut double_quote = false;
+    let mut backtick_quote = false;
+    let mut bracket_quote = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if single_quote {
+            if b == b'\'' {
+                if i + 1 < bytes.len() && bytes[i + 1] == b'\'' {
+                    i += 2;
+                    continue;
+                }
+                single_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if double_quote {
+            if b == b'"' {
+                double_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if backtick_quote {
+            if b == b'`' {
+                backtick_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if bracket_quote {
+            if b == b']' {
+                bracket_quote = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' => single_quote = true,
+            b'"' => double_quote = true,
+            b'`' => backtick_quote = true,
+            b'[' => bracket_quote = true,
+            b'(' => depth += 1,
+            b')' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    let expression = input[open_paren_pos + 1..i].trim().to_string();
+                    return Some((expression, i));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    None
+}
+
+fn is_identifier_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
 // ============================================================================
 // Unit Tests
 // ============================================================================
@@ -1224,5 +1658,58 @@ mod tests {
         assert_eq!(sanitize_identifier("table.name"), "tablename");
         assert_eq!(sanitize_identifier("table name"), "tablename");
         assert_eq!(sanitize_identifier("table\nname"), "tablename");
+    }
+
+    #[test]
+    fn test_extract_sqlite_check_constraints_named_and_unnamed() {
+        let sql = r"
+            CREATE TABLE heroes (
+                id INTEGER PRIMARY KEY,
+                age INTEGER,
+                CONSTRAINT age_non_negative CHECK (age >= 0),
+                CHECK (age <= 150)
+            )
+        ";
+
+        let checks = extract_sqlite_check_constraints(sql);
+        assert_eq!(checks.len(), 2);
+        assert_eq!(checks[0].name.as_deref(), Some("age_non_negative"));
+        assert_eq!(checks[0].expression, "age >= 0");
+        assert_eq!(checks[1].name, None);
+        assert_eq!(checks[1].expression, "age <= 150");
+    }
+
+    #[test]
+    fn test_extract_sqlite_check_constraints_column_level_and_nested() {
+        let sql = r"
+            CREATE TABLE heroes (
+                age INTEGER CONSTRAINT age_positive CHECK (age > 0),
+                score INTEGER CHECK ((score >= 0) AND (score <= 100)),
+                level INTEGER CHECK (level > 0) CHECK (level < 10)
+            )
+        ";
+
+        let checks = extract_sqlite_check_constraints(sql);
+        assert_eq!(checks.len(), 4);
+        assert_eq!(checks[0].name.as_deref(), Some("age_positive"));
+        assert_eq!(checks[0].expression, "age > 0");
+        assert_eq!(checks[1].name, None);
+        assert_eq!(checks[1].expression, "(score >= 0) AND (score <= 100)");
+        assert_eq!(checks[2].expression, "level > 0");
+        assert_eq!(checks[3].expression, "level < 10");
+    }
+
+    #[test]
+    fn test_extract_sqlite_check_constraints_handles_quoted_commas() {
+        let sql = r"
+            CREATE TABLE heroes (
+                kind TEXT CHECK (kind IN ('A,B', 'C')),
+                note TEXT
+            )
+        ";
+
+        let checks = extract_sqlite_check_constraints(sql);
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].expression, "kind IN ('A,B', 'C')");
     }
 }
