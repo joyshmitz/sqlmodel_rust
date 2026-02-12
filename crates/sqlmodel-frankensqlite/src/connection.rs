@@ -12,8 +12,7 @@
 use crate::value::{sqlite_to_value, value_to_sqlite};
 use fsqlite_types::value::SqliteValue;
 use sqlmodel_core::{
-    Connection, Cx, IsolationLevel, Outcome, PreparedStatement,
-    Row, TransactionOps, Value,
+    Connection, Cx, IsolationLevel, Outcome, PreparedStatement, Row, TransactionOps, Value,
     error::{ConnectionError, ConnectionErrorKind, Error, QueryError, QueryErrorKind},
     row::ColumnInfo,
 };
@@ -106,19 +105,34 @@ impl FrankenConnection {
 
         // Log query SQL and params
         let param_strs: Vec<_> = params.iter().map(|p| format!("{:?}", p)).collect();
-        eprintln!("[DEBUG] query_sync: sql={} params={:?}", &sql[..sql.len().min(80)], param_strs);
+        eprintln!(
+            "[DEBUG] query_sync: sql={} params={:?}",
+            &sql[..sql.len().min(80)],
+            param_strs
+        );
 
         eprintln!("[DEBUG] Query returned {} rows", franken_rows.len());
         if !franken_rows.is_empty() {
-            eprintln!("[DEBUG] First row has {} values", franken_rows[0].values().len());
+            eprintln!(
+                "[DEBUG] First row has {} values",
+                franken_rows[0].values().len()
+            );
             // Show the values for debugging
-            let vals: Vec<_> = franken_rows[0].values().iter().map(|v| format!("{:?}", v)).collect();
+            let vals: Vec<_> = franken_rows[0]
+                .values()
+                .iter()
+                .map(|v| format!("{:?}", v))
+                .collect();
             eprintln!("[DEBUG] Row values: {:?}", vals);
         }
 
         // For RETURNING *, get column names from table schema
         let schema_columns = self.get_returning_star_columns(sql, &inner.conn);
-        Ok(convert_rows_with_schema(&franken_rows, sql, schema_columns.as_deref()))
+        Ok(convert_rows_with_schema(
+            &franken_rows,
+            sql,
+            schema_columns.as_deref(),
+        ))
     }
 
     /// Get column names for RETURNING * from the table schema.
@@ -131,7 +145,10 @@ impl FrankenConnection {
 
         // Check if this is a RETURNING * query
         if !upper.contains(" RETURNING *") && !upper.ends_with("RETURNING *") {
-            eprintln!("[DEBUG] Not a RETURNING * query: {}", &sql[..sql.len().min(100)]);
+            eprintln!(
+                "[DEBUG] Not a RETURNING * query: {}",
+                &sql[..sql.len().min(100)]
+            );
             return None;
         }
         eprintln!("[DEBUG] Detected RETURNING * query");
@@ -180,7 +197,11 @@ impl FrankenConnection {
         let sqlite_params: Vec<SqliteValue> = params.iter().map(value_to_sqlite).collect();
 
         let param_strs: Vec<_> = params.iter().map(|p| format!("{:?}", p)).collect();
-        eprintln!("[DEBUG] execute_sync: {} params={:?}", &sql[..sql.len().min(80)], param_strs);
+        eprintln!(
+            "[DEBUG] execute_sync: {} params={:?}",
+            &sql[..sql.len().min(80)],
+            param_strs
+        );
 
         let count = if sqlite_params.is_empty() {
             inner.conn.execute(sql)
@@ -519,11 +540,7 @@ impl TransactionOps for FrankenTransaction<'_> {
         async move { result.map_or_else(Outcome::Err, Outcome::Ok) }
     }
 
-    fn rollback_to(
-        &self,
-        _cx: &Cx,
-        name: &str,
-    ) -> impl Future<Output = Outcome<(), Error>> + Send {
+    fn rollback_to(&self, _cx: &Cx, name: &str) -> impl Future<Output = Outcome<(), Error>> + Send {
         let quoted = format!("\"{}\"", name.replace('"', "\"\""));
         let sql = format!("ROLLBACK TO {quoted}");
         let result = self.conn.execute_raw(&sql);
@@ -586,7 +603,10 @@ fn convert_rows_with_schema(
         infer_column_names(sql)
     };
 
-    eprintln!("[DEBUG] Inferred col_names (before padding): {:?}", col_names);
+    eprintln!(
+        "[DEBUG] Inferred col_names (before padding): {:?}",
+        col_names
+    );
 
     // Pad or trim to match actual column count
     while col_names.len() < col_count {
@@ -776,7 +796,10 @@ fn infer_returning_columns(sql: &str) -> Vec<String> {
     let after_returning = &sql[returning_pos + 9..].trim_start();
 
     // Handle "RETURNING *"
-    if after_returning.trim() == "*" || after_returning.starts_with("* ") || after_returning.starts_with("*;") {
+    if after_returning.trim() == "*"
+        || after_returning.starts_with("* ")
+        || after_returning.starts_with("*;")
+    {
         // For RETURNING *, we need to get column names from the table.
         // Extract table name from INSERT INTO or UPDATE or DELETE FROM.
         if let Some(table_name) = extract_table_name_for_returning(sql) {
@@ -935,8 +958,8 @@ fn find_keyword_at_depth_zero(s: &str, keyword: &str) -> Option<usize> {
         if depth == 0 && upper[i..].starts_with(&kw_upper) {
             // Ensure it's a word boundary
             let before_ok = i == 0 || !upper.as_bytes()[i - 1].is_ascii_alphanumeric();
-            let after_ok = i + kw_len >= upper.len()
-                || !upper.as_bytes()[i + kw_len].is_ascii_alphanumeric();
+            let after_ok =
+                i + kw_len >= upper.len() || !upper.as_bytes()[i + kw_len].is_ascii_alphanumeric();
             if before_ok && after_ok {
                 return Some(i);
             }
@@ -1022,11 +1045,7 @@ fn count_params(sql: &str) -> usize {
         }
     }
 
-    if max_param > 0 {
-        max_param
-    } else {
-        bare_count
-    }
+    if max_param > 0 { max_param } else { bare_count }
 }
 
 // ── Error conversion ──────────────────────────────────────────────────────
@@ -1126,8 +1145,11 @@ mod tests {
             .unwrap();
 
         conn.begin_sync(IsolationLevel::ReadCommitted).unwrap();
-        conn.execute_sync("INSERT INTO t (val) VALUES (?1)", &[Value::Text("a".into())])
-            .unwrap();
+        conn.execute_sync(
+            "INSERT INTO t (val) VALUES (?1)",
+            &[Value::Text("a".into())],
+        )
+        .unwrap();
         conn.commit_sync().unwrap();
 
         let rows = conn.query_sync("SELECT val FROM t", &[]).unwrap();
@@ -1141,8 +1163,11 @@ mod tests {
             .unwrap();
 
         conn.begin_sync(IsolationLevel::ReadCommitted).unwrap();
-        conn.execute_sync("INSERT INTO t (val) VALUES (?1)", &[Value::Text("a".into())])
-            .unwrap();
+        conn.execute_sync(
+            "INSERT INTO t (val) VALUES (?1)",
+            &[Value::Text("a".into())],
+        )
+        .unwrap();
         conn.rollback_sync().unwrap();
 
         let rows = conn.query_sync("SELECT val FROM t", &[]).unwrap();
@@ -1237,10 +1262,13 @@ mod tests {
         conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
             .unwrap();
         conn.execute_raw("BEGIN CONCURRENT").unwrap();
-        conn.execute_raw("INSERT INTO t VALUES (1, 'hello')").unwrap();
+        conn.execute_raw("INSERT INTO t VALUES (1, 'hello')")
+            .unwrap();
         conn.execute_raw("COMMIT").unwrap();
 
-        let rows = conn.query_sync("SELECT val FROM t WHERE id = 1", &[]).unwrap();
+        let rows = conn
+            .query_sync("SELECT val FROM t WHERE id = 1", &[])
+            .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get(0), Some(&Value::Text("hello".into())));
     }
@@ -1251,7 +1279,8 @@ mod tests {
         conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
             .unwrap();
         conn.execute_raw("BEGIN CONCURRENT").unwrap();
-        conn.execute_raw("INSERT INTO t VALUES (1, 'gone')").unwrap();
+        conn.execute_raw("INSERT INTO t VALUES (1, 'gone')")
+            .unwrap();
         conn.execute_raw("ROLLBACK").unwrap();
 
         let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
@@ -1302,7 +1331,8 @@ mod tests {
     #[test]
     fn begin_serializable_uses_exclusive() {
         let conn = FrankenConnection::open_memory().unwrap();
-        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
         conn.begin_sync(IsolationLevel::Serializable).unwrap();
         conn.execute_sync("INSERT INTO t VALUES (1)", &[]).unwrap();
         conn.commit_sync().unwrap();
@@ -1313,7 +1343,8 @@ mod tests {
     #[test]
     fn begin_read_uncommitted_uses_deferred() {
         let conn = FrankenConnection::open_memory().unwrap();
-        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
         conn.begin_sync(IsolationLevel::ReadUncommitted).unwrap();
         conn.execute_sync("INSERT INTO t VALUES (1)", &[]).unwrap();
         conn.commit_sync().unwrap();
@@ -1367,15 +1398,19 @@ mod tests {
         conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
             .unwrap();
         conn.execute_raw("BEGIN CONCURRENT").unwrap();
-        conn.execute_raw("INSERT INTO t VALUES (1, 'keep')").unwrap();
+        conn.execute_raw("INSERT INTO t VALUES (1, 'keep')")
+            .unwrap();
         conn.execute_raw("SAVEPOINT sp1").unwrap();
-        conn.execute_raw("INSERT INTO t VALUES (2, 'discard')").unwrap();
+        conn.execute_raw("INSERT INTO t VALUES (2, 'discard')")
+            .unwrap();
         conn.execute_raw("ROLLBACK TO sp1").unwrap();
         conn.execute_raw("COMMIT").unwrap();
 
         let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
         assert_eq!(rows[0].get(0), Some(&Value::BigInt(1)));
-        let rows = conn.query_sync("SELECT val FROM t WHERE id = 1", &[]).unwrap();
+        let rows = conn
+            .query_sync("SELECT val FROM t WHERE id = 1", &[])
+            .unwrap();
         assert_eq!(rows[0].get(0), Some(&Value::Text("keep".into())));
     }
 
@@ -1396,18 +1431,17 @@ mod tests {
             conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
                 .unwrap();
             conn.execute_raw("BEGIN CONCURRENT").unwrap();
-            conn.execute_sync(
-                "INSERT INTO t VALUES (1, 'persistent')",
-                &[],
-            )
-            .unwrap();
+            conn.execute_sync("INSERT INTO t VALUES (1, 'persistent')", &[])
+                .unwrap();
             conn.execute_raw("COMMIT").unwrap();
         }
 
         // Reopen and verify data persisted
         {
             let conn = FrankenConnection::open_file(&path_str).unwrap();
-            let rows = conn.query_sync("SELECT val FROM t WHERE id = 1", &[]).unwrap();
+            let rows = conn
+                .query_sync("SELECT val FROM t WHERE id = 1", &[])
+                .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].get(0), Some(&Value::Text("persistent".into())));
         }
@@ -1452,9 +1486,7 @@ mod tests {
     #[test]
     fn error_type_mapping_serialization_failure() {
         use fsqlite_error::FrankenError;
-        let err = FrankenError::SerializationFailure {
-            page: 7,
-        };
+        let err = FrankenError::SerializationFailure { page: 7 };
         let mapped = franken_to_query_error(&err, "COMMIT");
         match mapped {
             Error::Query(qe) => assert_eq!(qe.kind, QueryErrorKind::Deadlock),
@@ -1478,9 +1510,7 @@ mod tests {
 
     #[test]
     fn infer_columns_with_cte() {
-        let names = infer_column_names(
-            "WITH cte AS (SELECT 1 AS x) SELECT x, x + 1 AS y FROM cte",
-        );
+        let names = infer_column_names("WITH cte AS (SELECT 1 AS x) SELECT x, x + 1 AS y FROM cte");
         assert_eq!(names, vec!["x", "y"]);
     }
 
@@ -1523,7 +1553,8 @@ mod tests {
         let conn = FrankenConnection::open_memory().unwrap();
         conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
             .unwrap();
-        conn.execute_sync("INSERT INTO t VALUES (1, 'a')", &[]).unwrap();
+        conn.execute_sync("INSERT INTO t VALUES (1, 'a')", &[])
+            .unwrap();
         let c = conn.changes();
         assert!(c >= 0, "changes() should be non-negative, got {c}");
     }
@@ -1537,7 +1568,8 @@ mod tests {
         let conn = FrankenConnection::open_memory().unwrap();
         conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
             .unwrap();
-        conn.execute_sync("INSERT INTO t (val) VALUES ('a')", &[]).unwrap();
+        conn.execute_sync("INSERT INTO t (val) VALUES ('a')", &[])
+            .unwrap();
         let rowid = conn.last_insert_rowid();
         // At minimum, should not panic; value may be 0 if frankensqlite
         // doesn't support last_insert_rowid() via SELECT
@@ -1552,16 +1584,15 @@ mod tests {
         let conn = FrankenConnection::open_memory().unwrap();
         conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
             .unwrap();
-        conn.execute_sync("INSERT INTO t VALUES (1, 'async')", &[]).unwrap();
+        conn.execute_sync("INSERT INTO t VALUES (1, 'async')", &[])
+            .unwrap();
 
         let cx = Cx::for_testing();
         // Test that the async Connection::query method works correctly
         let result = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
             .unwrap()
-            .block_on(async {
-                Connection::query(&conn, &cx, "SELECT val FROM t", &[]).await
-            });
+            .block_on(async { Connection::query(&conn, &cx, "SELECT val FROM t", &[]).await });
         match result {
             Outcome::Ok(rows) => {
                 assert_eq!(rows.len(), 1);
@@ -1575,7 +1606,8 @@ mod tests {
     fn connection_trait_begin_and_commit() {
         use sqlmodel_core::Cx;
         let conn = FrankenConnection::open_memory().unwrap();
-        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
 
         let rt = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
@@ -1598,7 +1630,8 @@ mod tests {
     #[test]
     fn transaction_drop_auto_rollback() {
         let conn = FrankenConnection::open_memory().unwrap();
-        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .unwrap();
 
         let rt = asupersync::runtime::RuntimeBuilder::current_thread()
             .build()
@@ -1664,7 +1697,9 @@ mod tests {
             &[Value::BigInt(1), Value::Null],
         )
         .unwrap();
-        let rows = conn.query_sync("SELECT val FROM t WHERE id = 1", &[]).unwrap();
+        let rows = conn
+            .query_sync("SELECT val FROM t WHERE id = 1", &[])
+            .unwrap();
         assert_eq!(rows[0].get(0), Some(&Value::Null));
     }
 
@@ -1681,7 +1716,9 @@ mod tests {
             &[Value::Bytes(blob.clone())],
         )
         .unwrap();
-        let rows = conn.query_sync("SELECT data FROM t WHERE id = 1", &[]).unwrap();
+        let rows = conn
+            .query_sync("SELECT data FROM t WHERE id = 1", &[])
+            .unwrap();
         assert_eq!(rows[0].get(0), Some(&Value::Bytes(blob)));
     }
 }

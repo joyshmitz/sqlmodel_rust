@@ -61,14 +61,26 @@ mod tests {
     #[test]
     fn bool_to_integer() {
         assert_eq!(value_to_sqlite(&Value::Bool(true)), SqliteValue::Integer(1));
-        assert_eq!(value_to_sqlite(&Value::Bool(false)), SqliteValue::Integer(0));
+        assert_eq!(
+            value_to_sqlite(&Value::Bool(false)),
+            SqliteValue::Integer(0)
+        );
     }
 
     #[test]
     fn integer_variants() {
-        assert_eq!(value_to_sqlite(&Value::TinyInt(42)), SqliteValue::Integer(42));
-        assert_eq!(value_to_sqlite(&Value::SmallInt(1000)), SqliteValue::Integer(1000));
-        assert_eq!(value_to_sqlite(&Value::Int(100_000)), SqliteValue::Integer(100_000));
+        assert_eq!(
+            value_to_sqlite(&Value::TinyInt(42)),
+            SqliteValue::Integer(42)
+        );
+        assert_eq!(
+            value_to_sqlite(&Value::SmallInt(1000)),
+            SqliteValue::Integer(1000)
+        );
+        assert_eq!(
+            value_to_sqlite(&Value::Int(100_000)),
+            SqliteValue::Integer(100_000)
+        );
         assert_eq!(
             value_to_sqlite(&Value::BigInt(i64::MAX)),
             SqliteValue::Integer(i64::MAX)
@@ -137,7 +149,10 @@ mod tests {
 
     #[test]
     fn default_to_null() {
-        assert!(matches!(value_to_sqlite(&Value::Default), SqliteValue::Null));
+        assert!(matches!(
+            value_to_sqlite(&Value::Default),
+            SqliteValue::Null
+        ));
     }
 
     #[test]
