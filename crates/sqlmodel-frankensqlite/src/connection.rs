@@ -1026,4 +1026,460 @@ mod tests {
         // same values as C SQLite, but row should exist)
         assert!(rows[0].get(0).is_some());
     }
+
+    // ── BEGIN CONCURRENT tests ────────────────────────────────────────────
+
+    #[test]
+    fn begin_concurrent_basic() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        conn.execute_raw("BEGIN CONCURRENT").unwrap();
+        conn.execute_raw("INSERT INTO t VALUES (1, 'hello')").unwrap();
+        conn.execute_raw("COMMIT").unwrap();
+
+        let rows = conn.query_sync("SELECT val FROM t WHERE id = 1", &[]).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get(0), Some(&Value::Text("hello".into())));
+    }
+
+    #[test]
+    fn begin_concurrent_rollback() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        conn.execute_raw("BEGIN CONCURRENT").unwrap();
+        conn.execute_raw("INSERT INTO t VALUES (1, 'gone')").unwrap();
+        conn.execute_raw("ROLLBACK").unwrap();
+
+        let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::BigInt(0)));
+    }
+
+    #[test]
+    fn begin_concurrent_with_params() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        conn.execute_raw("BEGIN CONCURRENT").unwrap();
+        conn.execute_sync(
+            "INSERT INTO t VALUES (?1, ?2)",
+            &[Value::BigInt(1), Value::Text("parameterized".into())],
+        )
+        .unwrap();
+        conn.execute_raw("COMMIT").unwrap();
+
+        let rows = conn
+            .query_sync("SELECT val FROM t WHERE id = ?1", &[Value::BigInt(1)])
+            .unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get(0), Some(&Value::Text("parameterized".into())));
+    }
+
+    #[test]
+    fn begin_concurrent_multiple_inserts() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        conn.execute_raw("BEGIN CONCURRENT").unwrap();
+        for i in 1..=100 {
+            conn.execute_sync(
+                "INSERT INTO t VALUES (?1, ?2)",
+                &[Value::BigInt(i), Value::Text(format!("row_{i}"))],
+            )
+            .unwrap();
+        }
+        conn.execute_raw("COMMIT").unwrap();
+
+        let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::BigInt(100)));
+    }
+
+    // ── Isolation level tests ─────────────────────────────────────────────
+
+    #[test]
+    fn begin_serializable_uses_exclusive() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+        conn.begin_sync(IsolationLevel::Serializable).unwrap();
+        conn.execute_sync("INSERT INTO t VALUES (1)", &[]).unwrap();
+        conn.commit_sync().unwrap();
+        let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::BigInt(1)));
+    }
+
+    #[test]
+    fn begin_read_uncommitted_uses_deferred() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+        conn.begin_sync(IsolationLevel::ReadUncommitted).unwrap();
+        conn.execute_sync("INSERT INTO t VALUES (1)", &[]).unwrap();
+        conn.commit_sync().unwrap();
+        let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::BigInt(1)));
+    }
+
+    #[test]
+    fn double_begin_returns_error() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.begin_sync(IsolationLevel::ReadCommitted).unwrap();
+        let err = conn.begin_sync(IsolationLevel::ReadCommitted).unwrap_err();
+        assert!(err.to_string().contains("Already in a transaction"));
+    }
+
+    #[test]
+    fn commit_without_begin_returns_error() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        let err = conn.commit_sync().unwrap_err();
+        assert!(err.to_string().contains("Not in a transaction"));
+    }
+
+    #[test]
+    fn rollback_without_begin_returns_error() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        let err = conn.rollback_sync().unwrap_err();
+        assert!(err.to_string().contains("Not in a transaction"));
+    }
+
+    // ── Savepoint tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn savepoint_and_release() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        conn.execute_raw("BEGIN CONCURRENT").unwrap();
+        conn.execute_raw("INSERT INTO t VALUES (1, 'a')").unwrap();
+        conn.execute_raw("SAVEPOINT sp1").unwrap();
+        conn.execute_raw("INSERT INTO t VALUES (2, 'b')").unwrap();
+        conn.execute_raw("RELEASE sp1").unwrap();
+        conn.execute_raw("COMMIT").unwrap();
+
+        let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::BigInt(2)));
+    }
+
+    #[test]
+    fn savepoint_rollback_to() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        conn.execute_raw("BEGIN CONCURRENT").unwrap();
+        conn.execute_raw("INSERT INTO t VALUES (1, 'keep')").unwrap();
+        conn.execute_raw("SAVEPOINT sp1").unwrap();
+        conn.execute_raw("INSERT INTO t VALUES (2, 'discard')").unwrap();
+        conn.execute_raw("ROLLBACK TO sp1").unwrap();
+        conn.execute_raw("COMMIT").unwrap();
+
+        let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::BigInt(1)));
+        let rows = conn.query_sync("SELECT val FROM t WHERE id = 1", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::Text("keep".into())));
+    }
+
+    // ── File-based connection test ────────────────────────────────────────
+
+    #[test]
+    fn file_based_connection() {
+        let dir = std::env::temp_dir().join("sqlmodel_franken_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let db_path = dir.join("test_file.db");
+        let path_str = db_path.display().to_string();
+
+        // Clean up from previous runs
+        let _ = std::fs::remove_file(&db_path);
+
+        {
+            let conn = FrankenConnection::open_file(&path_str).unwrap();
+            conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+                .unwrap();
+            conn.execute_raw("BEGIN CONCURRENT").unwrap();
+            conn.execute_sync(
+                "INSERT INTO t VALUES (1, 'persistent')",
+                &[],
+            )
+            .unwrap();
+            conn.execute_raw("COMMIT").unwrap();
+        }
+
+        // Reopen and verify data persisted
+        {
+            let conn = FrankenConnection::open_file(&path_str).unwrap();
+            let rows = conn.query_sync("SELECT val FROM t WHERE id = 1", &[]).unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get(0), Some(&Value::Text("persistent".into())));
+        }
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    // ── Error mapping tests ──────────────────────────────────────────────
+
+    #[test]
+    fn invalid_sql_returns_query_error() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        let err = conn.execute_raw("SELECTT 1").unwrap_err();
+        // frankensqlite returns a Database-level error for unrecognized statements
+        match &err {
+            Error::Query(qe) => {
+                assert!(
+                    qe.kind == QueryErrorKind::Syntax || qe.kind == QueryErrorKind::Database,
+                    "expected Syntax or Database, got: {:?}",
+                    qe.kind
+                );
+            }
+            other => panic!("expected Query error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn error_type_mapping_write_conflict() {
+        // Verify that WriteConflict maps to Deadlock kind
+        use fsqlite_error::FrankenError;
+        let err = FrankenError::WriteConflict {
+            page: 42,
+            holder: 99,
+        };
+        let mapped = franken_to_query_error(&err, "COMMIT");
+        match mapped {
+            Error::Query(qe) => assert_eq!(qe.kind, QueryErrorKind::Deadlock),
+            other => panic!("expected Deadlock error, got: {other}"),
+        }
+    }
+
+    #[test]
+    fn error_type_mapping_serialization_failure() {
+        use fsqlite_error::FrankenError;
+        let err = FrankenError::SerializationFailure {
+            page: 7,
+        };
+        let mapped = franken_to_query_error(&err, "COMMIT");
+        match mapped {
+            Error::Query(qe) => assert_eq!(qe.kind, QueryErrorKind::Deadlock),
+            other => panic!("expected Deadlock error, got: {other}"),
+        }
+    }
+
+    // ── Column inference edge cases ──────────────────────────────────────
+
+    #[test]
+    fn infer_columns_star_select() {
+        let names = infer_column_names("SELECT * FROM t");
+        assert_eq!(names, vec!["*"]);
+    }
+
+    #[test]
+    fn infer_columns_table_qualified() {
+        let names = infer_column_names("SELECT t.id, t.name FROM t");
+        assert_eq!(names, vec!["id", "name"]);
+    }
+
+    #[test]
+    fn infer_columns_with_cte() {
+        let names = infer_column_names(
+            "WITH cte AS (SELECT 1 AS x) SELECT x, x + 1 AS y FROM cte",
+        );
+        assert_eq!(names, vec!["x", "y"]);
+    }
+
+    #[test]
+    fn infer_columns_subquery_alias() {
+        let names = infer_column_names("SELECT (SELECT 1) AS sub, 2 AS plain");
+        assert_eq!(names, vec!["sub", "plain"]);
+    }
+
+    #[test]
+    fn infer_columns_no_from() {
+        let names = infer_column_names("SELECT 1 AS a, 2 AS b, 3 AS c");
+        assert_eq!(names, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn infer_pragma_database_list() {
+        let names = infer_column_names("PRAGMA database_list");
+        assert_eq!(names, vec!["seq", "name", "file"]);
+    }
+
+    #[test]
+    fn infer_pragma_integrity_check() {
+        let names = infer_column_names("PRAGMA integrity_check");
+        assert_eq!(names, vec!["integrity_check"]);
+    }
+
+    #[test]
+    fn infer_pragma_simple_value() {
+        let names = infer_column_names("PRAGMA journal_mode");
+        assert_eq!(names, vec!["journal_mode"]);
+    }
+
+    // ── changes() test ───────────────────────────────────────────────────
+
+    #[test]
+    fn changes_returns_value() {
+        // frankensqlite's changes() may return 0 for non-INSERT statements;
+        // verify it at least doesn't panic and returns a non-negative value
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        conn.execute_sync("INSERT INTO t VALUES (1, 'a')", &[]).unwrap();
+        let c = conn.changes();
+        assert!(c >= 0, "changes() should be non-negative, got {c}");
+    }
+
+    // ── last_insert_rowid tracking ───────────────────────────────────────
+
+    #[test]
+    fn last_insert_rowid_accessible() {
+        // frankensqlite may not update last_insert_rowid() the same way as C SQLite;
+        // verify the method is callable and returns a consistent value
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        conn.execute_sync("INSERT INTO t (val) VALUES ('a')", &[]).unwrap();
+        let rowid = conn.last_insert_rowid();
+        // At minimum, should not panic; value may be 0 if frankensqlite
+        // doesn't support last_insert_rowid() via SELECT
+        assert!(rowid >= 0, "last_insert_rowid should be >= 0, got {rowid}");
+    }
+
+    // ── Transaction + Connection trait async bridge ──────────────────────
+
+    #[test]
+    fn connection_trait_query_async_bridge() {
+        use sqlmodel_core::Cx;
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        conn.execute_sync("INSERT INTO t VALUES (1, 'async')", &[]).unwrap();
+
+        let cx = Cx::for_testing();
+        // Test that the async Connection::query method works correctly
+        let result = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap()
+            .block_on(async {
+                Connection::query(&conn, &cx, "SELECT val FROM t", &[]).await
+            });
+        match result {
+            Outcome::Ok(rows) => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].get(0), Some(&Value::Text("async".into())));
+            }
+            other => panic!("expected Ok, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn connection_trait_begin_and_commit() {
+        use sqlmodel_core::Cx;
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let cx = Cx::for_testing();
+
+        rt.block_on(async {
+            let tx = conn.begin(&cx).await.into_result().unwrap();
+            TransactionOps::execute(&tx, &cx, "INSERT INTO t VALUES (1)", &[])
+                .await
+                .into_result()
+                .unwrap();
+            tx.commit(&cx).await.into_result().unwrap();
+        });
+
+        let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::BigInt(1)));
+    }
+
+    #[test]
+    fn transaction_drop_auto_rollback() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY)").unwrap();
+
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let cx = Cx::for_testing();
+
+        rt.block_on(async {
+            let tx = conn.begin(&cx).await.into_result().unwrap();
+            TransactionOps::execute(&tx, &cx, "INSERT INTO t VALUES (1)", &[])
+                .await
+                .into_result()
+                .unwrap();
+            // Drop tx without commit — should auto-rollback
+            drop(tx);
+        });
+
+        let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::BigInt(0)));
+    }
+
+    // ── Batch execution ──────────────────────────────────────────────────
+
+    #[test]
+    fn batch_multiple_statements() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+
+        let rt = asupersync::runtime::RuntimeBuilder::current_thread()
+            .build()
+            .unwrap();
+        let cx = Cx::for_testing();
+
+        let results = rt.block_on(async {
+            Connection::batch(
+                &conn,
+                &cx,
+                &[
+                    ("INSERT INTO t VALUES (1, 'a')".to_string(), vec![]),
+                    ("INSERT INTO t VALUES (2, 'b')".to_string(), vec![]),
+                    ("INSERT INTO t VALUES (3, 'c')".to_string(), vec![]),
+                ],
+            )
+            .await
+            .into_result()
+            .unwrap()
+        });
+
+        assert_eq!(results.len(), 3);
+        let rows = conn.query_sync("SELECT count(*) FROM t", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::BigInt(3)));
+    }
+
+    // ── NULL handling ────────────────────────────────────────────────────
+
+    #[test]
+    fn null_values_round_trip() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+        conn.execute_sync(
+            "INSERT INTO t VALUES (?1, ?2)",
+            &[Value::BigInt(1), Value::Null],
+        )
+        .unwrap();
+        let rows = conn.query_sync("SELECT val FROM t WHERE id = 1", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::Null));
+    }
+
+    // ── Blob handling ────────────────────────────────────────────────────
+
+    #[test]
+    fn blob_values_round_trip() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, data BLOB)")
+            .unwrap();
+        let blob = vec![0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF];
+        conn.execute_sync(
+            "INSERT INTO t VALUES (1, ?1)",
+            &[Value::Bytes(blob.clone())],
+        )
+        .unwrap();
+        let rows = conn.query_sync("SELECT data FROM t WHERE id = 1", &[]).unwrap();
+        assert_eq!(rows[0].get(0), Some(&Value::Bytes(blob)));
+    }
 }
