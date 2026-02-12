@@ -332,7 +332,7 @@ impl PoolStatusDisplay {
     pub fn render_styled(&self) -> String {
         let health = self.health();
         let utilization = self.utilization();
-        let width = self.width.unwrap_or(60);
+        let width = self.width.unwrap_or(60).max(24);
 
         let mut lines = Vec::new();
 
@@ -341,21 +341,27 @@ impl PoolStatusDisplay {
             || "Connection Pool Status".to_string(),
             |n| format!("Connection Pool: {}", n),
         );
+        let title_display = self.truncate_plain_to_width(&title, width.saturating_sub(3));
 
         // Box drawing
-        let top_border = format!("┌{}┐", "─".repeat(width - 2));
-        let bottom_border = format!("└{}┘", "─".repeat(width - 2));
+        let top_border = format!("┌{}┐", "─".repeat(width.saturating_sub(2)));
+        let bottom_border = format!("└{}┘", "─".repeat(width.saturating_sub(2)));
 
         lines.push(top_border);
-        lines.push(format!("│ {:<width$}│", title, width = width - 3));
-        lines.push(format!("├{}┤", "─".repeat(width - 2)));
+        lines.push(format!(
+            "│ {:<inner_width$}│",
+            title_display,
+            inner_width = width.saturating_sub(3)
+        ));
+        lines.push(format!("├{}┤", "─".repeat(width.saturating_sub(2))));
 
         // Utilization bar
-        let bar_width = width - 20;
+        let bar_width = width.saturating_sub(20);
         // Intentional truncation: utilization is 0-100%, bar_width is small
         let filled = ((utilization / 100.0) * bar_width as f64) as usize;
         let empty = bar_width.saturating_sub(filled);
         let bar = format!("{}{}", "█".repeat(filled), "░".repeat(empty));
+        let status_width = width.saturating_sub(bar_width + 12);
 
         // Progress bar with percentage and status
         lines.push(format!(
@@ -363,7 +369,7 @@ impl PoolStatusDisplay {
             bar,
             utilization,
             health.as_str(),
-            width = width - bar_width - 12
+            width = status_width
         ));
 
         // Connection counts
@@ -373,7 +379,7 @@ impl PoolStatusDisplay {
                 self.active, self.idle, self.max
             )
             .chars()
-            .take(width - 1)
+            .take(width.saturating_sub(1))
             .collect::<String>()
                 + "│",
         );
@@ -383,7 +389,7 @@ impl PoolStatusDisplay {
             lines.push(format!(
                 "│ ⚠ Waiting requests: {:<width$}│",
                 self.pending,
-                width = width - 24
+                width = width.saturating_sub(24)
             ));
         }
 
@@ -409,13 +415,31 @@ impl PoolStatusDisplay {
             lines.push(format!(
                 "│ Uptime: {:<width$}│",
                 Self::format_uptime(uptime),
-                width = width - 12
+                width = width.saturating_sub(12)
             ));
         }
 
         lines.push(bottom_border);
 
         lines.join("\n")
+    }
+
+    fn truncate_plain_to_width(&self, s: &str, max_visible: usize) -> String {
+        if max_visible == 0 {
+            return String::new();
+        }
+
+        let char_count = s.chars().count();
+        if char_count <= max_visible {
+            return s.to_string();
+        }
+
+        if max_visible <= 3 {
+            return ".".repeat(max_visible);
+        }
+
+        let truncated: String = s.chars().take(max_visible - 3).collect();
+        format!("{truncated}...")
     }
 }
 
@@ -725,6 +749,26 @@ mod tests {
         // Should contain bar characters
         assert!(output.contains("█") || output.contains("░"));
         assert!(output.contains("50%")); // 10/20 = 50%
+    }
+
+    #[test]
+    fn test_render_styled_tiny_width_does_not_panic() {
+        let display = PoolStatusDisplay::new(5, 3, 20, 2, 0).width(1);
+        let output = display.render_styled();
+
+        assert!(!output.is_empty());
+        assert!(output.contains("┌"));
+        assert!(output.contains("┘"));
+    }
+
+    #[test]
+    fn test_render_styled_narrow_width_name_is_truncated() {
+        let display = PoolStatusDisplay::new(5, 3, 20, 2, 0)
+            .name("ExtremelyLongPoolNameForNarrowLayout")
+            .width(24);
+        let output = display.render_styled();
+
+        assert!(output.contains("..."));
     }
 
     #[test]
