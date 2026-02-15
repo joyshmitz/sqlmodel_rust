@@ -9,3 +9,10 @@ screenshots_for_diagnostics/
 rustc-ice-*.txt
 reports/
 .agent-mail.yaml
+
+# Ephemeral files (agent-generated, build artifacts, test detritus)
+ci-artifacts/
+storage.sqlite3*
+proptest-regressions/
+test_meminfo
+perf.data
