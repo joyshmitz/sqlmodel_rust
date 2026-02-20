@@ -515,8 +515,8 @@ mod tests {
         // Override types should be used instead of base types
         assert!(sql.contains("\"price\" DECIMAL(10,2) NOT NULL"));
         assert!(sql.contains("\"sku\" VARCHAR(50) NOT NULL"));
-        // Non-overridden types use sql_type.sql_name()
-        assert!(sql.contains("\"id\" BIGINT"));
+        // Auto-increment single PK embeds as INTEGER PRIMARY KEY (SQLite compat)
+        assert!(sql.contains("\"id\" INTEGER PRIMARY KEY"));
     }
 
     #[test]

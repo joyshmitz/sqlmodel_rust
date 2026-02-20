@@ -87,16 +87,14 @@ checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
 
 [[package]]
 name = "asupersync"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9d95a917dcf2042c90a91c7f24a2053bf228759950c212ea1bc58427cacd6c3"
+version = "0.2.5"
 dependencies = [
  "base64",
- "bincode",
+ "bincode-next",
  "crossbeam-queue",
- "franken-decision 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "franken-evidence 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "franken-kernel 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "franken-decision 0.2.5",
+ "franken-evidence 0.2.5",
+ "franken-kernel 0.2.5",
  "getrandom 0.4.1",
  "hmac",
  "libc",
@@ -121,14 +119,16 @@ dependencies = [
 
 [[package]]
 name = "asupersync"
-version = "0.2.3"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c7d8c72c8d8a870a9e5a85a57b04d4e8d15d4be238a0a5818e8c87be2a89da"
 dependencies = [
  "base64",
- "bincode",
+ "bincode-next",
  "crossbeam-queue",
- "franken-decision 0.2.0",
- "franken-evidence 0.2.0",
- "franken-kernel 0.2.0",
+ "franken-decision 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "franken-evidence 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "franken-kernel 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "getrandom 0.4.1",
  "hmac",
  "libc",
@@ -176,6 +176,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "bincode-next"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dbe9e7e6d14aeb39557f226bff158a30e367fac279d0e69b8b42fb41999f9a86"
+dependencies = [
+ "bincode_derive-next",
+ "serde",
+ "unty-next",
+]
+
+[[package]]
+name = "bincode_derive-next"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2af389a025376dbbe728c43dfa5c08f866116c0b62627787c21ca1c69e2b8dec"
+dependencies = [
+ "virtue-next",
 ]
 
 [[package]]
@@ -496,7 +516,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -552,27 +572,27 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "franken-decision"
-version = "0.2.0"
+version = "0.2.5"
 dependencies = [
- "franken-evidence 0.2.0",
- "franken-kernel 0.2.0",
+ "franken-evidence 0.2.5",
+ "franken-kernel 0.2.5",
  "serde",
 ]
 
 [[package]]
 name = "franken-decision"
-version = "0.2.0"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e108d382a6dce0d26fbe0b745ca7b6f3138e3a18eb482faef75236a30b850d48"
+checksum = "aca82b4b7cfc99b74981d45a26975d9fe4ea7d7b3e3aaba8777178e3d8ea81b0"
 dependencies = [
- "franken-evidence 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "franken-kernel 0.2.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "franken-evidence 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "franken-kernel 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
 ]
 
 [[package]]
 name = "franken-evidence"
-version = "0.2.0"
+version = "0.2.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -580,9 +600,9 @@ dependencies = [
 
 [[package]]
 name = "franken-evidence"
-version = "0.2.0"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f488852cac41e26f1dc9e1c8c30e41d3f9411b8e01916588b0ddc07a517f0505"
+checksum = "1be55a45f3e094e73e50b34b9823bab5ee06090dfcf19e773504d6b52b4e3bb7"
 dependencies = [
  "serde",
  "serde_json",
@@ -590,16 +610,16 @@ dependencies = [
 
 [[package]]
 name = "franken-kernel"
-version = "0.2.0"
+version = "0.2.5"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "franken-kernel"
-version = "0.2.0"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cfd6548ab43330038a66f2ba2a8afd0ce715dcd7100d7e8f7e8ca8d4933f15b7"
+checksum = "b7f7c6164bd2a2499e1e2c50080f370af3529ca00f18e477a49e255e890bad6c"
 dependencies = [
  "serde",
 ]
@@ -639,7 +659,7 @@ dependencies = [
 name = "fsqlite-core"
 version = "0.1.0"
 dependencies = [
- "asupersync 0.2.3",
+ "asupersync 0.2.5",
  "blake3",
  "fsqlite-ast",
  "fsqlite-btree",
@@ -817,7 +837,7 @@ dependencies = [
 name = "fsqlite-wal"
 version = "0.1.0"
 dependencies = [
- "asupersync 0.2.3",
+ "asupersync 0.2.5",
  "blake3",
  "crc32c",
  "fsqlite-error",
@@ -1028,9 +1048,9 @@ dependencies = [
 
 [[package]]
 name = "md5"
-version = "0.7.0"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "490cc448043f947bae3cbee9c203358d62dbee0db12107a74be5c30ccfd09771"
+checksum = "ae960838283323069879657ca3de837e9f7bbb4c7bf6ea7f1b290d5e9476d2e0"
 
 [[package]]
 name = "memchr"
@@ -1226,7 +1246,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1636,7 +1656,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1873,7 +1893,7 @@ dependencies = [
 name = "sqlmodel"
 version = "0.2.0"
 dependencies = [
- "asupersync 0.2.0",
+ "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "sqlmodel-console",
@@ -1900,7 +1920,7 @@ dependencies = [
 name = "sqlmodel-core"
 version = "0.2.0"
 dependencies = [
- "asupersync 0.2.0",
+ "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "regex",
  "serde",
  "serde_json",
@@ -1911,7 +1931,7 @@ dependencies = [
 name = "sqlmodel-frankensqlite"
 version = "0.2.0"
 dependencies = [
- "asupersync 0.2.0",
+ "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "fsqlite",
  "fsqlite-core",
  "fsqlite-error",
@@ -1936,7 +1956,7 @@ dependencies = [
 name = "sqlmodel-mysql"
 version = "0.2.0"
 dependencies = [
- "asupersync 0.2.0",
+ "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand",
  "rsa",
  "rustls",
@@ -1948,14 +1968,14 @@ dependencies = [
  "sqlmodel-console",
  "sqlmodel-core",
  "sqlmodel-schema",
- "webpki-roots 0.26.11",
+ "webpki-roots",
 ]
 
 [[package]]
 name = "sqlmodel-pool"
 version = "0.2.0"
 dependencies = [
- "asupersync 0.2.0",
+ "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "sqlmodel-core",
  "tracing",
 ]
@@ -1964,7 +1984,7 @@ dependencies = [
 name = "sqlmodel-postgres"
 version = "0.2.0"
 dependencies = [
- "asupersync 0.2.0",
+ "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "base64",
  "hmac",
  "md5",
@@ -1978,14 +1998,14 @@ dependencies = [
  "sqlmodel-core",
  "sqlmodel-schema",
  "subtle",
- "webpki-roots 0.26.11",
+ "webpki-roots",
 ]
 
 [[package]]
 name = "sqlmodel-query"
 version = "0.2.0"
 dependencies = [
- "asupersync 0.2.0",
+ "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "sqlmodel-core",
  "tracing",
@@ -1995,7 +2015,7 @@ dependencies = [
 name = "sqlmodel-schema"
 version = "0.2.0"
 dependencies = [
- "asupersync 0.2.0",
+ "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "sqlmodel-core",
  "sqlmodel-macros",
@@ -2006,7 +2026,7 @@ dependencies = [
 name = "sqlmodel-session"
 version = "0.2.0"
 dependencies = [
- "asupersync 0.2.0",
+ "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "sqlmodel-core",
@@ -2018,7 +2038,7 @@ dependencies = [
 name = "sqlmodel-sqlite"
 version = "0.2.0"
 dependencies = [
- "asupersync 0.2.0",
+ "asupersync 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde",
  "serde_json",
  "sqlmodel-console",
@@ -2043,9 +2063,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "syn"
-version = "2.0.114"
+version = "2.0.116"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d4d107df263a3013ef9b1879b0df87d706ff80f65a86ea879bd9c31f9b307c2a"
+checksum = "3df424c70518695237746f84cede799c9c58fcb37450d7b23716568cc8bc69cb"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -2083,7 +2103,7 @@ dependencies = [
  "getrandom 0.4.1",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2258,6 +2278,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "unty-next"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6bce2adbe4c8e63c3e7f79e9249b5409fb3c9bce989dd44337493cf1c8d7dea0"
+
+[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2268,6 +2294,12 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
+
+[[package]]
+name = "virtue-next"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "507787017685ff1c8dadaab8ca717bc1145b99163bddc0cbbbd210c3d76cb8b0"
 
 [[package]]
 name = "visibility"
@@ -2350,15 +2382,6 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.6",
-]
-
-[[package]]
-name = "webpki-roots"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
@@ -2388,7 +2411,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
