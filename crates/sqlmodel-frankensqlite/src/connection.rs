@@ -166,7 +166,7 @@ impl FrankenConnection {
             .iter()
             .filter_map(|row| {
                 row.values().get(1).and_then(|v| match v {
-                    SqliteValue::Text(s) => Some(s.clone()),
+                    SqliteValue::Text(s) => Some(s.to_string()),
                     _ => None,
                 })
             })
