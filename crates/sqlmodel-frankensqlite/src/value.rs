@@ -22,17 +22,17 @@ pub fn value_to_sqlite(v: &Value) -> SqliteValue {
             } else if let Ok(f) = s.parse::<f64>() {
                 SqliteValue::Float(f)
             } else {
-                SqliteValue::Text(s.clone())
+                SqliteValue::Text(s.clone().into())
             }
         }
-        Value::Text(s) => SqliteValue::Text(s.clone()),
-        Value::Bytes(b) => SqliteValue::Blob(b.clone()),
+        Value::Text(s) => SqliteValue::Text(s.clone().into()),
+        Value::Bytes(b) => SqliteValue::Blob(b.clone().into()),
         Value::Date(d) => SqliteValue::Integer(i64::from(*d)),
         Value::Time(t) => SqliteValue::Integer(*t),
         Value::Timestamp(ts) => SqliteValue::Integer(*ts),
         Value::TimestampTz(ts) => SqliteValue::Integer(*ts),
-        Value::Uuid(bytes) => SqliteValue::Blob(bytes.to_vec()),
-        Value::Json(v) => SqliteValue::Text(serde_json::to_string(v).unwrap_or_default()),
+        Value::Uuid(bytes) => SqliteValue::Blob(bytes.to_vec().into()),
+        Value::Json(v) => SqliteValue::Text(serde_json::to_string(v).unwrap_or_default().into()),
         Value::Array(_) => SqliteValue::Null, // Arrays not supported in SQLite
     }
 }
@@ -43,8 +43,8 @@ pub fn sqlite_to_value(sv: &SqliteValue) -> Value {
         SqliteValue::Null => Value::Null,
         SqliteValue::Integer(i) => Value::BigInt(*i),
         SqliteValue::Float(f) => Value::Double(*f),
-        SqliteValue::Text(s) => Value::Text(s.clone()),
-        SqliteValue::Blob(b) => Value::Bytes(b.clone()),
+        SqliteValue::Text(s) => Value::Text(s.to_string()),
+        SqliteValue::Blob(b) => Value::Bytes(b.to_vec()),
     }
 }
 
@@ -110,7 +110,7 @@ mod tests {
     fn bytes_roundtrip() {
         let v = Value::Bytes(vec![0xDE, 0xAD]);
         let sv = value_to_sqlite(&v);
-        assert_eq!(sv, SqliteValue::Blob(vec![0xDE, 0xAD]));
+        assert_eq!(sv, SqliteValue::Blob(vec![0xDE, 0xAD].into()));
         assert_eq!(sqlite_to_value(&sv), v);
     }
 
@@ -125,7 +125,7 @@ mod tests {
     fn uuid_to_blob() {
         let uuid = [1u8; 16];
         let sv = value_to_sqlite(&Value::Uuid(uuid));
-        assert_eq!(sv, SqliteValue::Blob(uuid.to_vec()));
+        assert_eq!(sv, SqliteValue::Blob(uuid.to_vec().into()));
     }
 
     #[test]
