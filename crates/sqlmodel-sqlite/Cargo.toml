@@ -29,6 +29,9 @@ serde_json.workspace = true
 # Optional console support
 sqlmodel-console = { workspace = true, optional = true }
 
+[target.'cfg(windows)'.dependencies]
+libsqlite3-sys = { workspace = true, features = ["bundled-windows"] }
+
 [build-dependencies]
 
 [dev-dependencies]

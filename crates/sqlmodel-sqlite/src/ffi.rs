@@ -96,7 +96,8 @@ pub fn sqlite_transient() -> sqlite3_destructor_type {
     unsafe { std::mem::transmute::<isize, sqlite3_destructor_type>(SQLITE_TRANSIENT_SENTINEL) }
 }
 
-#[link(name = "sqlite3")]
+#[cfg_attr(windows, link(name = "sqlite3", kind = "static"))]
+#[cfg_attr(not(windows), link(name = "sqlite3"))]
 unsafe extern "C" {
     // Connection management
     pub fn sqlite3_open(filename: *const c_char, ppDb: *mut *mut sqlite3) -> c_int;
