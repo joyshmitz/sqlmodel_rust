@@ -20,3 +20,7 @@ perf.data
 # Alternative target directories
 target-local/
 target-*/
+
+# OS junk
+.DS_Store
+**/.DS_Store
