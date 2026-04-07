@@ -49,6 +49,17 @@ unsafe impl Send for FrankenConnection {}
 unsafe impl Sync for FrankenConnection {}
 
 impl FrankenConnection {
+    fn from_raw_connection(path: String, conn: fsqlite::Connection) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(FrankenInner {
+                conn,
+                in_transaction: false,
+                last_insert_rowid: 0,
+            })),
+            path,
+        }
+    }
+
     /// Open a connection with the given path.
     ///
     /// Use `":memory:"` for an in-memory database, or a file path for
@@ -56,14 +67,18 @@ impl FrankenConnection {
     pub fn open(path: impl Into<String>) -> Result<Self, Error> {
         let path = path.into();
         let conn = fsqlite::Connection::open(&path).map_err(|e| franken_to_conn_error(&e))?;
-        Ok(Self {
-            inner: Arc::new(Mutex::new(FrankenInner {
-                conn,
-                in_transaction: false,
-                last_insert_rowid: 0,
-            })),
-            path,
-        })
+        Ok(Self::from_raw_connection(path, conn))
+    }
+
+    /// Open a connection while requesting a specific page size for newly created databases.
+    pub fn open_with_page_size(
+        path: impl Into<String>,
+        page_size_bytes: u32,
+    ) -> Result<Self, Error> {
+        let path = path.into();
+        let conn = fsqlite::Connection::open_with_page_size(&path, page_size_bytes)
+            .map_err(|e| franken_to_conn_error(&e))?;
+        Ok(Self::from_raw_connection(path, conn))
     }
 
     /// Open an in-memory database.
@@ -74,6 +89,14 @@ impl FrankenConnection {
     /// Open a file-based database.
     pub fn open_file(path: impl Into<String>) -> Result<Self, Error> {
         Self::open(path)
+    }
+
+    /// Open a file-based database with a requested page size for new files.
+    pub fn open_file_with_page_size(
+        path: impl Into<String>,
+        page_size_bytes: u32,
+    ) -> Result<Self, Error> {
+        Self::open_with_page_size(path, page_size_bytes)
     }
 
     /// Get the database path.
@@ -155,9 +178,8 @@ impl FrankenConnection {
 
         // Query PRAGMA table_info to get column names
         let pragma_sql = format!("PRAGMA table_info({})", table_name);
-        let pragma_rows = match conn.query(&pragma_sql) {
-            Ok(rows) => rows,
-            Err(_) => return None,
+        let Ok(pragma_rows) = conn.query(&pragma_sql) else {
+            return None;
         };
 
         // PRAGMA table_info returns: cid, name, type, notnull, dflt_value, pk
@@ -758,9 +780,7 @@ fn infer_returning_columns(sql: &str) -> Vec<String> {
     let upper = sql.to_uppercase();
 
     // Find RETURNING keyword
-    let returning_pos = if let Some(pos) = find_keyword_at_depth_zero(&upper, "RETURNING") {
-        pos
-    } else {
+    let Some(returning_pos) = find_keyword_at_depth_zero(&upper, "RETURNING") else {
         return Vec::new();
     };
 
@@ -843,9 +863,9 @@ fn extract_identifier(s: &str) -> String {
     }
 
     // Quoted identifier
-    if trimmed.starts_with('"') {
-        if let Some(end) = trimmed[1..].find('"') {
-            return trimmed[1..end + 1].to_string();
+    if let Some(stripped) = trimmed.strip_prefix('"') {
+        if let Some(end) = stripped.find('"') {
+            return stripped[..end].to_string();
         }
         return String::new();
     }
@@ -1037,7 +1057,7 @@ fn franken_to_query_error(e: &fsqlite_error::FrankenError, sql: &str) -> Error {
         FrankenError::UniqueViolation { .. } | FrankenError::NotNullViolation { .. } => {
             QueryErrorKind::Constraint
         }
-        FrankenError::ForeignKeyViolation { .. } | FrankenError::CheckViolation { .. } => {
+        FrankenError::ForeignKeyViolation | FrankenError::CheckViolation { .. } => {
             QueryErrorKind::Constraint
         }
         FrankenError::WriteConflict { .. } | FrankenError::SerializationFailure { .. } => {

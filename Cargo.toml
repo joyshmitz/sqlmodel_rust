@@ -99,3 +99,9 @@ debug = true
 
 [profile.dev.package."*"]
 opt-level = 3
+
+[patch.crates-io]
+fsqlite = { path = "../frankensqlite/crates/fsqlite" }
+fsqlite-core = { path = "../frankensqlite/crates/fsqlite-core" }
+fsqlite-types = { path = "../frankensqlite/crates/fsqlite-types" }
+fsqlite-error = { path = "../frankensqlite/crates/fsqlite-error" }

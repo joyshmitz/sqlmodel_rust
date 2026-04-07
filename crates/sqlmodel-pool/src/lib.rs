@@ -597,7 +597,9 @@ impl<C: Connection> Pool<C> {
             let idle_count = inner.idle.len();
             inner.idle.clear();
             inner.total_count -= idle_count;
-            self.shared.connections_closed.fetch_add(idle_count as u64, Ordering::Relaxed);
+            self.shared
+                .connections_closed
+                .fetch_add(idle_count as u64, Ordering::Relaxed);
         }
     }
 

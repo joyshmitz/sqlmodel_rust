@@ -51,6 +51,8 @@ pub fn sqlite_to_value(sv: &SqliteValue) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f32::consts::PI as PI32;
+    use std::f64::consts::{E, PI as PI64};
 
     #[test]
     fn null_roundtrip() {
@@ -89,13 +91,10 @@ mod tests {
 
     #[test]
     fn float_variants() {
-        let sv = value_to_sqlite(&Value::Float(3.14));
+        let sv = value_to_sqlite(&Value::Float(PI32));
         assert!(matches!(sv, SqliteValue::Float(_)));
 
-        assert_eq!(
-            value_to_sqlite(&Value::Double(2.718)),
-            SqliteValue::Float(2.718)
-        );
+        assert_eq!(value_to_sqlite(&Value::Double(E)), SqliteValue::Float(E));
     }
 
     #[test]
@@ -163,7 +162,7 @@ mod tests {
 
     #[test]
     fn sqlite_float_to_double() {
-        let v = sqlite_to_value(&SqliteValue::Float(3.14));
-        assert_eq!(v, Value::Double(3.14));
+        let v = sqlite_to_value(&SqliteValue::Float(PI64));
+        assert_eq!(v, Value::Double(PI64));
     }
 }
