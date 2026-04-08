@@ -91,6 +91,17 @@ impl FrankenConnection {
         Self::open(path)
     }
 
+    /// Open a file-based database in schema-only read mode.
+    ///
+    /// This is appropriate for read-only inspection paths that must avoid
+    /// introducing writer semantics such as close-time checkpoints.
+    pub fn open_schema_only(path: impl Into<String>) -> Result<Self, Error> {
+        let path = path.into();
+        let conn =
+            fsqlite::Connection::open_schema_only(&path).map_err(|e| franken_to_conn_error(&e))?;
+        Ok(Self::from_raw_connection(path, conn))
+    }
+
     /// Open a file-based database with a requested page size for new files.
     pub fn open_file_with_page_size(
         path: impl Into<String>,
@@ -1443,6 +1454,38 @@ mod tests {
                 .unwrap();
             assert_eq!(rows.len(), 1);
             assert_eq!(rows[0].get(0), Some(&Value::Text("persistent".into())));
+        }
+
+        let _ = std::fs::remove_file(&db_path);
+    }
+
+    #[test]
+    fn schema_only_file_connection_reads_existing_rows() {
+        let dir = std::env::temp_dir().join("sqlmodel_franken_schema_only_test");
+        let _ = std::fs::create_dir_all(&dir);
+        let db_path = dir.join("test_file.db");
+        let path_str = db_path.display().to_string();
+
+        let _ = std::fs::remove_file(&db_path);
+
+        {
+            let conn = FrankenConnection::open_file(&path_str).unwrap();
+            conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+                .unwrap();
+            conn.execute_raw("BEGIN CONCURRENT").unwrap();
+            conn.execute_sync("INSERT INTO t VALUES (1, 'readable')", &[])
+                .unwrap();
+            conn.execute_raw("COMMIT").unwrap();
+        }
+
+        {
+            let conn = FrankenConnection::open_schema_only(&path_str).unwrap();
+            conn.execute_raw("PRAGMA busy_timeout = 250").unwrap();
+            let rows = conn
+                .query_sync("SELECT val FROM t WHERE id = 1", &[])
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get(0), Some(&Value::Text("readable".into())));
         }
 
         let _ = std::fs::remove_file(&db_path);
