@@ -24,3 +24,8 @@ target-*/
 # OS junk
 .DS_Store
 **/.DS_Store
+
+# Local read-only legacy reference clone (standalone git checkout, not a submodule)
+legacy_pydantic/
+legacy_sqlalchemy/
+legacy_sqlmodel/
