@@ -8,6 +8,19 @@ Repository: <https://github.com/Dicklesworthstone/sqlmodel_rust>
 
 ---
 
+## [0.2.2] -- 2026-04-23
+
+**Windows SQLite linking fix.** `sqlmodel-sqlite` now bundles the SQLite amalgamation via `libsqlite3-sys` and pins the rlib with an explicit `#[link(name = "sqlite3", kind = "static")]` attribute, so downstream crates that don't import a symbol from `libsqlite3-sys` no longer see the rlib elided and the static-link directives dropped at link time.
+
+### Fixed -- SQLite driver
+
+- Always bundle `libsqlite3` via `libsqlite3-sys` + feature `bundled` instead of dynamically linking the host `sqlite3` ([`50e1aca`](https://github.com/Dicklesworthstone/sqlmodel_rust/commit/50e1aca)). Fixes `LNK1181: cannot open input file 'sqlite3.lib'` on Windows MSVC and `__memcpy_chk` unresolved externs when cross-linking to musl, and removes the silent dependency on a host `libsqlite3-dev` package on GNU Linux.
+- Declare `#[link(name = "sqlite3", kind = "static")]` explicitly in `src/ffi.rs` so rustc does not elide the `libsqlite3-sys` rlib when the crate imports no items from it ([`c8bb7d7`](https://github.com/Dicklesworthstone/sqlmodel_rust/commit/c8bb7d7)). Without this, the build-script link directives were silently dropped and downstream Windows builds still failed with `__imp_sqlite3_*` unresolved symbols.
+
+Fixes [pi_agent_rust#55](https://github.com/Dicklesworthstone/pi_agent_rust/issues/55) (Windows binary missing from releases because link step fails).
+
+---
+
 ## [0.2.1] -- 2026-03-21 (Unreleased)
 
 **Dependency refresh and FrankenSQLite compatibility.** Workspace bumped to 0.2.1 with updated async runtime and SQLite bindings. No new GitHub Release yet.
