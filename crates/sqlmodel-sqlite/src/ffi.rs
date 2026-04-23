@@ -96,8 +96,17 @@ pub fn sqlite_transient() -> sqlite3_destructor_type {
     unsafe { std::mem::transmute::<isize, sqlite3_destructor_type>(SQLITE_TRANSIENT_SENTINEL) }
 }
 
-#[cfg_attr(windows, link(name = "sqlite3", kind = "static"))]
-#[cfg_attr(not(windows), link(name = "sqlite3"))]
+// Linking is owned by the `libsqlite3-sys` dependency (with the `bundled`
+// feature), which compiles the SQLite amalgamation and emits the appropriate
+// `rustc-link-lib=static=sqlite3` directive on every target. Declaring an
+// explicit #[link(name = "sqlite3")] here produced two problems:
+//   1. on musl, it asked the linker for a dynamic sqlite3 that isn't there,
+//   2. on glibc hosts with libsqlite3-dev installed, it silently bound to
+//      the host static libsqlite3.a compiled with FORTIFY_SOURCE, which
+//      then failed musl cross-links with unresolved `__memcpy_chk`.
+// The extern block below resolves against whichever sqlite3 symbols are
+// present at link time; libsqlite3-sys guarantees those are the bundled
+// ones.
 unsafe extern "C" {
     // Connection management
     pub fn sqlite3_open(filename: *const c_char, ppDb: *mut *mut sqlite3) -> c_int;

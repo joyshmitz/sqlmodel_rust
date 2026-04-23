@@ -29,8 +29,15 @@ serde_json.workspace = true
 # Optional console support
 sqlmodel-console = { workspace = true, optional = true }
 
-[target.'cfg(windows)'.dependencies]
-libsqlite3-sys = { workspace = true, features = ["bundled-windows"] }
+# libsqlite3-sys with `bundled` compiles SQLite from the vendored amalgamation
+# on every target and emits `cargo:rustc-link-lib=static=sqlite3`. That replaces
+# the previous #[link(name = "sqlite3")] dynamic-link attribute in src/ffi.rs,
+# which refused to work on musl (no host libsqlite3.so/.a) and would silently
+# pick up the host glibc libsqlite3.a on gnu Linux — tripping `__memcpy_chk`
+# unresolved symbols under musl's non-FORTIFY libc. Bundling sqlite3 makes the
+# build work on musl, Alpine, Windows, macOS, and every gnu Linux without any
+# dependency on the host's libsqlite3 package.
+libsqlite3-sys = { workspace = true, features = ["bundled"] }
 
 [build-dependencies]
 
