@@ -154,6 +154,7 @@ impl FrankenConnection {
     pub fn query_sync(&self, sql: &str, params: &[Value]) -> Result<Vec<Row>, Error> {
         let inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         let sqlite_params: Vec<SqliteValue> = params.iter().map(value_to_sqlite).collect();
+        let schema_columns = self.get_returning_star_columns(sql, &inner.conn);
 
         let franken_rows = if sqlite_params.is_empty() {
             inner.conn.query(sql)
@@ -162,8 +163,6 @@ impl FrankenConnection {
         }
         .map_err(|e| franken_to_query_error(&e, sql))?;
 
-        // For RETURNING *, get column names from table schema
-        let schema_columns = self.get_returning_star_columns(sql, &inner.conn);
         Ok(convert_rows_with_schema(
             &franken_rows,
             sql,
@@ -1146,6 +1145,24 @@ mod tests {
             .unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get(0), Some(&Value::BigInt(30)));
+    }
+
+    #[test]
+    fn returning_star_uses_schema_columns_without_reentrant_query() {
+        let conn = FrankenConnection::open_memory().unwrap();
+        conn.execute_raw("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+            .unwrap();
+
+        let rows = conn
+            .query_sync("INSERT INTO t (val) VALUES ('alpha') RETURNING *", &[])
+            .unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get_by_name("id"), Some(&Value::BigInt(1)));
+        assert_eq!(
+            rows[0].get_by_name("val"),
+            Some(&Value::Text("alpha".into()))
+        );
     }
 
     #[test]
