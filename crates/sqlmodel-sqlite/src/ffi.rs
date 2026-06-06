@@ -96,21 +96,10 @@ pub fn sqlite_transient() -> sqlite3_destructor_type {
     unsafe { std::mem::transmute::<isize, sqlite3_destructor_type>(SQLITE_TRANSIENT_SENTINEL) }
 }
 
-// Statically link sqlite3 on every platform. The `libsqlite3-sys` dep with
-// feature `bundled` (see Cargo.toml) compiles SQLite from the vendored
-// amalgamation and puts `libsqlite3.a` on the rustc native-lib search path
-// via `cargo:rustc-link-search=native=…`. We then declare the static
-// dependency explicitly here because nothing in this crate imports an item
-// from `libsqlite3-sys`, so rustc would otherwise elide its rlib and drop
-// its build-script link directives. Prior to this, the non-Windows attribute
-// was `#[link(name = "sqlite3")]` (dynamic), which:
-//   1. on musl picked up no libsqlite3 at all and failed to link, and
-//   2. on glibc hosts with libsqlite3-dev installed silently bound to the
-//      host libsqlite3.a compiled with FORTIFY_SOURCE, producing unresolved
-//      `__memcpy_chk` symbols when cross-linking for musl.
-// Using `kind = "static"` + the bundled amalgamation gives reproducible
-// behaviour across every supported target.
-#[link(name = "sqlite3", kind = "static")]
+// Native SQLite linkage is intentionally owned by the `libsqlite3-sys`
+// dependency. Its bundled feature compiles the vendored amalgamation and emits
+// the correct static `cargo:rustc-link-*` metadata; lib.rs keeps that dependency
+// linked even though these bindings are declared manually here.
 unsafe extern "C" {
     // Connection management
     pub fn sqlite3_open(filename: *const c_char, ppDb: *mut *mut sqlite3) -> c_int;
