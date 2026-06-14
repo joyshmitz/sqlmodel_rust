@@ -67,6 +67,10 @@
 //! synchronization to protect the underlying SQLite handle. This allows
 //! connections to be shared across async tasks safely.
 
+// Keep libsqlite3-sys linked so its bundled SQLite build script owns the native
+// library search path for the manual FFI declarations in ffi.rs.
+extern crate libsqlite3_sys as _;
+
 pub mod connection;
 pub mod ffi;
 pub mod types;
