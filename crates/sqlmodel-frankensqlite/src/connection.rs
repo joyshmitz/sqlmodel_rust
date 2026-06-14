@@ -10,6 +10,7 @@
 #![allow(clippy::result_large_err)]
 
 use crate::value::{sqlite_to_value, value_to_sqlite};
+use fsqlite::compat::{OpenFlags, open_with_flags};
 use fsqlite_types::value::SqliteValue;
 use sqlmodel_core::{
     Connection, Cx, IsolationLevel, Outcome, PreparedStatement, Row, TransactionOps, Value,
@@ -89,6 +90,14 @@ impl FrankenConnection {
     /// Open a file-based database.
     pub fn open_file(path: impl Into<String>) -> Result<Self, Error> {
         Self::open(path)
+    }
+
+    /// Open an existing file-based database with SQLite read-only flags.
+    pub fn open_file_read_only(path: impl Into<String>) -> Result<Self, Error> {
+        let path = path.into();
+        let conn = open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| franken_to_conn_error(&e))?;
+        Ok(Self::from_raw_connection(path, conn))
     }
 
     /// Open a file-based database in schema-only read mode.
